@@ -1093,24 +1093,15 @@ async function startBackend(): Promise<void> {
 
     mapGenerationJobQueue = new JobQueue({ logger });
 
-    // Initialize ComfyUI client - respects COMFYUI_HOST / COMFYUI_PORT env vars.
-    // Remote mode (non-localhost) disables installPath so auto-start is skipped.
-    const comfyuiHost = config.comfyui?.host || '127.0.0.1';
-    const comfyuiPort = config.comfyui?.port || 31411;
-    const isRemoteComfyUI = comfyuiHost !== '127.0.0.1' && comfyuiHost !== 'localhost';
+    // Initialize ComfyUI client - always runs locally on same machine as MCP server
     mapGenerationComfyUIClient = new ComfyUIClient({
       logger,
       config: {
-        host: comfyuiHost,
-        port: comfyuiPort,
-        ...(isRemoteComfyUI ? { installPath: undefined, autoStart: false } : {}),
+        port: config.comfyui?.port || 31411
       }
     });
 
-    logger.info('Map generation backend components initialized', {
-      comfyuiUrl: `http://${comfyuiHost}:${comfyuiPort}`,
-      remote: isRemoteComfyUI,
-    });
+    logger.info('Map generation backend components initialized (ComfyUI on localhost:31411)');
 
     // Auto-start ComfyUI if installed and autoStart is enabled
     if (mapGenerationComfyUIClient && (mapGenerationComfyUIClient as any).config?.autoStart) {
