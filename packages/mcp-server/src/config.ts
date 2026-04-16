@@ -1,8 +1,15 @@
 import { z } from 'zod';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { getFoundryDataDir, getDefaultComfyUIDir } from './utils/platform.js';
 
-dotenv.config();
+// Load env: try ~/.hermes/.env first (shared secrets), then project .env.example as fallback
+import { homedir } from 'os';
+dotenv.config({ path: path.join(homedir(), '.hermes', '.env') });
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(__dirname, '..', '..', '..');
+dotenv.config({ path: path.resolve(projectRoot, '.env.example') });
 
 const ConfigSchema = z.object({
   logLevel: z.enum(['error', 'warn', 'info', 'debug']).default('info'),

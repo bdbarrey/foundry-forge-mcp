@@ -34,6 +34,10 @@ import { MapGenerationTools } from './tools/map-generation.js';
 
 import { TokenManipulationTools } from './tools/token-manipulation.js';
 
+import { NpcPortraitTools } from './tools/npc-portrait.js';
+
+import { ForgeAssetsClient } from './forge-assets-client.js';
+
 import { DSA5CharacterCreator } from './systems/dsa5/character-creator.js';
 
 const CONTROL_HOST = '127.0.0.1';
@@ -1118,6 +1122,27 @@ async function startBackend(): Promise<void> {
     logger.warn('Failed to initialize map generation components', { error });
   }
 
+  // Initialize Forge Assets client for NPC portrait uploads
+  let forgeAssetsClient: ForgeAssetsClient | null = null;
+  const forgeApiKey = process.env.FORGE_ASSETS_API_KEY;
+  if (forgeApiKey) {
+    forgeAssetsClient = new ForgeAssetsClient({
+      logger,
+      config: { apiKey: forgeApiKey },
+    });
+    logger.info('Forge Assets client initialized');
+  } else {
+    logger.warn('FORGE_ASSETS_API_KEY not set — portrait uploads to Forge will be unavailable');
+  }
+
+  // Initialize NPC portrait tools (reuses same ComfyUI client as map generation)
+  const npcPortraitTools = new NpcPortraitTools({
+    logger,
+    comfyuiClient: mapGenerationComfyUIClient,
+    forgeAssetsClient,
+    foundryClient,
+  });
+
   // Set up global ComfyUI message handlers for WebSocket messages from Foundry BEFORE creating map tools
 
   (globalThis as any).backendComfyUIHandlers = {
@@ -1311,6 +1336,8 @@ async function startBackend(): Promise<void> {
 
     ...mapGenerationTools.getToolDefinitions(),
 
+    ...npcPortraitTools.getToolDefinitions(),
+
   ];
 
   // Start Foundry connector (owns app port 31415)
@@ -1483,6 +1510,24 @@ async function startBackend(): Promise<void> {
 
                   break;
 
+                case 'duplicate-actor':
+
+                  result = await actorCreationTools.handleDuplicateActor(args);
+
+                  break;
+
+                case 'upload-actor-image':
+
+                  result = await actorCreationTools.handleUploadActorImage(args);
+
+                  break;
+
+                case 'update-actor':
+
+                  result = await actorCreationTools.handleUpdateActor(args);
+
+                  break;
+
                 // DSA5 character creation tools
 
                 case 'create-dsa5-character-from-archetype':
@@ -1632,6 +1677,26 @@ async function startBackend(): Promise<void> {
                 case 'switch-scene':
 
                   result = await mapGenerationTools.switchScene(args);
+
+                  break;
+
+                // NPC portrait generation tools
+
+                case 'generate-npc-portrait':
+
+                  result = await npcPortraitTools.handleGeneratePortrait(args);
+
+                  break;
+
+                case 'check-portrait-status':
+
+                  result = await npcPortraitTools.handleCheckPortraitStatus(args);
+
+                  break;
+
+                case 'cancel-portrait-job':
+
+                  result = await npcPortraitTools.handleCancelPortraitJob(args);
 
                   break;
 

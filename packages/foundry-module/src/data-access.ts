@@ -7,6 +7,7 @@ interface CharacterInfo {
   name: string;
   type: string;
   img?: string;
+  folder?: string | null;
   system: Record<string, unknown>;
   items: CharacterItem[];
   effects: CharacterEffect[];
@@ -1155,6 +1156,7 @@ export class FoundryDataAccess {
       name: actor.name || '',
       type: actor.type,
       ...(actor.img ? { img: actor.img } : {}),
+      folder: (actor as any).folder?.name || null,
       system: this.sanitizeData((actor as any).system),
       items: actor.items.map(item => {
         return {
@@ -2799,13 +2801,14 @@ export class FoundryDataAccess {
   /**
    * List all actors with basic information
    */
-  async listActors(): Promise<Array<{ id: string; name: string; type: string; img?: string }>> {
+  async listActors(): Promise<Array<{ id: string; name: string; type: string; img?: string; folder?: string | null }>> {
 
     return game.actors.map(actor => ({
       id: actor.id || '',
       name: actor.name || '',
       type: actor.type,
       ...(actor.img ? { img: actor.img } : {}),
+      folder: (actor as any).folder?.name || null,
     }));
   }
 
@@ -3483,6 +3486,99 @@ export class FoundryDataAccess {
       this.auditLog('createActorFromCompendiumEntry', request, 'failure', error instanceof Error ? error.message : 'Unknown error');
       throw error;
     }
+  }
+
+  /**
+   * Duplicate an existing actor into a target folder with optional name override
+   */
+  async duplicateActor(request: {
+    sourceActorId?: string;
+    sourceActorName?: string;
+    newName?: string;
+    targetFolder: string;
+  }): Promise<{ success: boolean; actorId: string; actorName: string }> {
+    this.validateFoundryState();
+
+    const { sourceActorId, sourceActorName, newName, targetFolder } = request;
+
+    // Find source actor by ID or name
+    let sourceActor: Actor | undefined;
+    if (sourceActorId) {
+      sourceActor = game.actors.get(sourceActorId);
+    }
+    if (!sourceActor && sourceActorName) {
+      sourceActor = game.actors.find(a =>
+        a.name?.toLowerCase() === sourceActorName.toLowerCase()
+      );
+    }
+    if (!sourceActor) {
+      throw new Error(`Source actor not found: ${sourceActorId || sourceActorName}`);
+    }
+
+    // Get or create target folder
+    const folderId = await this.getOrCreateFolder(targetFolder, 'Actor');
+
+    // Build actor data from source
+    const sourceData = sourceActor.toObject() as any;
+    const actorData = {
+      name: newName || sourceData.name,
+      type: sourceData.type,
+      img: sourceData.img,
+      system: sourceData.system || {},
+      items: sourceData.items || [],
+      effects: sourceData.effects || [],
+      folder: folderId,
+      prototypeToken: sourceData.prototypeToken,
+    };
+
+    const newActor = await Actor.create(actorData);
+    if (!newActor) {
+      throw new Error(`Failed to duplicate actor "${sourceActor.name}"`);
+    }
+
+    this.auditLog('duplicateActor', request, 'success');
+    return {
+      success: true,
+      actorId: newActor.id || '',
+      actorName: newActor.name || '',
+    };
+  }
+
+  /**
+   * Update an existing actor's data using Foundry dot-notation updates
+   */
+  async updateActorData(request: {
+    actorId?: string;
+    actorName?: string;
+    updates: Record<string, any>;
+  }): Promise<{ success: boolean; actorId: string; actorName: string; updatedFields: string[] }> {
+    this.validateFoundryState();
+
+    const { actorId, actorName, updates } = request;
+
+    // Find actor by ID or name
+    let actor: Actor | undefined;
+    if (actorId) {
+      actor = game.actors.get(actorId);
+    }
+    if (!actor && actorName) {
+      actor = game.actors.find(a =>
+        a.name?.toLowerCase() === actorName.toLowerCase()
+      );
+    }
+    if (!actor) {
+      throw new Error(`Actor not found: ${actorId || actorName}`);
+    }
+
+    await actor.update(updates);
+
+    this.auditLog('updateActorData', request, 'success');
+    return {
+      success: true,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      updatedFields: Object.keys(updates),
+    };
   }
 
   /**

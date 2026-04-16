@@ -103,6 +103,76 @@ export class ActorCreationTools {
           required: ['packId', 'entryId'],
         },
       },
+      {
+        name: 'duplicate-actor',
+        description: 'Duplicate an existing actor into a target folder. Use this to copy actors from one folder (e.g., "Clay Golem") to another (e.g., "My NPCs"). Optionally rename the copy.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sourceActorId: {
+              type: 'string',
+              description: 'ID of the actor to duplicate (use this or sourceActorName)',
+            },
+            sourceActorName: {
+              type: 'string',
+              description: 'Name of the actor to duplicate (use this or sourceActorId)',
+            },
+            newName: {
+              type: 'string',
+              description: 'Optional new name for the duplicated actor. If omitted, keeps the original name.',
+            },
+            targetFolder: {
+              type: 'string',
+              description: 'Name of the folder to place the duplicate in (created if it does not exist)',
+            },
+          },
+          required: ['targetFolder'],
+        },
+      },
+      {
+        name: 'upload-actor-image',
+        description: 'Upload a base64-encoded image to Foundry and optionally apply it as an actor\'s portrait and token image.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            filename: {
+              type: 'string',
+              description: 'Filename for the uploaded image (e.g., "Izek_Strazni.png")',
+            },
+            imageData: {
+              type: 'string',
+              description: 'Base64-encoded image data (PNG, JPEG, or WebP)',
+            },
+            actorId: {
+              type: 'string',
+              description: 'Optional actor ID to apply the image to as portrait and token',
+            },
+          },
+          required: ['filename', 'imageData'],
+        },
+      },
+      {
+        name: 'update-actor',
+        description: 'Update an existing actor\'s data using Foundry dot-notation. Can update any actor field including system data, HP, AC, abilities, etc.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            actorId: {
+              type: 'string',
+              description: 'ID of the actor to update (use this or actorName)',
+            },
+            actorName: {
+              type: 'string',
+              description: 'Name of the actor to update (use this or actorId)',
+            },
+            updates: {
+              type: 'object',
+              description: 'Object with Foundry dot-notation keys and values to update. Example: {"system.attributes.hp.max": 45, "system.abilities.str.value": 18}',
+            },
+          },
+          required: ['updates'],
+        },
+      },
     ];
   }
 
@@ -212,6 +282,122 @@ export class ActorCreationTools {
 
 
 
+
+  /**
+   * Handle duplicating an actor into a target folder
+   */
+  async handleDuplicateActor(args: any): Promise<any> {
+    const schema = z.object({
+      sourceActorId: z.string().optional(),
+      sourceActorName: z.string().optional(),
+      newName: z.string().optional(),
+      targetFolder: z.string().min(1, 'Target folder name is required'),
+    }).refine(data => data.sourceActorId || data.sourceActorName, {
+      message: 'Either sourceActorId or sourceActorName is required',
+    });
+
+    const validated = schema.parse(args);
+
+    this.logger.info('Duplicating actor', {
+      source: validated.sourceActorId || validated.sourceActorName,
+      targetFolder: validated.targetFolder,
+      newName: validated.newName,
+    });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.duplicateActor', validated);
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to duplicate actor');
+      }
+
+      return {
+        success: true,
+        actorId: result.actorId,
+        actorName: result.actorName,
+        message: `Duplicated actor as "${result.actorName}" (${result.actorId}) into folder "${validated.targetFolder}"`,
+      };
+    } catch (error) {
+      this.errorHandler.handleToolError(error, 'duplicate-actor', 'actor duplication');
+    }
+  }
+
+  /**
+   * Handle uploading an image for an actor
+   */
+  async handleUploadActorImage(args: any): Promise<any> {
+    const schema = z.object({
+      filename: z.string().min(1, 'Filename is required'),
+      imageData: z.string().min(1, 'Image data is required'),
+      actorId: z.string().optional(),
+    });
+
+    const validated = schema.parse(args);
+
+    this.logger.info('Uploading actor image', {
+      filename: validated.filename,
+      imageDataLength: validated.imageData.length,
+      actorId: validated.actorId,
+    });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.uploadActorImage', validated);
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to upload actor image');
+      }
+
+      return {
+        success: true,
+        path: result.path,
+        filename: result.filename,
+        actorUpdated: result.actorUpdated,
+        message: result.message,
+      };
+    } catch (error) {
+      this.errorHandler.handleToolError(error, 'upload-actor-image', 'actor image upload');
+    }
+  }
+
+  /**
+   * Handle updating an actor's data
+   */
+  async handleUpdateActor(args: any): Promise<any> {
+    const schema = z.object({
+      actorId: z.string().optional(),
+      actorName: z.string().optional(),
+      updates: z.record(z.any()).refine(obj => Object.keys(obj).length > 0, {
+        message: 'At least one update field is required',
+      }),
+    }).refine(data => data.actorId || data.actorName, {
+      message: 'Either actorId or actorName is required',
+    });
+
+    const validated = schema.parse(args);
+
+    this.logger.info('Updating actor', {
+      actor: validated.actorId || validated.actorName,
+      updateFields: Object.keys(validated.updates),
+    });
+
+    try {
+      const result = await this.foundryClient.query('foundry-mcp-bridge.updateActorData', validated);
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to update actor');
+      }
+
+      return {
+        success: true,
+        actorId: result.actorId,
+        actorName: result.actorName,
+        updatedFields: result.updatedFields,
+        message: `Updated ${result.updatedFields.length} field(s) on "${result.actorName}"`,
+      };
+    } catch (error) {
+      this.errorHandler.handleToolError(error, 'update-actor', 'actor update');
+    }
+  }
 
   /**
    * Format compendium entry response

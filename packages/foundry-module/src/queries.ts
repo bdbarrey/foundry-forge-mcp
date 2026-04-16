@@ -91,6 +91,11 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.cancel-map-job`] = this.handleCancelMapJob.bind(this);
     CONFIG.queries[`${modulePrefix}.upload-generated-map`] = this.handleUploadGeneratedMap.bind(this);
 
+    // Actor management queries
+    CONFIG.queries[`${modulePrefix}.duplicateActor`] = this.handleDuplicateActor.bind(this);
+    CONFIG.queries[`${modulePrefix}.uploadActorImage`] = this.handleUploadActorImage.bind(this);
+    CONFIG.queries[`${modulePrefix}.updateActorData`] = this.handleUpdateActorData.bind(this);
+
     // Item usage queries
     CONFIG.queries[`${modulePrefix}.useItem`] = this.handleUseItem.bind(this);
 
@@ -1089,6 +1094,127 @@ export class QueryHandlers {
         error: error.message || 'Failed to upload generated map',
         success: false
       };
+    }
+  }
+
+  // ===== ACTOR MANAGEMENT HANDLERS =====
+
+  /**
+   * Handle duplicating an actor into a target folder
+   */
+  private async handleDuplicateActor(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      return await this.dataAccess.duplicateActor({
+        sourceActorId: data.sourceActorId,
+        sourceActorName: data.sourceActorName,
+        newName: data.newName,
+        targetFolder: data.targetFolder,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to duplicate actor:`, error);
+      return { error: error.message || 'Failed to duplicate actor', success: false };
+    }
+  }
+
+  /**
+   * Handle uploading an image for an actor (base64 → FilePicker)
+   * If actorId is provided, also updates the actor's portrait and token image
+   */
+  private async handleUploadActorImage(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      if (!data.filename || typeof data.filename !== 'string') {
+        throw new Error('Filename is required and must be a string');
+      }
+      if (!data.imageData || typeof data.imageData !== 'string') {
+        throw new Error('Image data is required and must be a base64 string');
+      }
+
+      // Validate filename for security (prevent path traversal)
+      const safeFilename = data.filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+      if (!safeFilename.endsWith('.png') && !safeFilename.endsWith('.jpg') && !safeFilename.endsWith('.jpeg') && !safeFilename.endsWith('.webp')) {
+        throw new Error('Only PNG, JPEG, and WebP images are supported');
+      }
+
+      // Convert base64 to Blob
+      const byteCharacters = atob(data.imageData);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const mimeType = safeFilename.endsWith('.png') ? 'image/png' : safeFilename.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
+      const blob = new Blob([byteArray], { type: mimeType });
+      const file = new File([blob], safeFilename, { type: mimeType });
+
+      // Upload to world-specific npc-portraits folder
+      const worldId = (game as any).world?.id || 'unknown-world';
+      const uploadPath = `worlds/${worldId}/npc-portraits`;
+      try {
+        const FilePickerAPI = (globalThis as any).foundry?.applications?.apps?.FilePicker?.implementation || (globalThis as any).FilePicker;
+        await FilePickerAPI.createDirectory('data', uploadPath, { bucket: null });
+      } catch (dirError: any) {
+        if (!dirError.message?.includes('EEXIST') && !dirError.message?.includes('already exists')) {
+          console.warn(`[${MODULE_ID}] Directory creation warning:`, dirError.message);
+        }
+      }
+
+      const FilePickerAPI = (globalThis as any).foundry?.applications?.apps?.FilePicker?.implementation || (globalThis as any).FilePicker;
+      const response = await FilePickerAPI.upload('data', uploadPath, file, {}, { notify: false });
+
+      const imagePath = response.path;
+
+      // If actorId provided, update the actor's portrait and token image
+      if (data.actorId) {
+        const actor = game.actors.get(data.actorId);
+        if (actor) {
+          await actor.update({
+            img: imagePath,
+            'prototypeToken.texture.src': imagePath,
+          });
+        }
+      }
+
+      return {
+        success: true,
+        path: imagePath,
+        filename: safeFilename,
+        actorUpdated: !!data.actorId,
+        message: `Image uploaded to ${imagePath}${data.actorId ? ' and applied to actor' : ''}`,
+      };
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to upload actor image:`, error);
+      return { error: error.message || 'Failed to upload actor image', success: false };
+    }
+  }
+
+  /**
+   * Handle updating actor data with Foundry dot-notation updates
+   */
+  private async handleUpdateActorData(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      return await this.dataAccess.updateActorData({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        updates: data.updates,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to update actor data:`, error);
+      return { error: error.message || 'Failed to update actor data', success: false };
     }
   }
 
