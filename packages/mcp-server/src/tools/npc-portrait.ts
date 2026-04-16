@@ -212,9 +212,15 @@ export class NpcPortraitTools {
     if (!job) return;
 
     try {
-      // Ensure ComfyUI is running
+      // Ensure ComfyUI is reachable. For remote ComfyUI (host != localhost),
+      // we can't start the service — just fail fast with a clear message.
       const health = await this.comfyuiClient!.checkHealth();
       if (!health.available) {
+        const clientConfig = (this.comfyuiClient as any).config;
+        const isRemote = clientConfig?.host && clientConfig.host !== '127.0.0.1' && clientConfig.host !== 'localhost';
+        if (isRemote) {
+          throw new Error(`Remote ComfyUI unreachable at http://${clientConfig.host}:${clientConfig.port}. Is it running?`);
+        }
         await this.comfyuiClient!.startService();
       }
 
