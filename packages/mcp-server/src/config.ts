@@ -4,11 +4,15 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { getFoundryDataDir, getDefaultComfyUIDir } from './utils/platform.js';
 
-// Load env: try ~/.hermes/.env first (shared secrets), then project .env.example as fallback
+// Load env in priority order (first hit wins — dotenv doesn't overwrite existing vars):
+//   1. ~/.hermes/.env (BenOS shared secrets on desktop WSL)
+//   2. project-root .env (laptop Claude Desktop)
+//   3. project-root .env.example (fallback/template)
 import { homedir } from 'os';
-dotenv.config({ path: path.join(homedir(), '.hermes', '.env') });
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..', '..', '..');
+dotenv.config({ path: path.join(homedir(), '.hermes', '.env') });
+dotenv.config({ path: path.resolve(projectRoot, '.env') });
 dotenv.config({ path: path.resolve(projectRoot, '.env.example') });
 
 const ConfigSchema = z.object({
