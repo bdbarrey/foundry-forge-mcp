@@ -3582,6 +3582,105 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Resolve an Actor by id or name. Throws if not found.
+   */
+  private resolveActor(request: { actorId?: string; actorName?: string }): Actor {
+    this.validateFoundryState();
+    let actor: Actor | undefined;
+    if (request.actorId) {
+      actor = game.actors.get(request.actorId);
+    }
+    if (!actor && request.actorName) {
+      const target = request.actorName.toLowerCase();
+      actor = game.actors.find(a => a.name?.toLowerCase() === target);
+    }
+    if (!actor) {
+      throw new Error(`Actor not found: ${request.actorId || request.actorName}`);
+    }
+    return actor;
+  }
+
+  /**
+   * Add items (features, spells, equipment) to an actor via createEmbeddedDocuments.
+   */
+  async addActorItems(request: {
+    actorId?: string;
+    actorName?: string;
+    items: Record<string, any>[];
+  }): Promise<{ success: boolean; actorId: string; actorName: string; added: Array<{ _id: string; name: string; type: string }> }> {
+    const actor = this.resolveActor(request);
+    if (!request.items || request.items.length === 0) {
+      throw new Error('items array is empty');
+    }
+    const created = await (actor as any).createEmbeddedDocuments('Item', request.items);
+    const added = (created || []).map((doc: any) => ({
+      _id: doc.id || doc._id,
+      name: doc.name,
+      type: doc.type,
+    }));
+    this.auditLog('addActorItems', { actor: actor.name, count: added.length }, 'success');
+    return {
+      success: true,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      added,
+    };
+  }
+
+  /**
+   * Update existing items on an actor via updateEmbeddedDocuments.
+   * Each entry must include `_id`.
+   */
+  async updateActorItems(request: {
+    actorId?: string;
+    actorName?: string;
+    updates: Record<string, any>[];
+  }): Promise<{ success: boolean; actorId: string; actorName: string; updated: Array<{ _id: string; name: string }> }> {
+    const actor = this.resolveActor(request);
+    if (!request.updates || request.updates.length === 0) {
+      throw new Error('updates array is empty');
+    }
+    for (const u of request.updates) {
+      if (!u._id) throw new Error('each update entry must include `_id`');
+    }
+    const updated = await (actor as any).updateEmbeddedDocuments('Item', request.updates);
+    const report = (updated || []).map((doc: any) => ({
+      _id: doc.id || doc._id,
+      name: doc.name,
+    }));
+    this.auditLog('updateActorItems', { actor: actor.name, count: report.length }, 'success');
+    return {
+      success: true,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      updated: report,
+    };
+  }
+
+  /**
+   * Remove items from an actor via deleteEmbeddedDocuments.
+   */
+  async removeActorItems(request: {
+    actorId?: string;
+    actorName?: string;
+    itemIds: string[];
+  }): Promise<{ success: boolean; actorId: string; actorName: string; removed: string[] }> {
+    const actor = this.resolveActor(request);
+    if (!request.itemIds || request.itemIds.length === 0) {
+      throw new Error('itemIds array is empty');
+    }
+    const deleted = await (actor as any).deleteEmbeddedDocuments('Item', request.itemIds);
+    const removed = (deleted || []).map((doc: any) => doc.id || doc._id).filter(Boolean);
+    this.auditLog('removeActorItems', { actor: actor.name, count: removed.length }, 'success');
+    return {
+      success: true,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      removed,
+    };
+  }
+
+  /**
    * Get full compendium document with all embedded data
    */
   async getCompendiumDocumentFull(packId: string, documentId: string): Promise<CompendiumEntryFull> {
@@ -4574,7 +4673,7 @@ export class FoundryDataAccess {
 
         // Send socket request to GM
         if (game.socket) {
-          game.socket.emit('module.foundry-mcp-bridge', {
+          game.socket.emit('module.foundry-forge-mcp', {
             type: 'requestMessageUpdate',
             buttonId: buttonId,
             userId: userId,
@@ -4984,7 +5083,7 @@ export class FoundryDataAccess {
         sort: 0,
         parent: null,
         flags: {
-          'foundry-mcp-bridge': {
+          'foundry-forge-mcp': {
             mcpGenerated: true,
             createdAt: new Date().toISOString(),
             questContext: type === 'JournalEntry' ? folderName : undefined
@@ -5597,7 +5696,7 @@ export class FoundryDataAccess {
             tokenIds.push(selfToken.id);
             resolvedTargetNames.push(actor.name);
           } else {
-            console.warn(`[foundry-mcp-bridge] No token found on scene for actor "${actor.name}" (self)`);
+            console.warn(`[foundry-forge-mcp] No token found on scene for actor "${actor.name}" (self)`);
           }
           continue;
         }
@@ -5613,14 +5712,14 @@ export class FoundryDataAccess {
           tokenIds.push(targetToken.id);
           resolvedTargetNames.push(targetToken.name || targetToken.actor?.name || targetIdentifier);
         } else {
-          console.warn(`[foundry-mcp-bridge] Target not found: "${targetIdentifier}"`);
+          console.warn(`[foundry-forge-mcp] Target not found: "${targetIdentifier}"`);
         }
       }
 
       // Set targets using Foundry's targeting system
       if (tokenIds.length > 0 && game.user) {
         await (game.user as any).updateTokenTargets(tokenIds);
-        console.log(`[foundry-mcp-bridge] Set targets: ${resolvedTargetNames.join(', ')}`);
+        console.log(`[foundry-forge-mcp] Set targets: ${resolvedTargetNames.join(', ')}`);
       }
     }
 
@@ -5654,34 +5753,34 @@ export class FoundryDataAccess {
 
         // Fire and forget - don't await, as dialogs block the promise
         itemAny.use(useOptions).catch((err: Error) => {
-          console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+          console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
         });
       } else if (typeof itemAny.toChat === 'function') {
         // PF2e and some other systems use toChat
         if (typeof itemAny.toMessage === 'function') {
           itemAny.toMessage(undefined, { create: true }).catch((err: Error) => {
-            console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+            console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
           });
         } else {
           itemAny.toChat().catch((err: Error) => {
-            console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+            console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
           });
         }
       } else if (typeof itemAny.roll === 'function') {
         // Some items have a roll method
         itemAny.roll().catch((err: Error) => {
-          console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+          console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
         });
       } else if (systemId === 'dsa5') {
         // DSA5 specific handling
         if (item.type === 'spell' || item.type === 'liturgy' || item.type === 'ceremony' || item.type === 'ritual') {
           if (typeof itemAny.postItem === 'function') {
             itemAny.postItem().catch((err: Error) => {
-              console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+              console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
             });
           } else if (typeof itemAny.setupEffect === 'function') {
             itemAny.setupEffect().catch((err: Error) => {
-              console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+              console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
             });
           } else {
             // Fallback: create a chat message describing the item
@@ -5695,7 +5794,7 @@ export class FoundryDataAccess {
         } else {
           if (typeof itemAny.postItem === 'function') {
             itemAny.postItem().catch((err: Error) => {
-              console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+              console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
             });
           }
         }

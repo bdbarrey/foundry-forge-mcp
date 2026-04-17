@@ -95,6 +95,9 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.duplicateActor`] = this.handleDuplicateActor.bind(this);
     CONFIG.queries[`${modulePrefix}.uploadActorImage`] = this.handleUploadActorImage.bind(this);
     CONFIG.queries[`${modulePrefix}.updateActorData`] = this.handleUpdateActorData.bind(this);
+    CONFIG.queries[`${modulePrefix}.addActorItems`] = this.handleAddActorItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.updateActorItems`] = this.handleUpdateActorItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.removeActorItems`] = this.handleRemoveActorItems.bind(this);
 
     // Item usage queries
     CONFIG.queries[`${modulePrefix}.useItem`] = this.handleUseItem.bind(this);
@@ -1215,6 +1218,66 @@ export class QueryHandlers {
     } catch (error: any) {
       console.error(`[${MODULE_ID}] Failed to update actor data:`, error);
       return { error: error.message || 'Failed to update actor data', success: false };
+    }
+  }
+
+  /**
+   * Handle adding items (features, spells, equipment) to an actor
+   */
+  private async handleAddActorItems(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      return await this.dataAccess.addActorItems({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        items: data.items,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to add actor items:`, error);
+      return { error: error.message || 'Failed to add actor items', success: false };
+    }
+  }
+
+  /**
+   * Handle updating items on an actor
+   */
+  private async handleUpdateActorItems(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      return await this.dataAccess.updateActorItems({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        updates: data.updates,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to update actor items:`, error);
+      return { error: error.message || 'Failed to update actor items', success: false };
+    }
+  }
+
+  /**
+   * Handle removing items from an actor
+   */
+  private async handleRemoveActorItems(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      return await this.dataAccess.removeActorItems({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        itemIds: data.itemIds,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to remove actor items:`, error);
+      return { error: error.message || 'Failed to remove actor items', success: false };
     }
   }
 

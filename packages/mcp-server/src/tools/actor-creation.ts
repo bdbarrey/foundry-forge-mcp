@@ -173,6 +173,74 @@ export class ActorCreationTools {
           required: ['updates'],
         },
       },
+      {
+        name: 'set-actor-image',
+        description: 'Set an actor\'s portrait (img) and prototype token texture to the given URL. Use this after uploading an NPC portrait to Forge to wire the CDN URL onto the Foundry actor in one call.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            actorId: { type: 'string', description: 'ID of the actor (use this or actorName)' },
+            actorName: { type: 'string', description: 'Name of the actor (use this or actorId)' },
+            imageUrl: { type: 'string', description: 'URL or Foundry-relative path to the image (e.g., "https://assets.forge-vtt.com/.../Doru.png")' },
+            applyToToken: { type: 'boolean', description: 'Also set prototypeToken.texture.src (default: true)', default: true },
+          },
+          required: ['imageUrl'],
+        },
+      },
+      {
+        name: 'add-actor-items',
+        description: 'Add one or more items (features, spells, equipment) to an existing actor via createEmbeddedDocuments. Use when Reloaded adds features or spells not present on the base creature.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            actorId: { type: 'string', description: 'ID of the actor (use this or actorName)' },
+            actorName: { type: 'string', description: 'Name of the actor (use this or actorId)' },
+            items: {
+              type: 'array',
+              description: 'Array of full Foundry item documents. Each must include name, type, and system data. Example: [{"name":"Rampage","type":"feat","system":{...}}]',
+              items: { type: 'object' },
+              minItems: 1,
+            },
+          },
+          required: ['items'],
+        },
+      },
+      {
+        name: 'update-actor-items',
+        description: 'Update one or more existing items on an actor via updateEmbeddedDocuments. Use for damage formula tweaks, description edits, feature text changes. Each update must include the item _id.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            actorId: { type: 'string', description: 'ID of the actor (use this or actorName)' },
+            actorName: { type: 'string', description: 'Name of the actor (use this or actorId)' },
+            updates: {
+              type: 'array',
+              description: 'Array of partial item docs. Each must include _id. Example: [{"_id":"abc123","system.damage.parts":[["2d8+3","slashing"]]}]',
+              items: { type: 'object' },
+              minItems: 1,
+            },
+          },
+          required: ['updates'],
+        },
+      },
+      {
+        name: 'remove-actor-items',
+        description: 'Remove one or more items from an actor via deleteEmbeddedDocuments. Use when Reloaded replaces baseline features with new ones.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            actorId: { type: 'string', description: 'ID of the actor (use this or actorName)' },
+            actorName: { type: 'string', description: 'Name of the actor (use this or actorId)' },
+            itemIds: {
+              type: 'array',
+              description: 'Array of item _ids to delete from the actor',
+              items: { type: 'string' },
+              minItems: 1,
+            },
+          },
+          required: ['itemIds'],
+        },
+      },
     ];
   }
 
@@ -215,7 +283,7 @@ export class ActorCreationTools {
       }
 
       // Create the actors via Foundry module using exact pack/item IDs
-      const result = await this.foundryClient.query('foundry-mcp-bridge.createActorFromCompendium', {
+      const result = await this.foundryClient.query('foundry-forge-mcp.createActorFromCompendium', {
         packId,
         itemId,
         customNames: customNames.slice(0, finalQuantity),
@@ -256,7 +324,7 @@ export class ActorCreationTools {
     this.logger.info('Getting full compendium entry', { packId, entryId });
 
     try {
-      const fullEntry = await this.foundryClient.query('foundry-mcp-bridge.getCompendiumDocumentFull', {
+      const fullEntry = await this.foundryClient.query('foundry-forge-mcp.getCompendiumDocumentFull', {
         packId,
         documentId: entryId,
       });
@@ -305,7 +373,7 @@ export class ActorCreationTools {
     });
 
     try {
-      const result = await this.foundryClient.query('foundry-mcp-bridge.duplicateActor', validated);
+      const result = await this.foundryClient.query('foundry-forge-mcp.duplicateActor', validated);
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to duplicate actor');
@@ -341,7 +409,7 @@ export class ActorCreationTools {
     });
 
     try {
-      const result = await this.foundryClient.query('foundry-mcp-bridge.uploadActorImage', validated);
+      const result = await this.foundryClient.query('foundry-forge-mcp.uploadActorImage', validated);
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to upload actor image');
@@ -381,7 +449,7 @@ export class ActorCreationTools {
     });
 
     try {
-      const result = await this.foundryClient.query('foundry-mcp-bridge.updateActorData', validated);
+      const result = await this.foundryClient.query('foundry-forge-mcp.updateActorData', validated);
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to update actor');
@@ -396,6 +464,169 @@ export class ActorCreationTools {
       };
     } catch (error) {
       this.errorHandler.handleToolError(error, 'update-actor', 'actor update');
+    }
+  }
+
+  /**
+   * Handle setting an actor's image (portrait + token) from a URL
+   */
+  async handleSetActorImage(args: any): Promise<any> {
+    const schema = z.object({
+      actorId: z.string().optional(),
+      actorName: z.string().optional(),
+      imageUrl: z.string().min(1, 'imageUrl is required'),
+      applyToToken: z.boolean().default(true),
+    }).refine(data => data.actorId || data.actorName, {
+      message: 'Either actorId or actorName is required',
+    });
+
+    const validated = schema.parse(args);
+    const updates: Record<string, any> = { img: validated.imageUrl };
+    if (validated.applyToToken) {
+      updates['prototypeToken.texture.src'] = validated.imageUrl;
+    }
+
+    this.logger.info('Setting actor image', {
+      actor: validated.actorId || validated.actorName,
+      imageUrl: validated.imageUrl,
+      applyToToken: validated.applyToToken,
+    });
+
+    try {
+      const result = await this.foundryClient.query('foundry-forge-mcp.updateActorData', {
+        actorId: validated.actorId,
+        actorName: validated.actorName,
+        updates,
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to set actor image');
+      }
+
+      return {
+        success: true,
+        actorId: result.actorId,
+        actorName: result.actorName,
+        imageUrl: validated.imageUrl,
+        tokenUpdated: validated.applyToToken,
+        message: `Set image on "${result.actorName}" to ${validated.imageUrl}`,
+      };
+    } catch (error) {
+      this.errorHandler.handleToolError(error, 'set-actor-image', 'actor image update');
+    }
+  }
+
+  /**
+   * Handle adding items to an actor
+   */
+  async handleAddActorItems(args: any): Promise<any> {
+    const schema = z.object({
+      actorId: z.string().optional(),
+      actorName: z.string().optional(),
+      items: z.array(z.record(z.any())).min(1, 'At least one item is required'),
+    }).refine(data => data.actorId || data.actorName, {
+      message: 'Either actorId or actorName is required',
+    });
+
+    const validated = schema.parse(args);
+
+    this.logger.info('Adding items to actor', {
+      actor: validated.actorId || validated.actorName,
+      itemCount: validated.items.length,
+    });
+
+    try {
+      const result = await this.foundryClient.query('foundry-forge-mcp.addActorItems', validated);
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to add items');
+      }
+      return {
+        success: true,
+        actorId: result.actorId,
+        actorName: result.actorName,
+        added: result.added,
+        message: `Added ${result.added.length} item(s) to "${result.actorName}"`,
+      };
+    } catch (error) {
+      this.errorHandler.handleToolError(error, 'add-actor-items', 'add actor items');
+    }
+  }
+
+  /**
+   * Handle updating items on an actor
+   */
+  async handleUpdateActorItems(args: any): Promise<any> {
+    const schema = z.object({
+      actorId: z.string().optional(),
+      actorName: z.string().optional(),
+      updates: z.array(z.record(z.any())).min(1, 'At least one update is required'),
+    }).refine(data => data.actorId || data.actorName, {
+      message: 'Either actorId or actorName is required',
+    });
+
+    const validated = schema.parse(args);
+
+    for (const upd of validated.updates) {
+      if (!upd._id) {
+        throw new Error('Each update entry must include `_id` (item id)');
+      }
+    }
+
+    this.logger.info('Updating items on actor', {
+      actor: validated.actorId || validated.actorName,
+      updateCount: validated.updates.length,
+    });
+
+    try {
+      const result = await this.foundryClient.query('foundry-forge-mcp.updateActorItems', validated);
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to update items');
+      }
+      return {
+        success: true,
+        actorId: result.actorId,
+        actorName: result.actorName,
+        updated: result.updated,
+        message: `Updated ${result.updated.length} item(s) on "${result.actorName}"`,
+      };
+    } catch (error) {
+      this.errorHandler.handleToolError(error, 'update-actor-items', 'update actor items');
+    }
+  }
+
+  /**
+   * Handle removing items from an actor
+   */
+  async handleRemoveActorItems(args: any): Promise<any> {
+    const schema = z.object({
+      actorId: z.string().optional(),
+      actorName: z.string().optional(),
+      itemIds: z.array(z.string()).min(1, 'At least one itemId is required'),
+    }).refine(data => data.actorId || data.actorName, {
+      message: 'Either actorId or actorName is required',
+    });
+
+    const validated = schema.parse(args);
+
+    this.logger.info('Removing items from actor', {
+      actor: validated.actorId || validated.actorName,
+      itemCount: validated.itemIds.length,
+    });
+
+    try {
+      const result = await this.foundryClient.query('foundry-forge-mcp.removeActorItems', validated);
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to remove items');
+      }
+      return {
+        success: true,
+        actorId: result.actorId,
+        actorName: result.actorName,
+        removed: result.removed,
+        message: `Removed ${result.removed.length} item(s) from "${result.actorName}"`,
+      };
+    } catch (error) {
+      this.errorHandler.handleToolError(error, 'remove-actor-items', 'remove actor items');
     }
   }
 

@@ -39,7 +39,7 @@ export class ForgeAssetsClient {
       const response = await axios.post(`${this.baseUrl}/assets/upload`, form, {
         headers: {
           ...form.getHeaders(),
-          'Authorization': `Bearer ${this.apiKey}`,
+          'Authorization': this.apiKey,
         },
         timeout: 30000,
       });
@@ -71,7 +71,7 @@ export class ForgeAssetsClient {
       const response = await axios.get(`${this.baseUrl}/assets/browse`, {
         params: { path: folder },
         headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
+          'Authorization': this.apiKey,
         },
         timeout: 10000,
       });

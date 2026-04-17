@@ -903,7 +903,7 @@ async function processMapGenerationInBackend(jobId: string, jobQueue: any, comfy
 
     let uploadResult: any;
     try {
-      uploadResult = await foundryClient.query('foundry-mcp-bridge.upload-generated-map', {
+      uploadResult = await foundryClient.query('foundry-forge-mcp.upload-generated-map', {
         filename: filename,
         imageData: base64Image
       });
@@ -1525,6 +1525,30 @@ async function startBackend(): Promise<void> {
                 case 'update-actor':
 
                   result = await actorCreationTools.handleUpdateActor(args);
+
+                  break;
+
+                case 'set-actor-image':
+
+                  result = await actorCreationTools.handleSetActorImage(args);
+
+                  break;
+
+                case 'add-actor-items':
+
+                  result = await actorCreationTools.handleAddActorItems(args);
+
+                  break;
+
+                case 'update-actor-items':
+
+                  result = await actorCreationTools.handleUpdateActorItems(args);
+
+                  break;
+
+                case 'remove-actor-items':
+
+                  result = await actorCreationTools.handleRemoveActorItems(args);
 
                   break;
 
