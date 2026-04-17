@@ -157,7 +157,7 @@ export class CharacterTools {
     this.logger.info('Getting character information', { identifier });
 
     try {
-      const characterData = await this.foundryClient.query('foundry-mcp-bridge.getCharacterInfo', {
+      const characterData = await this.foundryClient.query('foundry-forge-mcp.getCharacterInfo', {
         characterName: identifier,
       });
 
@@ -187,7 +187,7 @@ export class CharacterTools {
 
     try {
       // First get the character
-      const characterData = await this.foundryClient.query('foundry-mcp-bridge.getCharacterInfo', {
+      const characterData = await this.foundryClient.query('foundry-forge-mcp.getCharacterInfo', {
         characterName: characterIdentifier,
       });
 
@@ -294,7 +294,7 @@ export class CharacterTools {
     this.logger.info('Listing characters', { type });
 
     try {
-      const actors = await this.foundryClient.query('foundry-mcp-bridge.listActors', { type });
+      const actors = await this.foundryClient.query('foundry-forge-mcp.listActors', { type });
 
       this.logger.debug('Successfully retrieved character list', { count: actors.length });
 
@@ -331,7 +331,7 @@ export class CharacterTools {
     this.logger.info('Using item', { actorIdentifier, itemIdentifier, targets, consume, spellLevel, skipDialog });
 
     try {
-      const result = await this.foundryClient.query('foundry-mcp-bridge.useItem', {
+      const result = await this.foundryClient.query('foundry-forge-mcp.useItem', {
         actorIdentifier,
         itemIdentifier,
         targets,
@@ -370,7 +370,7 @@ export class CharacterTools {
     this.logger.info('Searching character items', { characterIdentifier, query, type, category, limit });
 
     try {
-      const result = await this.foundryClient.query('foundry-mcp-bridge.searchCharacterItems', {
+      const result = await this.foundryClient.query('foundry-forge-mcp.searchCharacterItems', {
         characterIdentifier,
         query,
         type,

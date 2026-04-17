@@ -258,7 +258,7 @@ export class NpcPortraitTools {
       let actorUpdated = false;
       if (actorId) {
         try {
-          await this.foundryClient.query('foundry-mcp-bridge.updateActorData', {
+          await this.foundryClient.query('foundry-forge-mcp.updateActorData', {
             actorId,
             updates: {
               img: uploadResult.url,

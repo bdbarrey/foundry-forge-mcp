@@ -29,7 +29,7 @@ export async function detectGameSystem(foundryClient: FoundryClient, logger?: Lo
   }
 
   try {
-    const worldInfo = await foundryClient.query('foundry-mcp-bridge.getWorldInfo');
+    const worldInfo = await foundryClient.query('foundry-forge-mcp.getWorldInfo');
     const systemId = worldInfo.system?.toLowerCase() || '';
 
     cachedSystemId = systemId;

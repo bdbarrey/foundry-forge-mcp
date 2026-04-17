@@ -1,5 +1,5 @@
 {
-  "foundry-mcp-bridge": {
+  "foundry-forge-mcp": {
     "settings": {
       "enabled": {
         "name": "Enable MCP Bridge",
