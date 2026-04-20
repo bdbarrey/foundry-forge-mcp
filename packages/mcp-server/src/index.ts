@@ -208,7 +208,7 @@ class BackendClient {
 
         detached: false,  // Stay attached to monitor backend
 
-        stdio: ['ignore', 'ignore', 'pipe']  // Capture stderr to detect exit
+        stdio: ['ignore', 'pipe', 'pipe']  // Capture stdout+stderr for diagnostics
 
       });
 
@@ -217,6 +217,22 @@ class BackendClient {
       // Store reference for cleanup
 
       this.backendProcess = child;
+
+
+
+      // Forward child stdout+stderr into wrapper log so crashes are diagnosable
+
+      child.stdout?.on('data', (buf: Buffer) => {
+
+        try { this.log('backend stdout', { out: buf.toString().slice(0, 2048) }); } catch {}
+
+      });
+
+      child.stderr?.on('data', (buf: Buffer) => {
+
+        try { this.log('backend stderr', { err: buf.toString().slice(0, 2048) }); } catch {}
+
+      });
 
 
 
