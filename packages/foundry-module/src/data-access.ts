@@ -5103,7 +5103,7 @@ export class FoundryDataAccess {
   /**
    * List all scenes with filtering options
    */
-  async listScenes(options: { filter?: string; include_active_only?: boolean } = {}): Promise<any[]> {
+  async listScenes(options: { filter?: string; include_active_only?: boolean; folder_filter?: string } = {}): Promise<any[]> {
     this.validateFoundryState();
 
     try {
@@ -5122,11 +5122,20 @@ export class FoundryDataAccess {
         );
       }
 
+      // Filter by folder name if provided (case-insensitive exact match)
+      if (options.folder_filter) {
+        const folderLower = options.folder_filter.toLowerCase();
+        scenes = scenes.filter((scene: any) =>
+          (scene.folder?.name || '').toLowerCase() === folderLower
+        );
+      }
+
       // Map to consistent format
       return scenes.map((scene: any) => ({
         id: scene.id,
         name: scene.name,
         active: scene.active,
+        folder: (scene as any).folder?.name || null,
         dimensions: {
           width: scene.dimensions?.width || (scene as any).width || 0,
           height: scene.dimensions?.height || (scene as any).height || 0

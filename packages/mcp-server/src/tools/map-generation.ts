@@ -104,7 +104,7 @@ export class MapGenerationTools {
       },
       {
         name: 'list-scenes',
-        description: 'List all available Foundry VTT scenes with their details',
+        description: 'List all available Foundry VTT scenes with their details, including folder assignment',
         inputSchema: {
           type: 'object',
           properties: {
@@ -117,6 +117,10 @@ export class MapGenerationTools {
               type: 'boolean',
               description: 'Only return the currently active scene',
               default: false
+            },
+            folder_filter: {
+              type: 'string',
+              description: 'Only return scenes in this folder (exact name, case-insensitive)'
             }
           }
         }
@@ -149,6 +153,7 @@ export class MapGenerationTools {
       const params = {
         filter: typeof safeInput.filter === 'string' ? safeInput.filter : undefined,
         include_active_only: Boolean(safeInput.include_active_only),
+        folder_filter: typeof safeInput.folder_filter === 'string' && safeInput.folder_filter.trim() ? safeInput.folder_filter : undefined,
       };
       return await this.foundryClient.query('foundry-forge-mcp.list-scenes', params);
     } catch (error: any) {
