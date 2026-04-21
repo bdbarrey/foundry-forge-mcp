@@ -36,6 +36,8 @@ import { TokenManipulationTools } from './tools/token-manipulation.js';
 
 import { NpcPortraitTools } from './tools/npc-portrait.js';
 
+import { FoldersTools } from './tools/folders.js';
+
 import { ForgeAssetsClient } from './forge-assets-client.js';
 
 import { DSA5CharacterCreator } from './systems/dsa5/character-creator.js';
@@ -1082,6 +1084,8 @@ async function startBackend(): Promise<void> {
 
   const tokenManipulationTools = new TokenManipulationTools({ foundryClient, logger });
 
+  const foldersTools = new FoldersTools({ foundryClient, logger });
+
   // Initialize mapgen-style backend components for map generation
   let mapGenerationJobQueue: any = null;
   let mapGenerationComfyUIClient: any = null;
@@ -1338,6 +1342,8 @@ async function startBackend(): Promise<void> {
 
     ...npcPortraitTools.getToolDefinitions(),
 
+    ...foldersTools.getToolDefinitions(),
+
   ];
 
   // Start Foundry connector (owns app port 31415)
@@ -1432,9 +1438,15 @@ async function startBackend(): Promise<void> {
 
                   break;
 
-                case 'list-characters':
+                case 'list-actors':
 
-                  result = await characterTools.handleListCharacters(args);
+                  result = await characterTools.handleListActors(args);
+
+                  break;
+
+                case 'list-folders':
+
+                  result = await foldersTools.handleListFolders(args);
 
                   break;
 

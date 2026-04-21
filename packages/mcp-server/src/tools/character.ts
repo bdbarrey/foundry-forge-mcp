@@ -71,14 +71,22 @@ export class CharacterTools {
         },
       },
       {
-        name: 'list-characters',
-        description: 'List all available characters with basic information',
+        name: 'list-actors',
+        description: 'List actors in the world (PCs, NPCs, monsters, vehicles, groups). Supports filtering by type, folder (name OR full slash-path; matches the folder and any subfolders), and name substring. Returns id, name, type, folder name, full folderPath, and folderId. Use this for programmatic discovery instead of opening Foundry visually.',
         inputSchema: {
           type: 'object',
           properties: {
             type: {
               type: 'string',
-              description: 'Optional filter by character type (e.g., "character", "npc")',
+              description: 'Optional filter by actor type (e.g., "character", "npc", "vehicle", "group")',
+            },
+            folder: {
+              type: 'string',
+              description: 'Optional folder filter. Accepts a folder name ("Monsters") or full path ("02 - My Actors/Monsters"). Matches the folder and everything beneath it. Case-insensitive.',
+            },
+            nameContains: {
+              type: 'string',
+              description: 'Optional case-insensitive substring filter on actor name.',
             },
           },
         },
@@ -284,35 +292,49 @@ export class CharacterTools {
     }
   }
 
-  async handleListCharacters(args: any): Promise<any> {
+  async handleListActors(args: any): Promise<any> {
     const schema = z.object({
       type: z.string().optional(),
+      folder: z.string().optional(),
+      nameContains: z.string().optional(),
     });
 
-    const { type } = schema.parse(args);
+    const { type, folder, nameContains } = schema.parse(args);
 
-    this.logger.info('Listing characters', { type });
+    this.logger.info('Listing actors', { type, folder, nameContains });
 
     try {
-      const actors = await this.foundryClient.query('foundry-forge-mcp.listActors', { type });
+      const queryArgs: { type?: string; folder?: string; nameContains?: string } = {};
+      if (type) queryArgs.type = type;
+      if (folder) queryArgs.folder = folder;
+      if (nameContains) queryArgs.nameContains = nameContains;
 
-      this.logger.debug('Successfully retrieved character list', { count: actors.length });
+      const actors = await this.foundryClient.query('foundry-forge-mcp.listActors', queryArgs);
 
-      // Format the response for Claude
+      this.logger.debug('Successfully retrieved actor list', { count: actors.length });
+
+      const filtersApplied: string[] = [];
+      if (type) filtersApplied.push(`type=${type}`);
+      if (folder) filtersApplied.push(`folder=${folder}`);
+      if (nameContains) filtersApplied.push(`nameContains=${nameContains}`);
+
       return {
-        characters: actors.map((actor: any) => ({
+        actors: actors.map((actor: any) => ({
           id: actor.id,
           name: actor.name,
           type: actor.type,
+          folder: actor.folder ?? null,
+          folderPath: actor.folderPath ?? null,
+          folderId: actor.folderId ?? null,
           hasImage: !!actor.img,
         })),
         total: actors.length,
-        filtered: type ? `Filtered by type: ${type}` : 'All characters',
+        filtersApplied: filtersApplied.length ? filtersApplied.join(', ') : 'none',
       };
 
     } catch (error) {
-      this.logger.error('Failed to list characters', error);
-      throw new Error(`Failed to list characters: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.logger.error('Failed to list actors', error);
+      throw new Error(`Failed to list actors: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 

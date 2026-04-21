@@ -2799,17 +2799,105 @@ export class FoundryDataAccess {
   }
 
   /**
-   * List all actors with basic information
+   * Build a slash-separated path for a Folder by walking its parent chain.
+   * Returns null if the document has no folder.
    */
-  async listActors(): Promise<Array<{ id: string; name: string; type: string; img?: string; folder?: string | null }>> {
+  private buildFolderPath(folder: any): string | null {
+    if (!folder) return null;
+    const segments: string[] = [];
+    let cursor: any = folder;
+    let safety = 32;
+    while (cursor && safety-- > 0) {
+      segments.unshift(cursor.name || '');
+      cursor = cursor.folder || null;
+    }
+    return segments.join('/');
+  }
 
-    return game.actors.map(actor => ({
-      id: actor.id || '',
-      name: actor.name || '',
-      type: actor.type,
-      ...(actor.img ? { img: actor.img } : {}),
-      folder: (actor as any).folder?.name || null,
-    }));
+  /**
+   * List all actors with basic information including folder path
+   */
+  async listActors(): Promise<Array<{ id: string; name: string; type: string; img?: string; folder?: string | null; folderPath?: string | null; folderId?: string | null }>> {
+
+    return game.actors.map(actor => {
+      const folder = (actor as any).folder || null;
+      return {
+        id: actor.id || '',
+        name: actor.name || '',
+        type: actor.type,
+        ...(actor.img ? { img: actor.img } : {}),
+        folder: folder?.name || null,
+        folderPath: this.buildFolderPath(folder),
+        folderId: folder?.id || null,
+      };
+    });
+  }
+
+  /**
+   * List Actor folders as a flat array enriched with path, parent info, and counts.
+   * Optional `subtree` filters to folders whose path starts with the given prefix
+   * (case-insensitive, matched on path segments).
+   */
+  async listActorFolders(options: { subtree?: string } = {}): Promise<Array<{
+    id: string;
+    name: string;
+    path: string;
+    parentPath: string | null;
+    parentId: string | null;
+    depth: number;
+    actorCount: number;
+    childFolderIds: string[];
+  }>> {
+    const allFolders: any[] = ((game.folders?.contents as any[]) || []).filter((f: any) => f.type === 'Actor');
+
+    // Pre-compute paths for all folders
+    const folderPaths = new Map<string, string>();
+    for (const f of allFolders) {
+      folderPaths.set(f.id, this.buildFolderPath(f) || '');
+    }
+
+    // Pre-compute actor counts per folder id
+    const actorCountByFolderId = new Map<string, number>();
+    for (const actor of game.actors) {
+      const fid = (actor as any).folder?.id;
+      if (!fid) continue;
+      actorCountByFolderId.set(fid, (actorCountByFolderId.get(fid) || 0) + 1);
+    }
+
+    // Pre-compute child folder ids per parent id
+    const childIdsByParentId = new Map<string | null, string[]>();
+    for (const f of allFolders) {
+      const parentId = (f as any).folder?.id || null;
+      const list = childIdsByParentId.get(parentId) || [];
+      list.push(f.id);
+      childIdsByParentId.set(parentId, list);
+    }
+
+    let result = allFolders.map((f: any) => {
+      const parentFolder = f.folder || null;
+      const path = folderPaths.get(f.id) || '';
+      return {
+        id: f.id,
+        name: f.name || '',
+        path,
+        parentPath: parentFolder ? (folderPaths.get(parentFolder.id) || null) : null,
+        parentId: parentFolder?.id || null,
+        depth: path ? path.split('/').length - 1 : 0,
+        actorCount: actorCountByFolderId.get(f.id) || 0,
+        childFolderIds: childIdsByParentId.get(f.id) || [],
+      };
+    });
+
+    if (options.subtree) {
+      const needle = options.subtree.toLowerCase().replace(/\/+$/, '');
+      result = result.filter((f: { path: string }) => {
+        const p = f.path.toLowerCase();
+        return p === needle || p.startsWith(needle + '/');
+      });
+    }
+
+    result.sort((a: { path: string }, b: { path: string }) => a.path.localeCompare(b.path));
+    return result;
   }
 
   /**

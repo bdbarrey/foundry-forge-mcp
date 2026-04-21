@@ -31,6 +31,7 @@ export class QueryHandlers {
     // Character/Actor queries
     CONFIG.queries[`${modulePrefix}.getCharacterInfo`] = this.handleGetCharacterInfo.bind(this);
     CONFIG.queries[`${modulePrefix}.listActors`] = this.handleListActors.bind(this);
+    CONFIG.queries[`${modulePrefix}.listActorFolders`] = this.handleListActorFolders.bind(this);
 
     // Compendium queries
     CONFIG.queries[`${modulePrefix}.searchCompendium`] = this.handleSearchCompendium.bind(this);
@@ -173,11 +174,13 @@ export class QueryHandlers {
   }
 
   /**
-   * Handle list actors request
+   * Handle list actors request with optional filters:
+   *  - type: actor type (e.g., "npc", "character")
+   *  - folder: case-insensitive exact match against folder name OR full folder path
+   *  - nameContains: case-insensitive substring match against actor name
    */
-  private async handleListActors(data: { type?: string }): Promise<any> {
+  private async handleListActors(data: { type?: string; folder?: string; nameContains?: string }): Promise<any> {
     try {
-      // SECURITY: Silent GM validation
       const gmCheck = this.validateGMAccess();
       if (!gmCheck.allowed) {
         return { error: 'Access denied', success: false };
@@ -185,16 +188,53 @@ export class QueryHandlers {
 
       this.dataAccess.validateFoundryState();
 
-      const actors = await this.dataAccess.listActors();
-      
-      // Filter by type if specified
+      let actors = await this.dataAccess.listActors();
+
       if (data.type) {
-        return actors.filter(actor => actor.type === data.type);
+        actors = actors.filter(actor => actor.type === data.type);
+      }
+
+      if (data.folder) {
+        const needle = data.folder.toLowerCase().replace(/\/+$/, '');
+        actors = actors.filter(actor => {
+          const name = (actor.folder || '').toLowerCase();
+          const path = (actor.folderPath || '').toLowerCase();
+          if (name === needle || path === needle) return true;
+          // Treat folder filter as a path prefix so "02 - My Actors" matches everything inside
+          return path.startsWith(needle + '/');
+        });
+      }
+
+      if (data.nameContains) {
+        const needle = data.nameContains.toLowerCase();
+        actors = actors.filter(actor => actor.name.toLowerCase().includes(needle));
       }
 
       return actors;
     } catch (error) {
       throw new Error(`Failed to list actors: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Handle list actor folders request — returns the actor folder tree as a flat array.
+   * Optional `subtree` filters to a path prefix (case-insensitive segment match).
+   */
+  private async handleListActorFolders(data: { subtree?: string } = {}): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      const opts: { subtree?: string } = {};
+      if (data?.subtree) opts.subtree = data.subtree;
+      const folders = await this.dataAccess.listActorFolders(opts);
+      return { folders, total: folders.length };
+    } catch (error) {
+      throw new Error(`Failed to list actor folders: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
