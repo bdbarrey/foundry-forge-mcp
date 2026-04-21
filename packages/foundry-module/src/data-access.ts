@@ -3036,9 +3036,23 @@ export class FoundryDataAccess {
         return obj.map(item => this.removeSensitiveFields(item, visited, depth + 1));
       }
 
+      // Handle Maps and Foundry Collections (which extend Map).
+      // These don't expose their entries as own properties, so Object.entries
+      // returns [] — we have to walk .entries() explicitly. This is what
+      // hid D&D 5e's item.system.activities (an ActivityCollection) from
+      // get-character-entity output.
+      if (obj instanceof Map) {
+        const sanitizedMap: any = {};
+        for (const [key, value] of obj.entries()) {
+          if (typeof key !== 'string' && typeof key !== 'number') continue;
+          sanitizedMap[String(key)] = this.removeSensitiveFields(value, visited, depth + 1);
+        }
+        return sanitizedMap;
+      }
+
       // Create a new sanitized object
       const sanitized: any = {};
-      
+
       for (const [key, value] of Object.entries(obj)) {
         // Skip sensitive and problematic fields entirely
         if (this.isSensitiveOrProblematicField(key)) {
