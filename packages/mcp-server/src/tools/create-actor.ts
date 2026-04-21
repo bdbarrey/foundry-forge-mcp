@@ -4,6 +4,16 @@ import { FoundryClient } from '../foundry-client.js';
 import { Logger } from '../logger.js';
 import { ErrorHandler } from '../utils/error-handler.js';
 import { parseReloadedStatblock, ReloadedStatblock } from '../parsers/reloaded-statblock.js';
+import {
+  CONFIDENCE_FLOOR,
+  CandidateBasic,
+  CandidateFull,
+  normalizeCreatureType,
+  normalizeSize,
+  passesHardFilters,
+  preScore,
+  scoreCandidate,
+} from './base-monster-scorer.js';
 
 export interface CreateActorToolsOptions {
   foundryClient: FoundryClient;
@@ -55,6 +65,34 @@ export class CreateActorTools {
                 itemId: { type: 'string', description: 'Entry ID within the pack.' },
               },
               required: ['packId', 'itemId'],
+            },
+          },
+        },
+      },
+      {
+        name: 'infer-base-monster',
+        description:
+          'Pre-step for create-actor on Reloaded creatures: parse a Reloaded statblock and return a ranked list of candidate compendium monsters to use as the base for create-actor\'s hybrid path. Scores candidates by CR/HP/AC proximity, ability-score cosine, size, and TRAIT/ACTION NAME OVERLAP — which is the strongest fingerprint (e.g. a CR-5 undead sharing Regeneration + Spider Climb + Sunlight Hypersensitivity is almost certainly built on Vampire Spawn, not a generic undead). Typical workflow: user says "create <Name> actor" → call infer-base-monster first → pass topPick.packId/itemId as create-actor\'s compendium_base. Confidence tier "high" means proceed silently; "low" means no candidate cleared the floor (0.55) and you should ask the user or consider scratch-build.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            reloaded_source: {
+              type: 'string',
+              description: 'Markdown containing exactly one <div class="statblock"> block. Use this OR file_path+creature_name.',
+            },
+            file_path: {
+              type: 'string',
+              description: 'Absolute path to a Reloaded markdown file. Requires creature_name.',
+            },
+            creature_name: {
+              type: 'string',
+              description: 'Heading text under which the statblock lives in file_path (e.g. "Volenta, First Form").',
+            },
+            top_n: {
+              type: 'number',
+              description: 'Number of candidates to return (default 5, max 10).',
+              minimum: 1,
+              maximum: 10,
             },
           },
         },
@@ -265,6 +303,198 @@ export class CreateActorTools {
     } catch (error) {
       this.errorHandler.handleToolError(error, 'create-actor', 'actor creation');
     }
+  }
+
+  async handleInferBaseMonster(args: any): Promise<any> {
+    const schema = z.object({
+      reloaded_source: z.string().optional(),
+      file_path: z.string().optional(),
+      creature_name: z.string().optional(),
+      top_n: z.number().min(1).max(10).default(5),
+    }).refine(
+      d => d.reloaded_source || (d.file_path && d.creature_name),
+      { message: 'Provide reloaded_source OR both file_path and creature_name' },
+    );
+    const input = schema.parse(args);
+
+    this.logger.info('infer-base-monster invoked', {
+      hasSource: !!input.reloaded_source,
+      filePath: input.file_path,
+      creatureName: input.creature_name,
+      topN: input.top_n,
+    });
+
+    try {
+      const markdown = await this.resolveSource(input);
+      const sb = parseReloadedStatblock(markdown);
+      const normalizedType = normalizeCreatureType(sb.type);
+      const normalizedSize = normalizeSize(sb.size);
+
+      // Build criteria query. CR window ±2 around Reloaded CR; fall back to
+      // the full CR spectrum if Reloaded didn't give us a numeric (rare).
+      const crMin = sb.challengeNumeric !== null ? Math.max(0, sb.challengeNumeric - 2) : 0;
+      const crMax = sb.challengeNumeric !== null ? sb.challengeNumeric + 2 : 30;
+      const criteriaParams: Record<string, any> = {
+        challengeRating: { min: crMin, max: crMax },
+        limit: 500,
+      };
+      if (normalizedType) criteriaParams.creatureType = normalizedType;
+      if (normalizedSize && SIZE_CODE_TO_WORD_LOCAL[normalizedSize]) {
+        criteriaParams.size = SIZE_CODE_TO_WORD_LOCAL[normalizedSize];
+      }
+
+      this.logger.debug('infer-base-monster criteria', criteriaParams);
+      const rawResult: any = await this.foundryClient.query(
+        'foundry-forge-mcp.listCreaturesByCriteria',
+        criteriaParams,
+      );
+      const creatures: any[] = rawResult?.response?.creatures ?? rawResult?.creatures ?? [];
+      this.logger.info('infer-base-monster candidate pool', { count: creatures.length });
+
+      // Normalize each candidate to CandidateBasic shape so the scorer can
+      // consume it uniformly.
+      const basic: CandidateBasic[] = creatures
+        .map(c => this.creatureToBasic(c))
+        .filter(c => passesHardFilters(sb, c));
+
+      if (basic.length === 0) {
+        return {
+          parsed: this.summarizeParsed(sb),
+          candidates: [],
+          topPick: null,
+          confidence: 'low' as const,
+          recommendation:
+            `No candidates passed hard filters (type=${normalizedType ?? '?'}, CR=${crMin}..${crMax}). ` +
+            `Consider scratch-build, or widen CR window by passing an explicit compendium_base to create-actor.`,
+        };
+      }
+
+      // Cheap pre-score + rank; cap the expensive full-doc fetches to 8.
+      const prescored = basic
+        .map(c => ({ c, pre: preScore(sb, c) }))
+        .sort((a, b) => b.pre - a.pre)
+        .slice(0, 8);
+      this.logger.debug('infer-base-monster pre-score top', {
+        picks: prescored.map(p => ({ name: p.c.name, pre: Number(p.pre.toFixed(3)) })),
+      });
+
+      // Fetch full docs in parallel so we can score trait/action overlap.
+      const fullResults = await Promise.all(prescored.map(async ({ c }) => {
+        try {
+          const doc: any = await this.foundryClient.query(
+            'foundry-forge-mcp.getCompendiumDocumentFull',
+            { packId: c.packId, documentId: c.itemId },
+          );
+          return { c, full: this.docToCandidateFull(c, doc) };
+        } catch (err) {
+          this.logger.warn('getCompendiumDocumentFull failed; dropping candidate', {
+            name: c.name, packId: c.packId, itemId: c.itemId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return null;
+        }
+      }));
+
+      const scored = fullResults
+        .filter((r): r is { c: CandidateBasic; full: CandidateFull } => r !== null)
+        .map(({ full }) => ({ cand: full, score: scoreCandidate(sb, full) }))
+        .sort((a, b) => b.score.overall - a.score.overall);
+
+      const top = scored.slice(0, input.top_n);
+      const topScore = top[0]?.score.overall ?? 0;
+      const confidence = topScore >= CONFIDENCE_FLOOR ? 'high' : 'low';
+
+      return {
+        parsed: this.summarizeParsed(sb),
+        candidatePoolSize: creatures.length,
+        passedHardFilters: basic.length,
+        candidates: top.map((s, idx) => ({
+          rank: idx + 1,
+          packId: s.cand.packId,
+          itemId: s.cand.itemId,
+          name: s.cand.name,
+          cr: s.cand.cr,
+          score: Number(s.score.overall.toFixed(3)),
+          components: Object.fromEntries(
+            Object.entries(s.score.components).map(([k, v]) => [k, Number(v.toFixed(3))]),
+          ),
+          rationale: s.score.rationale,
+        })),
+        topPick: top[0] ? {
+          packId: top[0].cand.packId,
+          itemId: top[0].cand.itemId,
+          name: top[0].cand.name,
+          score: Number(top[0].score.overall.toFixed(3)),
+        } : null,
+        confidence,
+        recommendation: confidence === 'high'
+          ? `Pass compendium_base={packId: "${top[0].cand.packId}", itemId: "${top[0].cand.itemId}"} to create-actor.`
+          : `Top candidate ${top[0]?.cand.name ?? 'n/a'} scored ${topScore.toFixed(2)} below confidence floor ${CONFIDENCE_FLOOR}. Ask user before proceeding, or use scratch-build.`,
+      };
+    } catch (error) {
+      this.errorHandler.handleToolError(error, 'infer-base-monster', 'base monster inference');
+    }
+  }
+
+  /** Convert a list-creatures-by-criteria item to our scorer input shape. */
+  private creatureToBasic(c: any): CandidateBasic {
+    const system = c.system ?? {};
+    // HP/AC are not returned by formatCreatureListItem, but some callers pass
+    // the raw system blob. Try both paths.
+    const hpMax = system.attributes?.hp?.max ?? system.hp?.max ?? null;
+    const acVal = system.attributes?.ac?.value ?? system.ac?.value ?? null;
+    return {
+      packId: c.pack?.id ?? c.pack ?? c.packId ?? '',
+      itemId: c.id ?? c.itemId ?? c._id ?? '',
+      name: c.name ?? '',
+      cr: typeof c.challengeRating === 'number' ? c.challengeRating
+        : typeof c.cr === 'number' ? c.cr
+        : typeof system.details?.cr === 'number' ? system.details.cr
+        : null,
+      creatureType: normalizeCreatureType(c.creatureType ?? system.details?.type?.value ?? null),
+      size: normalizeSize(c.size ?? system.traits?.size ?? null),
+      hp: typeof hpMax === 'number' ? hpMax : null,
+      ac: typeof acVal === 'number' ? acVal : null,
+    };
+  }
+
+  /** Merge a full compendium document into the CandidateFull shape. */
+  private docToCandidateFull(basic: CandidateBasic, doc: any): CandidateFull {
+    const system = doc?.system ?? {};
+    const abilities = {
+      str: system.abilities?.str?.value ?? 10,
+      dex: system.abilities?.dex?.value ?? 10,
+      con: system.abilities?.con?.value ?? 10,
+      int: system.abilities?.int?.value ?? 10,
+      wis: system.abilities?.wis?.value ?? 10,
+      cha: system.abilities?.cha?.value ?? 10,
+    };
+    const items: any[] = doc?.items ?? [];
+    const featNames = new Set<string>(
+      items.filter(i => i.type === 'feat').map(i => String(i.name ?? '').toLowerCase()).filter(Boolean),
+    );
+    const itemNames = new Set<string>(
+      items.map(i => String(i.name ?? '').toLowerCase()).filter(Boolean),
+    );
+    // Fill in the HP/AC we couldn't get from the list step.
+    const hp = typeof system.attributes?.hp?.max === 'number' ? system.attributes.hp.max : basic.hp;
+    const ac = typeof system.attributes?.ac?.value === 'number' ? system.attributes.ac.value : basic.ac;
+    return { ...basic, hp, ac, abilities, featNames, itemNames };
+  }
+
+  private summarizeParsed(sb: ReloadedStatblock) {
+    return {
+      name: sb.name,
+      size: sb.size,
+      type: sb.type,
+      challenge: sb.challenge,
+      challengeNumeric: sb.challengeNumeric,
+      ac: sb.ac,
+      hp: sb.hp.avg,
+      traitCount: sb.traits.length,
+      actionCount: sb.actions.length + sb.bonusActions.length + sb.reactions.length
+        + sb.legendaryActions.length + sb.lairActions.length,
+    };
   }
 
   /** Resolve input to one markdown chunk containing a statblock div. */
@@ -583,6 +813,10 @@ const SKILL_NAME_TO_ABBR: Record<string, string> = {
   'sleight of hand': 'slt',
   stealth: 'ste',
   survival: 'sur',
+};
+
+const SIZE_CODE_TO_WORD_LOCAL: Record<string, string> = {
+  tiny: 'tiny', sm: 'small', med: 'medium', lg: 'large', huge: 'huge', grg: 'gargantuan',
 };
 
 const DAMAGE_TYPES = new Set([
