@@ -4,6 +4,7 @@ import { FoundryClient } from '../foundry-client.js';
 import { Logger } from '../logger.js';
 import { ErrorHandler } from '../utils/error-handler.js';
 import { parseReloadedStatblock, ReloadedStatblock } from '../parsers/reloaded-statblock.js';
+import { ParsedAction, parseActionDescription } from '../parsers/action-description.js';
 import {
   CONFIDENCE_FLOOR,
   CandidateBasic,
@@ -14,6 +15,14 @@ import {
   preScore,
   scoreCandidate,
 } from './base-monster-scorer.js';
+import {
+  ACTION_CONFIDENCE_FLOOR,
+  ActionCandidateBasic,
+  ActionCandidateFull,
+  actionNameVariants,
+  passesHardFilters as passesActionHardFilters,
+  scoreActionCandidate,
+} from './base-action-scorer.js';
 
 export interface CreateActorToolsOptions {
   foundryClient: FoundryClient;
@@ -95,6 +104,31 @@ export class CreateActorTools {
               maximum: 10,
             },
           },
+        },
+      },
+      {
+        name: 'infer-base-action',
+        description:
+          'Pre-step for create-actor\'s Phase 3b action-build pass: given a Reloaded action (name + description OR pre-parsed ParsedAction), return ranked compendium Item candidates to use as the base for copy-patching. Strongly weighted toward exact / stem name match (Volenta\'s "Thunderstone" → SRD Thunderstone; "Hail of Daggers" → Dagger) with structural tie-breakers (damage type overlap, attack-vs-save category). Call this to debug picks; create-actor invokes this logic internally for every actionsSkippedNoItem entry and copy-patches high-confidence matches automatically.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action_name: {
+              type: 'string',
+              description: 'Reloaded action name as printed (e.g. "Thunderstone (1/day)").',
+            },
+            action_description: {
+              type: 'string',
+              description: 'Plain-text description of the action. Used to derive ParsedAction if not provided directly.',
+            },
+            top_n: {
+              type: 'number',
+              description: 'Number of candidates to return (default 3, max 10).',
+              minimum: 1,
+              maximum: 10,
+            },
+          },
+          required: ['action_name'],
         },
       },
     ];
@@ -259,6 +293,73 @@ export class CreateActorTools {
         }
       }
 
+      // 9. Phase 3b: for Reloaded actions that aren't on the compendium base
+      //    actor, infer a compendium Item to copy-patch from (e.g. Volenta's
+      //    Thunderstone → SRD Thunderstone, Firebomb → Alchemist's Fire).
+      //    Falls back to scratch-build feat when no candidate clears the
+      //    confidence floor. Runs sequentially (one add-item per action) to
+      //    sidestep the addActorItems batch cliff we discovered in 3a-polish.
+      const actionsCopyPatched: Array<{ name: string; base: string; score: number }> = [];
+      const actionsScratchBuilt: string[] = [];
+      const actionsBuildFailures: Array<{ name: string; error: string }> = [];
+
+      // Build a quick lookup from action-name to the raw action struct (we need
+      // both .name and .parsed + .description for the build).
+      const skippedByName = new Map<string, typeof allReloadedActions[number]>();
+      for (const a of allReloadedActions) {
+        if (actionsSkippedNoItem.includes(a.name)) skippedByName.set(a.name, a);
+      }
+
+      for (const name of actionsSkippedNoItem) {
+        // Multiattack is a narrative wrapper on other actions — not a real
+        // item and nothing in the compendium will match it structurally.
+        // Skip without attempting inference.
+        if (name.toLowerCase().replace(/\s*\([^)]*\)\s*$/, '').trim() === 'multiattack') continue;
+
+        const action = skippedByName.get(name);
+        if (!action) continue;
+
+        try {
+          const ranked = await this.inferActionCandidates(name, action.parsed, 3);
+          const top = ranked[0];
+          const confident = top && top.score.overall >= ACTION_CONFIDENCE_FLOOR;
+
+          let itemPayload: Record<string, any>;
+          let sourceLabel: string;
+          if (confident) {
+            itemPayload = await this.buildCopyPatchedActionItem(top.cand, name, action.parsed);
+            sourceLabel = `${top.cand.packId}/${top.cand.itemId}`;
+          } else {
+            itemPayload = this.buildScratchActionItem(name, action.description);
+            sourceLabel = 'scratch';
+          }
+
+          // Single-item add (we already know batch-with-fallback handles the
+          // cliff, but issuing one at a time here is strictly safer and
+          // preserves per-action isolation for error reporting).
+          const addResult = await this.addItemsWithBatchFallback(newActor.id, [itemPayload]);
+          if (addResult.added.length > 0) {
+            if (confident && top) {
+              actionsCopyPatched.push({
+                name,
+                base: sourceLabel,
+                score: Number(top.score.overall.toFixed(3)),
+              });
+            } else {
+              actionsScratchBuilt.push(name);
+            }
+          } else {
+            actionsBuildFailures.push({
+              name,
+              error: addResult.failed[0]?.error ?? 'add returned no items',
+            });
+          }
+        } catch (err: any) {
+          actionsBuildFailures.push({ name, error: err?.message ?? String(err) });
+          this.logger.warn(`Phase 3b action build "${name}" failed`, { error: err?.message });
+        }
+      }
+
       return {
         success: true,
         actorId: newActor.id,
@@ -283,6 +384,9 @@ export class CreateActorTools {
           .filter(t => existingItemNames.has(t.name.toLowerCase()))
           .map(t => t.name),
         actionsSynced: actionsSynced.filter(n => !actionSyncFailures.find(f => f.name === n)),
+        actionsCopyPatched,
+        actionsScratchBuilt,
+        actionsBuildFailures,
         actionsSkippedNoItem,
         actionsSkippedNoActivity,
         actionSyncFailures,
@@ -490,6 +594,183 @@ export class CreateActorTools {
       traitCount: sb.traits.length,
       actionCount: sb.actions.length + sb.bonusActions.length + sb.reactions.length
         + sb.legendaryActions.length + sb.lairActions.length,
+    };
+  }
+
+  async handleInferBaseAction(args: any): Promise<any> {
+    const schema = z.object({
+      action_name: z.string().min(1),
+      action_description: z.string().optional(),
+      top_n: z.number().min(1).max(10).default(3),
+    });
+    const input = schema.parse(args);
+
+    const parsed = parseActionDescription(input.action_description ?? '') ?? { damage: [] };
+
+    const ranked = await this.inferActionCandidates(input.action_name, parsed, input.top_n);
+    const top = ranked[0];
+    const confidence = (top?.score.overall ?? 0) >= ACTION_CONFIDENCE_FLOOR ? 'high' : 'low';
+
+    return {
+      action: { name: input.action_name, parsed: summarizeParsedAction(parsed) },
+      candidates: ranked.slice(0, input.top_n).map((s, idx) => ({
+        rank: idx + 1,
+        packId: s.cand.packId,
+        itemId: s.cand.itemId,
+        name: s.cand.name,
+        type: s.cand.type,
+        score: Number(s.score.overall.toFixed(3)),
+        components: Object.fromEntries(
+          Object.entries(s.score.components).map(([k, v]) => [k, Number(v.toFixed(3))]),
+        ),
+        rationale: s.score.rationale,
+      })),
+      topPick: top ? {
+        packId: top.cand.packId,
+        itemId: top.cand.itemId,
+        name: top.cand.name,
+        type: top.cand.type,
+        score: Number(top.score.overall.toFixed(3)),
+      } : null,
+      confidence,
+      recommendation: confidence === 'high'
+        ? `Copy-patch "${top!.cand.name}" from ${top!.cand.packId} as the base for "${input.action_name}".`
+        : `No base above confidence floor ${ACTION_CONFIDENCE_FLOOR} — scratch-build a feat with description-only for "${input.action_name}".`,
+    };
+  }
+
+  /**
+   * Given an action name + parsed data, search the compendium via name
+   * variants, pull full docs for the top hits, and rank. Returns candidates
+   * sorted best-first.
+   */
+  private async inferActionCandidates(
+    actionName: string,
+    parsed: ParsedAction,
+    topN: number,
+  ): Promise<Array<{ cand: ActionCandidateFull; score: ReturnType<typeof scoreActionCandidate> }>> {
+    // 1. Collect unique name-based hits across all variants.
+    const uniqueBasic = new Map<string, ActionCandidateBasic>();
+    for (const variant of actionNameVariants(actionName)) {
+      let raw: any;
+      try {
+        raw = await this.foundryClient.query('foundry-forge-mcp.searchCompendium', {
+          query: variant,
+          packType: 'Item',
+        });
+      } catch (err) {
+        this.logger.warn('searchCompendium variant failed', { variant, error: (err as any)?.message });
+        continue;
+      }
+      for (const hit of extractSearchHits(raw)) {
+        const packId = hit.packId ?? hit.pack?.id ?? hit.pack;
+        const itemId = hit.id ?? hit.itemId ?? hit._id;
+        if (!packId || !itemId) continue;
+        const key = `${packId}:${itemId}`;
+        if (uniqueBasic.has(key)) continue;
+        uniqueBasic.set(key, {
+          packId,
+          itemId,
+          name: hit.name ?? '',
+          type: hit.type ?? '',
+        });
+      }
+    }
+
+    // 2. Hard-filter and cap candidate pool to top 6 by cheap name-similarity.
+    const filtered = [...uniqueBasic.values()].filter(c => passesActionHardFilters(parsed, c));
+    if (filtered.length === 0) return [];
+    const preRanked = filtered
+      .map(c => ({ c, preScore: cheapNameScore(actionName, c.name) }))
+      .sort((a, b) => b.preScore - a.preScore)
+      .slice(0, 6);
+
+    // 3. Fetch full docs in parallel so we can compute damage types + activity types.
+    const fullResults = await Promise.all(preRanked.map(async ({ c }) => {
+      try {
+        const doc: any = await this.foundryClient.query(
+          'foundry-forge-mcp.getCompendiumDocumentFull',
+          { packId: c.packId, documentId: c.itemId },
+        );
+        return { c, full: docToActionCandidateFull(c, doc), doc };
+      } catch (err) {
+        this.logger.warn('getCompendiumDocumentFull for action failed', {
+          name: c.name, packId: c.packId, itemId: c.itemId,
+          error: (err as any)?.message,
+        });
+        return null;
+      }
+    }));
+
+    // 4. Score and sort best-first.
+    return fullResults
+      .filter((r): r is { c: ActionCandidateBasic; full: ActionCandidateFull; doc: any } => r !== null)
+      .map(r => ({ cand: r.full, score: scoreActionCandidate(parsed, r.full, actionName), doc: r.doc }))
+      .sort((a, b) => b.score.overall - a.score.overall)
+      .slice(0, topN);
+  }
+
+  /**
+   * Fetch the full compendium doc for a matched action base, clone its fullData,
+   * strip the top-level _id, rename to Reloaded's action name, and patch
+   * attack.bonus / damage.parts / range / usage from the parsed Reloaded data.
+   * Returned object is ready to pass to addActorItems.
+   */
+  private async buildCopyPatchedActionItem(
+    candidate: ActionCandidateFull,
+    reloadedName: string,
+    parsed: ParsedAction,
+  ): Promise<Record<string, any>> {
+    const doc: any = await this.foundryClient.query(
+      'foundry-forge-mcp.getCompendiumDocumentFull',
+      { packId: candidate.packId, documentId: candidate.itemId },
+    );
+    const fullData = doc?.fullData;
+    if (!fullData) throw new Error(`compendium item ${candidate.packId}/${candidate.itemId} returned no fullData`);
+
+    // Deep clone so we never mutate the cached compendium response.
+    const item: any = JSON.parse(JSON.stringify(fullData));
+    delete item._id;
+    item.name = reloadedName;
+
+    // Stamp flags so we can tell this was Reloaded-derived later.
+    item.flags = item.flags ?? {};
+    item.flags['foundry-forge-mcp'] = {
+      ...(item.flags['foundry-forge-mcp'] ?? {}),
+      source: 'reloaded-copy-patch',
+      basePackId: candidate.packId,
+      baseItemId: candidate.itemId,
+      baseName: candidate.name,
+    };
+
+    // Patch each activity in place using the same logic as buildItemActivityUpdate,
+    // except targeting the inline activity objects instead of building a flat-key
+    // update payload.
+    patchActivitiesInPlace(item, parsed);
+
+    // Patch usage limits (1/day, recharge) at the item level.
+    patchUsesInPlace(item, parsed);
+
+    return item;
+  }
+
+  /**
+   * Fallback when no compendium base passes the confidence floor. Builds a
+   * minimal feat item with name + description (HTML) only. Not wired for
+   * MidiQOL — the DM sees the printed action but has to roll manually.
+   */
+  private buildScratchActionItem(name: string, description: string): Record<string, any> {
+    return {
+      name,
+      type: 'feat',
+      system: {
+        description: { value: `<p>${escapeHtml(description)}</p>` },
+        source: { book: 'CoS Reloaded' },
+        type: { value: 'monster' },
+      },
+      flags: {
+        'foundry-forge-mcp': { source: 'reloaded-scratch-action' },
+      },
     };
   }
 
@@ -980,26 +1261,41 @@ function buildItemActivityUpdate(
         u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
       }
 
-      // Reach / range live on the attack activity.
+      // Reach / range live on the attack activity. dnd5e 4.x normalizes these
+      // to numbers in the document model — writing strings here used to silently
+      // not stick (the compendium dump shows `range.value: 5` etc, never a string).
       if (parsed.reach !== undefined) {
-        u[`${base}.range.reach`] = String(parsed.reach);
+        u[`${base}.range.reach`] = parsed.reach;
         u[`${base}.range.units`] = 'ft';
       }
       if (parsed.range) {
-        u[`${base}.range.value`] = String(parsed.range.normal);
-        if (parsed.range.long) u[`${base}.range.long`] = String(parsed.range.long);
+        u[`${base}.range.value`] = parsed.range.normal;
+        if (parsed.range.long) u[`${base}.range.long`] = parsed.range.long;
         u[`${base}.range.units`] = 'ft';
       }
     }
 
     if (type === 'save' && parsed.save) {
-      u[`${base}.save.ability`] = [parsed.save.ability];
-      u[`${base}.save.dc.calculation`] = '';
-      u[`${base}.save.dc.formula`] = String(parsed.save.dc);
+      // dnd5e 4.x save activities do NOT embed a DC or ability field — the DC
+      // is derived at roll time from the actor's {8 + prof + ability_mod}, and
+      // the ability target rolls against appears to come from either the item's
+      // parsed description or a system-level fallback we haven't fully mapped.
+      //
+      // Empirical check of SRD Alchemist's Fire, Fireball, Dreadful Glare, and
+      // dnd5e.monsterfeatures24 Web all shows NO save object on the activity.
+      // So writing `save.dc.formula` / `save.ability` silently no-ops.
+      //
+      // Known gap for a follow-up: find the path (likely item-level
+      // `system.save` or a MidiQOL flag) that lets us override Reloaded's
+      // custom DCs (e.g. Volenta's Firebomb DC 14 when derivation yields 15).
+      // For now we rely on the actor's ability scores + prof producing the
+      // right DC 2/3 of the time, and let the description text show the
+      // printed DC for manual override via the Foundry UI.
 
       // If the action has damage AND there's no attack activity on this
-      // item, the save activity owns the damage (e.g. Virulent Miasma:
-      // save-only action with 4d6 poison).
+      // item, the save activity still owns the damage (e.g. Virulent Miasma:
+      // save-only action with 4d6 poison). Damage parts DO land correctly
+      // on save activities.
       if (parsed.damage.length > 0 && !hasAttackActivity) {
         u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
         if (parsed.save.onSuccess === 'half') {
@@ -1023,4 +1319,194 @@ function damagePartPayload(d: { formula: string; type: string }) {
     custom: { enabled: true, formula: d.formula },
     types: [d.type],
   };
+}
+
+// ----- Phase 3b helpers: copy-patch & scratch-build -------------------------
+
+/** Minimal human-facing summary of a ParsedAction for tool responses. */
+function summarizeParsedAction(p: ParsedAction): Record<string, any> {
+  const out: Record<string, any> = {};
+  if (p.attackType) out.attackType = p.attackType;
+  if (p.attackBonus !== undefined) out.attackBonus = p.attackBonus;
+  if (p.reach !== undefined) out.reach = p.reach;
+  if (p.range) out.range = p.range;
+  if (p.damage.length > 0) out.damage = p.damage;
+  if (p.save) out.save = p.save;
+  if (p.usage) out.usage = p.usage;
+  return out;
+}
+
+/** Cheap pre-rank score before we pay for full-doc fetches. Exact name match > substring > Jaccard. */
+function cheapNameScore(actionName: string, candidateName: string): number {
+  const a = actionName.replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase();
+  const b = candidateName.toLowerCase().trim();
+  if (a === b) return 1.0;
+  if (b.includes(a) || a.includes(b)) return 0.8;
+  const aTokens = new Set(a.split(/\s+/).filter(t => t.length >= 3));
+  const bTokens = new Set(b.split(/\s+/).filter(t => t.length >= 3));
+  if (aTokens.size === 0 || bTokens.size === 0) return 0;
+  let overlap = 0;
+  for (const t of aTokens) if (bTokens.has(t)) overlap++;
+  return overlap / Math.max(aTokens.size, bTokens.size);
+}
+
+/** Convert a full compendium Item doc into an ActionCandidateFull for scoring. */
+function docToActionCandidateFull(basic: ActionCandidateBasic, doc: any): ActionCandidateFull {
+  const system = doc?.system ?? {};
+  const activities = system.activities ?? {};
+  const activityTypes = new Set<string>();
+  const damageTypes = new Set<string>();
+  const saveAbilities = new Set<string>();
+  let totalMagnitude = 0;
+  let rangeFeet: number | null = null;
+
+  for (const act of Object.values<any>(activities)) {
+    if (act?.type) activityTypes.add(String(act.type));
+
+    // Damage types — the parts[].types can be an array of strings or an object map;
+    // empty object {} means "inherit base dice types" (no signal).
+    const parts = act?.damage?.parts ?? [];
+    for (const part of parts) {
+      if (Array.isArray(part.types)) {
+        for (const t of part.types) if (t) damageTypes.add(String(t).toLowerCase());
+      }
+      // Approximate damage average: n * (d+1) / 2 for {number, denomination}, else parse custom formula
+      if (typeof part.number === 'number' && typeof part.denomination === 'number' && part.denomination > 0) {
+        totalMagnitude += part.number * (part.denomination + 1) / 2;
+      } else if (part.custom?.enabled && part.custom.formula) {
+        totalMagnitude += approxAverageFormula(String(part.custom.formula));
+      }
+    }
+
+    // Save ability if present (SRD items usually don't set this — stays empty).
+    if (act?.save?.ability) {
+      const ability = Array.isArray(act.save.ability) ? act.save.ability[0] : act.save.ability;
+      if (ability) saveAbilities.add(String(ability).toLowerCase());
+    }
+
+    // Range from first activity with one — reach preferred for melee.
+    if (rangeFeet === null) {
+      const rv = act?.range?.value;
+      const rr = act?.range?.reach;
+      if (typeof rr === 'number') rangeFeet = rr;
+      else if (typeof rv === 'number') rangeFeet = rv;
+      else if (typeof rv === 'string' && !isNaN(Number(rv))) rangeFeet = Number(rv);
+    }
+  }
+
+  return {
+    ...basic,
+    activityTypes,
+    damageTypes,
+    saveAbilities,
+    damageMagnitude: totalMagnitude,
+    range: rangeFeet,
+  };
+}
+
+function approxAverageFormula(formula: string): number {
+  let sum = 0;
+  for (const m of formula.matchAll(/(\d+)\s*d\s*(\d+)/g)) {
+    const n = parseInt(m[1], 10);
+    const d = parseInt(m[2], 10);
+    if (!isNaN(n) && !isNaN(d)) sum += n * (d + 1) / 2;
+  }
+  const flats = formula.match(/([+-]\s*\d+)(?!\s*d)/g);
+  if (flats) for (const f of flats) sum += parseInt(f.replace(/\s+/g, ''), 10);
+  return sum;
+}
+
+/**
+ * Patch activity fields inside a copy-patched item's fullData in place.
+ * Mirrors buildItemActivityUpdate but targets inline objects instead of a
+ * flat-dot-key update payload — because we're modifying the item BEFORE it's
+ * added to the actor, not updating it after.
+ */
+function patchActivitiesInPlace(item: any, parsed: ParsedAction): void {
+  const activities = item?.system?.activities;
+  if (!activities || typeof activities !== 'object') return;
+
+  const hasAttackActivity = Object.values<any>(activities).some(a => a?.type === 'attack');
+
+  for (const activity of Object.values<any>(activities)) {
+    const type = activity?.type;
+
+    if (type === 'attack' && parsed.attackBonus !== undefined) {
+      activity.attack = activity.attack ?? {};
+      activity.attack.bonus = (parsed.attackBonus >= 0 ? '+' : '') + parsed.attackBonus;
+      activity.attack.flat = true;  // Explicit bonus — skip ability-mod derivation
+      if (parsed.attackType) {
+        activity.attack.type = activity.attack.type ?? {};
+        activity.attack.type.value = parsed.attackType;
+      }
+      if (parsed.damage.length > 0) {
+        activity.damage = activity.damage ?? { parts: [] };
+        activity.damage.parts = parsed.damage.map(damagePartPayload);
+      }
+      if (parsed.reach !== undefined) {
+        activity.range = activity.range ?? {};
+        activity.range.reach = parsed.reach;
+        activity.range.units = 'ft';
+      }
+      if (parsed.range) {
+        activity.range = activity.range ?? {};
+        activity.range.value = parsed.range.normal;
+        if (parsed.range.long) activity.range.long = parsed.range.long;
+        activity.range.units = 'ft';
+      }
+    }
+
+    if (type === 'save' && parsed.save) {
+      // Save DC / ability: see long comment in buildItemActivityUpdate — no
+      // writable path in dnd5e 4.x. DC is derived at roll-time. We only patch
+      // damage (which DOES stick on save activities).
+      if (parsed.damage.length > 0 && !hasAttackActivity) {
+        activity.damage = activity.damage ?? { parts: [] };
+        activity.damage.parts = parsed.damage.map(damagePartPayload);
+        if (parsed.save.onSuccess === 'half') {
+          activity.damage.onSave = 'half';
+        }
+      }
+    }
+
+    if (type === 'damage' && parsed.damage.length > 0) {
+      activity.damage = activity.damage ?? { parts: [] };
+      activity.damage.parts = parsed.damage.map(damagePartPayload);
+    }
+  }
+}
+
+/**
+ * Patch usage limits (1/day, recharge 5-6) onto the item's system.uses.
+ * Reloaded's "(1/Day)" → max=1, recovery=[{period: 'lr', type: 'recoverAll'}].
+ * Reloaded's "(Recharge 5-6)" → max=1, recovery=[{period: 'recharge', formula: '5', type: 'recoverAll'}].
+ */
+function patchUsesInPlace(item: any, parsed: ParsedAction): void {
+  if (!parsed.usage) return;
+  item.system = item.system ?? {};
+  item.system.uses = item.system.uses ?? { spent: 0, max: '', recovery: [], value: 0, label: '' };
+
+  if ('recharge' in parsed.usage) {
+    const [min] = parsed.usage.recharge;
+    item.system.uses.max = '1';
+    item.system.uses.value = 1;
+    item.system.uses.spent = 0;
+    item.system.uses.recovery = [{ period: 'recharge', type: 'recoverAll', formula: String(min) }];
+    return;
+  }
+
+  // Counted usage: (1/Day), (3/Day), (Recharge after rest).
+  const count = parsed.usage.count;
+  const period = parsed.usage.period;
+  const periodMap: Record<string, string> = {
+    'day': 'lr',            // Per-day effects reset on long rest (dnd5e convention)
+    'long-rest': 'lr',
+    'short-rest': 'sr',
+    'turn': 'turn',
+  };
+  const recoveryPeriod = periodMap[period] ?? 'lr';
+  item.system.uses.max = String(count);
+  item.system.uses.value = count;
+  item.system.uses.spent = 0;
+  item.system.uses.recovery = [{ period: recoveryPeriod, type: 'recoverAll' }];
 }

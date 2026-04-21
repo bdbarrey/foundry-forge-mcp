@@ -1468,6 +1468,12 @@ async function startBackend(): Promise<void> {
 
                   break;
 
+                case 'infer-base-action':
+
+                  result = await createActorTools.handleInferBaseAction(args);
+
+                  break;
+
                 case 'get-character-entity':
 
                   result = await characterTools.handleGetCharacterEntity(args);
