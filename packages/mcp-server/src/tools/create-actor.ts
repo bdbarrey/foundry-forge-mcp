@@ -189,16 +189,11 @@ export class CreateActorTools {
           },
         }));
       let addedTraitNames: string[] = [];
+      let traitAddFailures: Array<{ name: string; error: string }> = [];
       if (traitsToAdd.length > 0) {
-        const addResult: any = await this.foundryClient.query('foundry-forge-mcp.addActorItems', {
-          actorId: newActor.id,
-          items: traitsToAdd,
-        });
-        if (addResult?.success !== false) {
-          addedTraitNames = traitsToAdd.map(t => t.name);
-        } else {
-          this.logger.warn('add-actor-items failed for traits', { error: addResult?.error });
-        }
+        const result = await this.addItemsWithBatchFallback(newActor.id, traitsToAdd);
+        addedTraitNames = result.added;
+        traitAddFailures = result.failed;
       }
 
       // 8. Update existing action items' structured combat data to match
@@ -283,6 +278,7 @@ export class CreateActorTools {
         appliedUpdates: successfulUpdateKeys.filter(k => !k.startsWith('flags.')),
         failedUpdateChunks,
         traitsAdded: addedTraitNames,
+        traitAddFailures,
         traitsAlreadyPresent: sb.traits
           .filter(t => existingItemNames.has(t.name.toLowerCase()))
           .map(t => t.name),
@@ -581,6 +577,64 @@ export class CreateActorTools {
       }
     }
     return results;
+  }
+
+  /**
+   * Add items to an actor, trying the whole batch first and falling back to
+   * one-at-a-time on any failure. Observed empirically on 2026-04-21:
+   * `createEmbeddedDocuments` via WebRTC hangs past our 10s query timeout for
+   * batches as small as 5 items (likely per-item active-effect/derivation
+   * passes cascading inside a single Foundry transaction), but the same items
+   * added individually complete in milliseconds each. So the fast-path is the
+   * single batched call; on failure we isolate every item so one bad entry
+   * can't drop the rest.
+   */
+  private async addItemsWithBatchFallback(
+    actorId: string,
+    items: Array<Record<string, any>>,
+  ): Promise<{ added: string[]; failed: Array<{ name: string; error: string }> }> {
+    if (items.length === 0) return { added: [], failed: [] };
+
+    // Fast path: everything in one call.
+    try {
+      const result: any = await this.foundryClient.query('foundry-forge-mcp.addActorItems', {
+        actorId,
+        items,
+      });
+      if (result?.success !== false) {
+        return { added: items.map(i => String(i.name)), failed: [] };
+      }
+      this.logger.warn(
+        `batch add-actor-items returned success=false; falling back to one-at-a-time`,
+        { count: items.length, error: result?.error },
+      );
+    } catch (err: any) {
+      this.logger.warn(
+        `batch add-actor-items threw; falling back to one-at-a-time`,
+        { count: items.length, error: err?.message ?? String(err) },
+      );
+    }
+
+    // Fallback: issue one add per item. Each failure is isolated.
+    const added: string[] = [];
+    const failed: Array<{ name: string; error: string }> = [];
+    for (const item of items) {
+      const name = String(item.name);
+      try {
+        const r: any = await this.foundryClient.query('foundry-forge-mcp.addActorItems', {
+          actorId,
+          items: [item],
+        });
+        if (r?.success !== false) {
+          added.push(name);
+        } else {
+          failed.push({ name, error: r?.error ?? 'success=false' });
+        }
+      } catch (err: any) {
+        failed.push({ name, error: err?.message ?? String(err) });
+      }
+    }
+    return { added, failed };
   }
 
   private buildCoreNumericsChunk(sb: ReloadedStatblock): Record<string, any> {
