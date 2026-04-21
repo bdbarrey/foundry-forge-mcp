@@ -104,6 +104,36 @@ describe('parseReloadedStatblock — Zombie Plague Spreader', () => {
     expect(result.traits[2].description).toMatch(/Viral Aura for 24 hours/);
     expect(result.actions[2].description).toMatch(/30.foot.radius sphere/);
   });
+
+  it('attaches structured parsed data to combat actions', () => {
+    // Slam: multi-type damage attack
+    const slam = result.actions.find(a => a.name === 'Slam')!;
+    expect(slam.parsed.attackType).toBe('melee');
+    expect(slam.parsed.attackBonus).toBe(5);
+    expect(slam.parsed.reach).toBe(5);
+    expect(slam.parsed.damage).toEqual([
+      { formula: '1d6 + 3', type: 'bludgeoning' },
+      { formula: '2d8', type: 'necrotic' },
+    ]);
+
+    // Virulent Miasma: save + damage + usage (from name parenthetical)
+    const miasma = result.actions.find(a => a.name.startsWith('Virulent Miasma'))!;
+    expect(miasma.parsed.attackBonus).toBeUndefined();
+    expect(miasma.parsed.save).toEqual({ dc: 12, ability: 'con', onSuccess: 'half' });
+    expect(miasma.parsed.damage).toEqual([{ formula: '4d6', type: 'poison' }]);
+    expect(miasma.parsed.usage).toEqual({ count: 1, period: 'day' });
+
+    // Multiattack: pure narrative — no structured combat data
+    const multi = result.actions.find(a => a.name === 'Multiattack')!;
+    expect(multi.parsed.attackBonus).toBeUndefined();
+    expect(multi.parsed.save).toBeUndefined();
+    expect(multi.parsed.damage).toEqual([]);
+
+    // Traits come through with parsed shape too, mostly empty — e.g. Viral Aura
+    // has a save (DC 12 Con) so it'll populate
+    const viralAura = result.traits.find(t => t.name === 'Viral Aura')!;
+    expect(viralAura.parsed.save).toEqual({ dc: 12, ability: 'con' });
+  });
 });
 
 describe('parseReloadedStatblock — Strahd, the Mage', () => {

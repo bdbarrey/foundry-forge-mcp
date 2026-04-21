@@ -9,6 +9,7 @@
 // builds actors from scratch when no compendium match exists (Phase 6+).
 
 import { parse, HTMLElement, Node, NodeType } from 'node-html-parser';
+import { parseActionDescription, parseUsageMarker, ParsedAction } from './action-description.js';
 
 export interface StatblockAbility {
   score: number;
@@ -27,6 +28,15 @@ export interface StatblockAbilities {
 export interface StatblockFeature {
   name: string;
   description: string;
+  /**
+   * Structured combat data pulled from `description` + the name parenthetical.
+   * Populated for every feature — but if the feature is pure narrative (no
+   * attack / damage / save / usage), the fields within are all absent and
+   * `damage` is an empty array. Consumers decide which features to treat as
+   * actionable (e.g. skip if `attackBonus` AND `save` AND `damage.length`
+   * are all missing).
+   */
+  parsed: ParsedAction;
 }
 
 export interface ReloadedStatblock {
@@ -480,7 +490,14 @@ function parseFeatureParagraph(p: HTMLElement): StatblockFeature | null {
     '',
   );
 
-  return { name: nameText, description: trailing };
+  // Structured combat data: run description through the plain-text action
+  // parser, then fold in any usage marker printed in the name parenthetical
+  // (e.g. "Virulent Miasma (1/Day)").
+  const parsed: ParsedAction = parseActionDescription(trailing) ?? { damage: [] };
+  const nameUsage = parseUsageMarker(nameText);
+  if (nameUsage && !parsed.usage) parsed.usage = nameUsage;
+
+  return { name: nameText, description: trailing, parsed };
 }
 
 function escapeRegex(s: string): string {
