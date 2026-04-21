@@ -324,35 +324,57 @@ export class CreateActorTools {
           const top = ranked[0];
           const confident = top && top.score.overall >= ACTION_CONFIDENCE_FLOOR;
 
-          let itemPayload: Record<string, any>;
-          let sourceLabel: string;
-          if (confident) {
-            itemPayload = await this.buildCopyPatchedActionItem(top.cand, name, action.parsed);
-            sourceLabel = `${top.cand.packId}/${top.cand.itemId}`;
-          } else {
-            itemPayload = this.buildScratchActionItem(name, action.description);
-            sourceLabel = 'scratch';
-          }
-
-          // Single-item add (we already know batch-with-fallback handles the
-          // cliff, but issuing one at a time here is strictly safer and
-          // preserves per-action isolation for error reporting).
-          const addResult = await this.addItemsWithBatchFallback(newActor.id, [itemPayload]);
-          if (addResult.added.length > 0) {
-            if (confident && top) {
+          if (confident && top) {
+            // Copy-patch path: call the module-side handler that fetches the
+            // compendium item in-process on Foundry, applies our patch spec,
+            // and createEmbeddedDocuments — all without the full item doc ever
+            // crossing WebRTC. Fixes the 10-50KB wire payload cliff we hit on
+            // direct addActorItems.
+            const patchSpec = buildActionPatchSpec(action.parsed);
+            const flagsPatch = {
+              'foundry-forge-mcp': {
+                source: 'reloaded-copy-patch',
+                basePackId: top.cand.packId,
+                baseItemId: top.cand.itemId,
+                baseName: top.cand.name,
+              },
+            };
+            const r: any = await this.foundryClient.query(
+              'foundry-forge-mcp.addActorItemFromCompendium',
+              {
+                actorId: newActor.id,
+                packId: top.cand.packId,
+                itemId: top.cand.itemId,
+                renameTo: name,
+                patchSpec,
+                flagsPatch,
+              },
+            );
+            if (r?.success && r.added) {
               actionsCopyPatched.push({
                 name,
-                base: sourceLabel,
+                base: `${top.cand.packId}/${top.cand.itemId}`,
                 score: Number(top.score.overall.toFixed(3)),
               });
             } else {
-              actionsScratchBuilt.push(name);
+              actionsBuildFailures.push({
+                name,
+                error: r?.error ?? 'addActorItemFromCompendium returned no doc',
+              });
             }
           } else {
-            actionsBuildFailures.push({
-              name,
-              error: addResult.failed[0]?.error ?? 'add returned no items',
-            });
+            // Scratch-build fallback — tiny payload, goes through the normal
+            // addActorItems path.
+            const itemPayload = this.buildScratchActionItem(name, action.description);
+            const addResult = await this.addItemsWithBatchFallback(newActor.id, [itemPayload]);
+            if (addResult.added.length > 0) {
+              actionsScratchBuilt.push(name);
+            } else {
+              actionsBuildFailures.push({
+                name,
+                error: addResult.failed[0]?.error ?? 'add returned no items',
+              });
+            }
           }
         } catch (err: any) {
           actionsBuildFailures.push({ name, error: err?.message ?? String(err) });
@@ -708,50 +730,6 @@ export class CreateActorTools {
       .map(r => ({ cand: r.full, score: scoreActionCandidate(parsed, r.full, actionName), doc: r.doc }))
       .sort((a, b) => b.score.overall - a.score.overall)
       .slice(0, topN);
-  }
-
-  /**
-   * Fetch the full compendium doc for a matched action base, clone its fullData,
-   * strip the top-level _id, rename to Reloaded's action name, and patch
-   * attack.bonus / damage.parts / range / usage from the parsed Reloaded data.
-   * Returned object is ready to pass to addActorItems.
-   */
-  private async buildCopyPatchedActionItem(
-    candidate: ActionCandidateFull,
-    reloadedName: string,
-    parsed: ParsedAction,
-  ): Promise<Record<string, any>> {
-    const doc: any = await this.foundryClient.query(
-      'foundry-forge-mcp.getCompendiumDocumentFull',
-      { packId: candidate.packId, documentId: candidate.itemId },
-    );
-    const fullData = doc?.fullData;
-    if (!fullData) throw new Error(`compendium item ${candidate.packId}/${candidate.itemId} returned no fullData`);
-
-    // Deep clone so we never mutate the cached compendium response.
-    const item: any = JSON.parse(JSON.stringify(fullData));
-    delete item._id;
-    item.name = reloadedName;
-
-    // Stamp flags so we can tell this was Reloaded-derived later.
-    item.flags = item.flags ?? {};
-    item.flags['foundry-forge-mcp'] = {
-      ...(item.flags['foundry-forge-mcp'] ?? {}),
-      source: 'reloaded-copy-patch',
-      basePackId: candidate.packId,
-      baseItemId: candidate.itemId,
-      baseName: candidate.name,
-    };
-
-    // Patch each activity in place using the same logic as buildItemActivityUpdate,
-    // except targeting the inline activity objects instead of building a flat-key
-    // update payload.
-    patchActivitiesInPlace(item, parsed);
-
-    // Patch usage limits (1/day, recharge) at the item level.
-    patchUsesInPlace(item, parsed);
-
-    return item;
   }
 
   /**
@@ -1417,96 +1395,49 @@ function approxAverageFormula(formula: string): number {
 }
 
 /**
- * Patch activity fields inside a copy-patched item's fullData in place.
- * Mirrors buildItemActivityUpdate but targets inline objects instead of a
- * flat-dot-key update payload — because we're modifying the item BEFORE it's
- * added to the actor, not updating it after.
+ * Convert a ParsedAction into the wire-friendly ActionPatchSpec the module-side
+ * addActorItemFromCompendium handler expects. Names kept short because this
+ * blob travels over WebRTC.
  */
-function patchActivitiesInPlace(item: any, parsed: ParsedAction): void {
-  const activities = item?.system?.activities;
-  if (!activities || typeof activities !== 'object') return;
+function buildActionPatchSpec(parsed: ParsedAction): Record<string, any> {
+  const spec: Record<string, any> = {};
+  if (parsed.attackBonus !== undefined) spec.attackBonus = parsed.attackBonus;
+  if (parsed.attackType) spec.attackType = parsed.attackType;
+  if (parsed.damage.length > 0) {
+    spec.damageParts = parsed.damage.map(d => ({ formula: d.formula, type: d.type }));
+  }
+  if (parsed.reach !== undefined) spec.reach = parsed.reach;
+  if (parsed.range) {
+    spec.rangeNormal = parsed.range.normal;
+    if (parsed.range.long !== undefined) spec.rangeLong = parsed.range.long;
+  }
+  if (parsed.save?.onSuccess === 'half') spec.onSaveHalf = true;
 
-  const hasAttackActivity = Object.values<any>(activities).some(a => a?.type === 'attack');
-
-  for (const activity of Object.values<any>(activities)) {
-    const type = activity?.type;
-
-    if (type === 'attack' && parsed.attackBonus !== undefined) {
-      activity.attack = activity.attack ?? {};
-      activity.attack.bonus = (parsed.attackBonus >= 0 ? '+' : '') + parsed.attackBonus;
-      activity.attack.flat = true;  // Explicit bonus — skip ability-mod derivation
-      if (parsed.attackType) {
-        activity.attack.type = activity.attack.type ?? {};
-        activity.attack.type.value = parsed.attackType;
-      }
-      if (parsed.damage.length > 0) {
-        activity.damage = activity.damage ?? { parts: [] };
-        activity.damage.parts = parsed.damage.map(damagePartPayload);
-      }
-      if (parsed.reach !== undefined) {
-        activity.range = activity.range ?? {};
-        activity.range.reach = parsed.reach;
-        activity.range.units = 'ft';
-      }
-      if (parsed.range) {
-        activity.range = activity.range ?? {};
-        activity.range.value = parsed.range.normal;
-        if (parsed.range.long) activity.range.long = parsed.range.long;
-        activity.range.units = 'ft';
-      }
-    }
-
-    if (type === 'save' && parsed.save) {
-      // Save DC / ability: see long comment in buildItemActivityUpdate — no
-      // writable path in dnd5e 4.x. DC is derived at roll-time. We only patch
-      // damage (which DOES stick on save activities).
-      if (parsed.damage.length > 0 && !hasAttackActivity) {
-        activity.damage = activity.damage ?? { parts: [] };
-        activity.damage.parts = parsed.damage.map(damagePartPayload);
-        if (parsed.save.onSuccess === 'half') {
-          activity.damage.onSave = 'half';
-        }
-      }
-    }
-
-    if (type === 'damage' && parsed.damage.length > 0) {
-      activity.damage = activity.damage ?? { parts: [] };
-      activity.damage.parts = parsed.damage.map(damagePartPayload);
+  if (parsed.usage) {
+    if ('recharge' in parsed.usage) {
+      const [min] = parsed.usage.recharge;
+      spec.uses = {
+        max: '1',
+        value: 1,
+        spent: 0,
+        recovery: [{ period: 'recharge', type: 'recoverAll', formula: String(min) }],
+      };
+    } else {
+      const periodMap: Record<string, string> = {
+        'day': 'lr',
+        'long-rest': 'lr',
+        'short-rest': 'sr',
+        'turn': 'turn',
+      };
+      const recoveryPeriod = periodMap[parsed.usage.period] ?? 'lr';
+      spec.uses = {
+        max: String(parsed.usage.count),
+        value: parsed.usage.count,
+        spent: 0,
+        recovery: [{ period: recoveryPeriod, type: 'recoverAll' }],
+      };
     }
   }
+  return spec;
 }
 
-/**
- * Patch usage limits (1/day, recharge 5-6) onto the item's system.uses.
- * Reloaded's "(1/Day)" → max=1, recovery=[{period: 'lr', type: 'recoverAll'}].
- * Reloaded's "(Recharge 5-6)" → max=1, recovery=[{period: 'recharge', formula: '5', type: 'recoverAll'}].
- */
-function patchUsesInPlace(item: any, parsed: ParsedAction): void {
-  if (!parsed.usage) return;
-  item.system = item.system ?? {};
-  item.system.uses = item.system.uses ?? { spent: 0, max: '', recovery: [], value: 0, label: '' };
-
-  if ('recharge' in parsed.usage) {
-    const [min] = parsed.usage.recharge;
-    item.system.uses.max = '1';
-    item.system.uses.value = 1;
-    item.system.uses.spent = 0;
-    item.system.uses.recovery = [{ period: 'recharge', type: 'recoverAll', formula: String(min) }];
-    return;
-  }
-
-  // Counted usage: (1/Day), (3/Day), (Recharge after rest).
-  const count = parsed.usage.count;
-  const period = parsed.usage.period;
-  const periodMap: Record<string, string> = {
-    'day': 'lr',            // Per-day effects reset on long rest (dnd5e convention)
-    'long-rest': 'lr',
-    'short-rest': 'sr',
-    'turn': 'turn',
-  };
-  const recoveryPeriod = periodMap[period] ?? 'lr';
-  item.system.uses.max = String(count);
-  item.system.uses.value = count;
-  item.system.uses.spent = 0;
-  item.system.uses.recovery = [{ period: recoveryPeriod, type: 'recoverAll' }];
-}

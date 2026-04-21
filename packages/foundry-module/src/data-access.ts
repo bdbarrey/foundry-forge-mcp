@@ -220,6 +220,29 @@ interface CreatedActorInfo {
   img?: string;
 }
 
+/**
+ * A parsed-action-derived patch spec for addActorItemFromCompendium.
+ * Interpreted by ACTIVITY TYPE on the target item:
+ *   - `attack` activities get bonus / type / damage / range applied
+ *   - `save` activities get damage applied (DC is derived, not written)
+ * Top-level `uses` is merged onto the item's system.uses.
+ */
+interface ActionPatchSpec {
+  attackBonus?: number;          // "+7" as a signed number (7 or -2)
+  attackType?: 'melee' | 'ranged';
+  damageParts?: Array<{ formula: string; type: string }>;
+  reach?: number;                // melee reach in feet
+  rangeNormal?: number;          // ranged normal range in feet
+  rangeLong?: number;            // ranged long range in feet
+  onSaveHalf?: boolean;          // set damage.onSave = 'half' on save activities
+  uses?: {
+    max?: number | string;
+    recovery?: Array<{ period: string; type?: string; formula?: string }>;
+    value?: number;
+    spent?: number;
+  };
+}
+
 interface CompendiumEntryFull {
   id: string;
   name: string;
@@ -3730,6 +3753,79 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Copy an item from a compendium pack onto an actor in a single in-process
+   * step, applying a server-side patch spec before the item lands.
+   *
+   * Why this exists separately from addActorItems: the MCP-server-side "fetch
+   * full doc → clone in TS → send cloned blob back via addActorItems" round-trip
+   * ballooned the WebRTC wire payload to 10–50KB per item and consistently
+   * tripped Foundry's >10s `createEmbeddedDocuments` cost on copy-patched items,
+   * even though scratch-built 300-byte feat items landed in milliseconds.
+   *
+   * Here, the fetch + clone + patch + embed all happens inside Foundry, so wire
+   * traffic is just the small patchSpec. Matches the drag-drop-from-compendium
+   * code path the Foundry UI uses, which has no such payload problem.
+   *
+   * patchSpec is interpreted by activity TYPE (not id), mirroring how Reloaded
+   * statblocks shape their data: every `attack`-type activity gets
+   * bonus/type/damage/range applied; every `save`-type activity gets damage
+   * applied when the action is save-only. Save DC isn't settable in dnd5e 4.x
+   * (derived from actor at roll time) so we don't try.
+   */
+  async addActorItemFromCompendium(request: {
+    actorId?: string;
+    actorName?: string;
+    packId: string;
+    itemId: string;
+    renameTo?: string;
+    patchSpec?: ActionPatchSpec;
+    flagsPatch?: Record<string, any>;
+  }): Promise<{
+    success: boolean;
+    actorId: string;
+    actorName: string;
+    added: { _id: string; name: string; type: string } | null;
+  }> {
+    const actor = this.resolveActor(request);
+    if (!request.packId) throw new Error('packId is required');
+    if (!request.itemId) throw new Error('itemId is required');
+
+    const pack = game.packs.get(request.packId);
+    if (!pack) throw new Error(`Compendium pack not found: ${request.packId}`);
+    const sourceDoc = await (pack as any).getDocument(request.itemId);
+    if (!sourceDoc) throw new Error(`Item ${request.itemId} not found in pack ${request.packId}`);
+
+    // Foundry-side clone: toObject() gives us a fresh plain-data copy we can
+    // mutate safely. No WebRTC transit of the full doc.
+    const itemData: any = (sourceDoc as any).toObject();
+    delete itemData._id;
+
+    if (request.renameTo) itemData.name = request.renameTo;
+
+    if (request.flagsPatch) {
+      itemData.flags = (foundry.utils as any).mergeObject(itemData.flags ?? {}, request.flagsPatch);
+    }
+
+    if (request.patchSpec) {
+      applyPatchSpec(itemData, request.patchSpec);
+    }
+
+    const created = await (actor as any).createEmbeddedDocuments('Item', [itemData]);
+    const doc: any = created?.[0];
+    this.auditLog(
+      'addActorItemFromCompendium',
+      { actor: actor.name, base: `${request.packId}/${request.itemId}`, renameTo: request.renameTo },
+      doc ? 'success' : 'failure',
+    );
+    return {
+      success: !!doc,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      added: doc ? { _id: doc.id || doc._id, name: doc.name, type: doc.type } : null,
+    };
+  }
+
+  /**
    * Update existing items on an actor via updateEmbeddedDocuments.
    * Each entry must include `_id`.
    */
@@ -5963,4 +6059,80 @@ export class FoundryDataAccess {
     }
   }
 
+}
+
+/**
+ * Apply a parsed-action-derived patch to an item's activities + system.uses,
+ * in place. Used by addActorItemFromCompendium. See ActionPatchSpec doc for
+ * the semantic contract (patch by activity TYPE, not id).
+ */
+function applyPatchSpec(item: any, spec: ActionPatchSpec): void {
+  if (!item || typeof item !== 'object') return;
+
+  const activities = item?.system?.activities;
+  if (activities && typeof activities === 'object') {
+    const hasAttackActivity = Object.values(activities).some((a: any) => a?.type === 'attack');
+    for (const activity of Object.values<any>(activities)) {
+      const type = activity?.type;
+
+      if (type === 'attack') {
+        if (spec.attackBonus !== undefined) {
+          activity.attack = activity.attack ?? {};
+          activity.attack.bonus = (spec.attackBonus >= 0 ? '+' : '') + spec.attackBonus;
+          activity.attack.flat = true;
+        }
+        if (spec.attackType) {
+          activity.attack = activity.attack ?? {};
+          activity.attack.type = activity.attack.type ?? {};
+          activity.attack.type.value = spec.attackType;
+        }
+        if (spec.damageParts && spec.damageParts.length > 0) {
+          activity.damage = activity.damage ?? { parts: [] };
+          activity.damage.parts = spec.damageParts.map(damagePartPayloadForModule);
+        }
+        if (spec.reach !== undefined) {
+          activity.range = activity.range ?? {};
+          activity.range.reach = spec.reach;
+          activity.range.units = 'ft';
+        }
+        if (spec.rangeNormal !== undefined) {
+          activity.range = activity.range ?? {};
+          activity.range.value = spec.rangeNormal;
+          if (spec.rangeLong !== undefined) activity.range.long = spec.rangeLong;
+          activity.range.units = 'ft';
+        }
+      }
+
+      if (type === 'save') {
+        // Save DC + ability aren't stored in dnd5e 4.x save activities (derived
+        // at roll time). When the action is save-only (no attack activity),
+        // damage lives on the save activity.
+        if (spec.damageParts && spec.damageParts.length > 0 && !hasAttackActivity) {
+          activity.damage = activity.damage ?? { parts: [] };
+          activity.damage.parts = spec.damageParts.map(damagePartPayloadForModule);
+          if (spec.onSaveHalf) activity.damage.onSave = 'half';
+        }
+      }
+
+      if (type === 'damage' && spec.damageParts && spec.damageParts.length > 0) {
+        activity.damage = activity.damage ?? { parts: [] };
+        activity.damage.parts = spec.damageParts.map(damagePartPayloadForModule);
+      }
+    }
+  }
+
+  if (spec.uses) {
+    item.system = item.system ?? {};
+    item.system.uses = (foundry.utils as any).mergeObject(
+      item.system.uses ?? { spent: 0, max: '', recovery: [], value: 0, label: '' },
+      spec.uses,
+    );
+  }
+}
+
+function damagePartPayloadForModule(d: { formula: string; type: string }): any {
+  return {
+    custom: { enabled: true, formula: d.formula },
+    types: [d.type],
+  };
 }

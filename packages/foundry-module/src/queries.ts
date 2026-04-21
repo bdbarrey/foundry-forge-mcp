@@ -97,6 +97,7 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.uploadActorImage`] = this.handleUploadActorImage.bind(this);
     CONFIG.queries[`${modulePrefix}.updateActorData`] = this.handleUpdateActorData.bind(this);
     CONFIG.queries[`${modulePrefix}.addActorItems`] = this.handleAddActorItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.addActorItemFromCompendium`] = this.handleAddActorItemFromCompendium.bind(this);
     CONFIG.queries[`${modulePrefix}.updateActorItems`] = this.handleUpdateActorItems.bind(this);
     CONFIG.queries[`${modulePrefix}.removeActorItems`] = this.handleRemoveActorItems.bind(this);
 
@@ -1278,6 +1279,32 @@ export class QueryHandlers {
     } catch (error: any) {
       console.error(`[${MODULE_ID}] Failed to add actor items:`, error);
       return { error: error.message || 'Failed to add actor items', success: false };
+    }
+  }
+
+  /**
+   * Handle copy-patch-add of a compendium item onto an actor in one step.
+   * Avoids the WebRTC payload bloat of fetching+cloning item docs server-side
+   * (see data-access.ts:addActorItemFromCompendium for full rationale).
+   */
+  private async handleAddActorItemFromCompendium(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      return await this.dataAccess.addActorItemFromCompendium({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        packId: data.packId,
+        itemId: data.itemId,
+        renameTo: data.renameTo,
+        patchSpec: data.patchSpec,
+        flagsPatch: data.flagsPatch,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to add actor item from compendium:`, error);
+      return { error: error.message || 'Failed to add actor item from compendium', success: false };
     }
   }
 
