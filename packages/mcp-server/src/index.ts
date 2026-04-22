@@ -24,9 +24,17 @@ import * as path from 'path';
 
 
 
-const CONTROL_HOST = '127.0.0.1';
+// Backend location. Defaults keep the original auto-spawn-local-backend behavior.
+// Override FOUNDRY_MCP_BACKEND_HOST to a remote host (e.g. a Tailscale IP) to
+// drive a backend running on another machine — in that mode the wrapper does
+// NOT auto-spawn a backend and fails fast if the remote isn't reachable.
+const CONTROL_HOST = process.env.FOUNDRY_MCP_BACKEND_HOST || '127.0.0.1';
 
-const CONTROL_PORT = 31414;
+const CONTROL_PORT = parseInt(process.env.FOUNDRY_MCP_BACKEND_PORT || '31414', 10);
+
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+const IS_LOCAL_BACKEND = LOCAL_HOSTS.has(CONTROL_HOST);
 
 
 
@@ -119,6 +127,16 @@ class BackendClient {
       return;
 
     } catch (initialError) {
+
+      if (!IS_LOCAL_BACKEND) {
+
+        const msg = `Unable to reach remote Foundry MCP backend at ${CONTROL_HOST}:${CONTROL_PORT}. Wrapper does not auto-spawn in remote mode — ensure the backend is running on that host and reachable (firewall/Tailscale). Error: ${(initialError as any)?.message}`;
+
+        this.log('connectWithRetry(): remote backend unreachable, not spawning', { host: CONTROL_HOST, port: CONTROL_PORT });
+
+        throw new Error(msg);
+
+      }
 
       this.log('connectWithRetry(): starting backend');
 

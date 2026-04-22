@@ -44,9 +44,14 @@ import { ForgeAssetsClient } from './forge-assets-client.js';
 
 import { DSA5CharacterCreator } from './systems/dsa5/character-creator.js';
 
-const CONTROL_HOST = '127.0.0.1';
+// Listen address for the control channel. Defaults to 127.0.0.1 so the backend
+// is unreachable from the network. Override FOUNDRY_MCP_BACKEND_BIND to a
+// routable address (e.g. the host's Tailscale IP, or 0.0.0.0 to bind all
+// interfaces) to let a wrapper on another machine drive this backend.
+// SECURITY: the control channel has no auth — only expose it on a trusted net.
+const CONTROL_HOST = process.env.FOUNDRY_MCP_BACKEND_BIND || '127.0.0.1';
 
-const CONTROL_PORT = 31414;
+const CONTROL_PORT = parseInt(process.env.FOUNDRY_MCP_BACKEND_PORT || '31414', 10);
 
 const LOCK_FILE = path.join(os.tmpdir(), 'foundry-mcp-backend.lock');
 
