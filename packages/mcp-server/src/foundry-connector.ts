@@ -61,6 +61,10 @@ export class FoundryConnector {
 
       // Handle OPTIONS preflight
       if (req.method === 'OPTIONS') {
+        // Chrome Private Network Access: allow HTTPS pages to reach private/loopback addresses
+        if (req.headers['access-control-request-private-network'] === 'true') {
+          res.setHeader('Access-Control-Allow-Private-Network', 'true');
+        }
         res.writeHead(204);
         res.end();
         return;
