@@ -356,6 +356,41 @@ export class CreateActorTools {
               },
             );
             if (r?.success && r.added) {
+              // Post-create activity patch — module-side applyPatchSpec doesn't
+              // reliably land save/damage/attack/range on copy-patched items
+              // (dnd5e 5.x schema validation rebuilds the ActivityCollection
+              // from source and drops pre-create mutations; the post-create
+              // update inside the module had its own issues). The update path
+              // via updateActorItems is proven reliable, so orchestrate from
+              // here: read the new item's activities, build the dot-path
+              // patch, issue the update.
+              try {
+                const actorSnap: any = await this.foundryClient.query(
+                  'foundry-forge-mcp.getCharacterInfo',
+                  { characterName: newActor.id },
+                );
+                const newItem = actorSnap?.items?.find((i: any) => i.id === r.added._id);
+                const activities = newItem?.system?.activities ?? {};
+                if (Object.keys(activities).length > 0) {
+                  const activityUpdate = buildItemActivityUpdate(
+                    r.added._id,
+                    activities,
+                    action.parsed,
+                  );
+                  if (Object.keys(activityUpdate).length > 1) {
+                    await this.foundryClient.query('foundry-forge-mcp.updateActorItems', {
+                      actorId: newActor.id,
+                      updates: [activityUpdate],
+                    });
+                  }
+                }
+              } catch (patchErr: any) {
+                this.logger.warn(
+                  `copy-patch activity update "${name}" failed (item still landed with base stats)`,
+                  { error: patchErr?.message },
+                );
+              }
+
               actionsCopyPatched.push({
                 name,
                 base: `${top.cand.packId}/${top.cand.itemId}`,
