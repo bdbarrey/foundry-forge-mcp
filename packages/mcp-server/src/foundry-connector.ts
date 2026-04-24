@@ -87,7 +87,7 @@ export class FoundryConnector {
 
     // Start WebRTC signaling server
     await new Promise<void>((resolve, reject) => {
-      this.webrtcSignalingServer.listen(WEBRTC_PORT, '0.0.0.0', () => {
+      this.webrtcSignalingServer.listen(WEBRTC_PORT, '::', () => {
         this.logger.info(`WebRTC signaling server listening on port ${WEBRTC_PORT}`);
         console.error(`[WebRTC] Server started on 0.0.0.0:${WEBRTC_PORT}`);
         resolve();
