@@ -3088,11 +3088,15 @@ export class FoundryDataAccess {
         }
 
         // Deprecated dnd5e ability save (actor.system.abilities.X.save) triggers
-        // access warnings. dnd5e 5.x activity save (item.system.activities.X.save
-        // = {ability, dc}) must be kept — that's where custom DCs live.
+        // access warnings and slow getters. dnd5e 5.x activity save
+        // (item.system.activities.X.save = {ability, dc:{calculation,formula}})
+        // must be kept. Discriminator: activity save has a NESTED dc object;
+        // ability save does not. Checking `.ability` alone is unsafe — dnd5e 5.x
+        // ability save also exposes `.ability`, so that match would recurse into
+        // the deprecated proxy and stall on per-ability getters.
         if (key === 'save' && value !== null && typeof value === 'object') {
-          const asAny = value as any;
-          const looksLikeActivitySave = 'dc' in asAny || 'ability' in asAny;
+          const dc = (value as any).dc;
+          const looksLikeActivitySave = dc !== null && typeof dc === 'object';
           if (!looksLikeActivitySave) continue;
         }
 
@@ -3133,11 +3137,12 @@ export class FoundryDataAccess {
   private safeJSONStringify(obj: any): string {
     try {
       return JSON.stringify(obj, (key, value) => {
-        // Deprecated dnd5e ability save (actor.system.abilities.X.save) triggers
-        // access warnings. Activity save (item.system.activities.X.save =
-        // {ability, dc}) is the canonical DC override path — keep it.
+        // Deprecated dnd5e ability save triggers access warnings. Activity save
+        // has a NESTED dc object; ability save does not — that's the safe
+        // discriminator (see removeSensitiveFields for the full reasoning).
         if (key === 'save' && typeof value === 'object' && value !== null) {
-          const looksLikeActivitySave = 'dc' in value || 'ability' in value;
+          const dc = (value as any).dc;
+          const looksLikeActivitySave = dc !== null && typeof dc === 'object';
           if (!looksLikeActivitySave) return undefined;
         }
         return value;
