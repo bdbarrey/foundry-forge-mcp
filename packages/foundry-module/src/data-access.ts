@@ -3834,10 +3834,29 @@ export class FoundryDataAccess {
     const created = await (actor as any).createEmbeddedDocuments('Item', [itemData]);
     const doc: any = created?.[0];
 
+    // Walk itemData (plain toObject() output) for activity IDs — doc.system.activities
+    // on a live Foundry Item is an ActivityCollection that sometimes returns empty
+    // under for-of, even though the activities did land in the persisted doc.
+    // itemData is the source-truth here and its activity IDs match the created doc.
     if (doc && request.patchSpec) {
-      const activityUpdate = buildActivityUpdateFromSpec(doc, request.patchSpec);
+      const newDocId: string = doc.id || doc._id;
+      const activityUpdate = buildActivityUpdateFromSourceData(newDocId, itemData, request.patchSpec);
       if (activityUpdate) {
-        await (actor as any).updateEmbeddedDocuments('Item', [activityUpdate]);
+        try {
+          await (actor as any).updateEmbeddedDocuments('Item', [activityUpdate]);
+        } catch (err: any) {
+          console.error(
+            `[${this.moduleId}] addActorItemFromCompendium post-create activity update failed`,
+            err,
+          );
+          // Stamp a diagnostic flag so callers can see the update was attempted + failed.
+          try {
+            await (actor as any).updateEmbeddedDocuments('Item', [{
+              _id: newDocId,
+              'flags.foundry-forge-mcp.activityUpdateError': String(err?.message ?? err),
+            }]);
+          } catch { /* nothing more to do */ }
+        }
       }
     }
     this.auditLog(
@@ -6108,28 +6127,26 @@ function applyPatchSpecPreCreate(item: any, spec: ActionPatchSpec): void {
 }
 
 /**
- * Build an updateEmbeddedDocuments payload that walks the already-created
- * item's activities and applies spec fields by activity TYPE. Called after
- * createEmbeddedDocuments so the activity IDs are real.
+ * Build an updateEmbeddedDocuments payload for activity-level patches. Walks
+ * the source data's activities (plain dict from toObject()) since activity IDs
+ * survive createEmbeddedDocuments — no need to read from the live doc, which
+ * exposes activities as an ActivityCollection that has been observed to
+ * iterate inconsistently post-create.
  *
- * Returns null when the spec has nothing activity-relevant (so the caller
- * can skip the update call).
+ * Returns null when the spec has nothing activity-relevant.
  */
-function buildActivityUpdateFromSpec(doc: any, spec: ActionPatchSpec): Record<string, any> | null {
-  const activities = doc?.system?.activities;
-  if (!activities) return null;
+function buildActivityUpdateFromSourceData(
+  newDocId: string,
+  sourceData: any,
+  spec: ActionPatchSpec,
+): Record<string, any> | null {
+  const activities = sourceData?.system?.activities;
+  if (!activities || typeof activities !== 'object') return null;
 
-  // dnd5e's ActivityCollection extends Map — prefer .entries() if available,
-  // fall back to Object.entries for plain-object inputs.
-  const entries: Array<[string, any]> = [];
-  if (typeof activities.entries === 'function' && !Array.isArray(activities)) {
-    for (const [k, v] of activities.entries()) entries.push([String(k), v]);
-  } else {
-    for (const [k, v] of Object.entries(activities)) entries.push([k, v]);
-  }
+  const entries: Array<[string, any]> = Object.entries(activities);
   if (entries.length === 0) return null;
 
-  const update: Record<string, any> = { _id: doc.id || doc._id };
+  const update: Record<string, any> = { _id: newDocId };
   let hasPatch = false;
   const hasAttackActivity = entries.some(([_, a]) => a?.type === 'attack');
 
@@ -6189,6 +6206,14 @@ function buildActivityUpdateFromSpec(doc: any, spec: ActionPatchSpec): Record<st
       update[`${base}.damage.parts`] = spec.damageParts.map(damagePartPayloadForModule);
       hasPatch = true;
     }
+  }
+
+  // Diagnostic: if we're emitting a non-empty update, stamp a flag so the
+  // caller can confirm the post-create path ran. Without this there's no
+  // way to distinguish "code never executed" from "code executed but
+  // Foundry discarded the patch."
+  if (hasPatch) {
+    update['flags.foundry-forge-mcp.activityUpdateRan'] = true;
   }
 
   return hasPatch ? update : null;
