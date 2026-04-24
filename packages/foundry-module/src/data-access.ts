@@ -3087,6 +3087,15 @@ export class FoundryDataAccess {
           continue;
         }
 
+        // Deprecated dnd5e ability save (actor.system.abilities.X.save) triggers
+        // access warnings. dnd5e 5.x activity save (item.system.activities.X.save
+        // = {ability, dc}) must be kept — that's where custom DCs live.
+        if (key === 'save' && value !== null && typeof value === 'object') {
+          const asAny = value as any;
+          const looksLikeActivitySave = 'dc' in asAny || 'ability' in asAny;
+          if (!looksLikeActivitySave) continue;
+        }
+
         // Recursively sanitize the value
         sanitized[key] = this.removeSensitiveFields(value, visited, depth + 1);
       }
@@ -3113,12 +3122,9 @@ export class FoundryDataAccess {
       'constructor', 'prototype', '__proto__', 'valueOf', 'toString'
     ];
 
-    // Skip deprecated ability save properties that trigger warnings
-    const deprecatedKeys = [
-      'save' // Skip the deprecated 'save' property on abilities
-    ];
-
-    return sensitiveKeys.includes(key) || problematicKeys.includes(key) || deprecatedKeys.includes(key);
+    // Deprecated-key handling for `save` is now shape-aware in removeSensitiveFields
+    // and safeJSONStringify — the blanket skip dropped activity save objects too.
+    return sensitiveKeys.includes(key) || problematicKeys.includes(key);
   }
 
   /**
@@ -3127,10 +3133,12 @@ export class FoundryDataAccess {
   private safeJSONStringify(obj: any): string {
     try {
       return JSON.stringify(obj, (key, value) => {
-        // Skip deprecated properties during JSON serialization
+        // Deprecated dnd5e ability save (actor.system.abilities.X.save) triggers
+        // access warnings. Activity save (item.system.activities.X.save =
+        // {ability, dc}) is the canonical DC override path — keep it.
         if (key === 'save' && typeof value === 'object' && value !== null) {
-          // If this looks like a deprecated ability save object, skip it
-          return undefined;
+          const looksLikeActivitySave = 'dc' in value || 'ability' in value;
+          if (!looksLikeActivitySave) return undefined;
         }
         return value;
       });

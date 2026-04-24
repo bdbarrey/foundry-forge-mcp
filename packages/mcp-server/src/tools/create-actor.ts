@@ -1254,26 +1254,17 @@ function buildItemActivityUpdate(
     }
 
     if (type === 'save' && parsed.save) {
-      // dnd5e 4.x save activities do NOT embed a DC or ability field — the DC
-      // is derived at roll time from the actor's {8 + prof + ability_mod}, and
-      // the ability target rolls against appears to come from either the item's
-      // parsed description or a system-level fallback we haven't fully mapped.
-      //
-      // Empirical check of SRD Alchemist's Fire, Fireball, Dreadful Glare, and
-      // dnd5e.monsterfeatures24 Web all shows NO save object on the activity.
-      // So writing `save.dc.formula` / `save.ability` silently no-ops.
-      //
-      // Known gap for a follow-up: find the path (likely item-level
-      // `system.save` or a MidiQOL flag) that lets us override Reloaded's
-      // custom DCs (e.g. Volenta's Firebomb DC 14 when derivation yields 15).
-      // For now we rely on the actor's ability scores + prof producing the
-      // right DC 2/3 of the time, and let the description text show the
-      // printed DC for manual override via the Foundry UI.
+      // dnd5e 5.x SaveActivity schema: { ability: SetField, dc: { calculation, formula } }.
+      // calculation="" + formula="<N>" = custom DC (skip derivation).
+      // Writing the full save object (not dot-path fragments) is required when the
+      // activity's save is absent at defaults — partial-merge leaves the SetField
+      // uninitialized and silently no-ops.
+      u[`${base}.save`] = {
+        ability: [parsed.save.ability],
+        dc: { calculation: '', formula: String(parsed.save.dc) },
+      };
 
-      // If the action has damage AND there's no attack activity on this
-      // item, the save activity still owns the damage (e.g. Virulent Miasma:
-      // save-only action with 4d6 poison). Damage parts DO land correctly
-      // on save activities.
+      // Save-only actions (no attack activity) carry damage on the save activity.
       if (parsed.damage.length > 0 && !hasAttackActivity) {
         u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
         if (parsed.save.onSuccess === 'half') {
