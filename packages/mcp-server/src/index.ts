@@ -96,6 +96,10 @@ class BackendClient {
 
         this.socket = sock;
 
+        // Detect dead peers (laptop restart, Tailscale drop, etc) in ~30s
+        // instead of waiting ~3min for Windows TCP retransmit timeout.
+        sock.setKeepAlive(true, 30000);
+
         sock.setEncoding('utf8');
 
         sock.on('data', (chunk: string) => this.onData(chunk));
