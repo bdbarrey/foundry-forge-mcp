@@ -3821,12 +3821,25 @@ export class FoundryDataAccess {
       itemData.flags = (foundry.utils as any).mergeObject(itemData.flags ?? {}, request.flagsPatch);
     }
 
+    // Top-level system patches (uses, etc.) can be applied pre-create safely.
+    // Activity-level patches MUST be applied via a follow-up update — dnd5e
+    // 5.x's createEmbeddedDocuments schema validation rebuilds activities from
+    // the ActivityCollection source and drops mutations made to the toObject()
+    // copy. Symptom without the split: uses land, save DC + damage.parts +
+    // attack bonus don't.
     if (request.patchSpec) {
-      applyPatchSpec(itemData, request.patchSpec);
+      applyPatchSpecPreCreate(itemData, request.patchSpec);
     }
 
     const created = await (actor as any).createEmbeddedDocuments('Item', [itemData]);
     const doc: any = created?.[0];
+
+    if (doc && request.patchSpec) {
+      const activityUpdate = buildActivityUpdateFromSpec(doc, request.patchSpec);
+      if (activityUpdate) {
+        await (actor as any).updateEmbeddedDocuments('Item', [activityUpdate]);
+      }
+    }
     this.auditLog(
       'addActorItemFromCompendium',
       { actor: actor.name, base: `${request.packId}/${request.itemId}`, renameTo: request.renameTo },
@@ -6077,76 +6090,14 @@ export class FoundryDataAccess {
 }
 
 /**
- * Apply a parsed-action-derived patch to an item's activities + system.uses,
- * in place. Used by addActorItemFromCompendium. See ActionPatchSpec doc for
- * the semantic contract (patch by activity TYPE, not id).
+ * Apply top-level system patches that dnd5e accepts at createEmbeddedDocuments
+ * time. Activity-level patches go through buildActivityUpdateFromSpec +
+ * updateEmbeddedDocuments (a post-create step); pre-create activity mutations
+ * are discarded by schema validation that rebuilds the ActivityCollection from
+ * the source document's activities field.
  */
-function applyPatchSpec(item: any, spec: ActionPatchSpec): void {
+function applyPatchSpecPreCreate(item: any, spec: ActionPatchSpec): void {
   if (!item || typeof item !== 'object') return;
-
-  const activities = item?.system?.activities;
-  if (activities && typeof activities === 'object') {
-    const hasAttackActivity = Object.values(activities).some((a: any) => a?.type === 'attack');
-    for (const activity of Object.values<any>(activities)) {
-      const type = activity?.type;
-
-      if (type === 'attack') {
-        if (spec.attackBonus !== undefined) {
-          activity.attack = activity.attack ?? {};
-          activity.attack.bonus = (spec.attackBonus >= 0 ? '+' : '') + spec.attackBonus;
-          activity.attack.flat = true;
-        }
-        if (spec.attackType) {
-          activity.attack = activity.attack ?? {};
-          activity.attack.type = activity.attack.type ?? {};
-          activity.attack.type.value = spec.attackType;
-        }
-        if (spec.damageParts && spec.damageParts.length > 0) {
-          activity.damage = activity.damage ?? { parts: [] };
-          activity.damage.parts = spec.damageParts.map(damagePartPayloadForModule);
-        }
-        if (spec.reach !== undefined) {
-          activity.range = activity.range ?? {};
-          activity.range.reach = spec.reach;
-          activity.range.units = 'ft';
-        }
-        if (spec.rangeNormal !== undefined) {
-          activity.range = activity.range ?? {};
-          activity.range.value = spec.rangeNormal;
-          if (spec.rangeLong !== undefined) activity.range.long = spec.rangeLong;
-          activity.range.units = 'ft';
-        }
-      }
-
-      if (type === 'save') {
-        // dnd5e 5.x SaveActivity schema: save = { ability: SetField, dc: { calculation, formula } }.
-        // calculation="" + formula="<N>" makes the activity use the literal DC
-        // instead of deriving 8+prof+mod. Write the full object — partial
-        // dot-path merge leaves the SetField uninitialized and drops the update.
-        if (spec.saveDc !== undefined || spec.saveAbility) {
-          activity.save = {
-            ability: spec.saveAbility ? [spec.saveAbility] : [],
-            dc: {
-              calculation: spec.saveDc !== undefined ? '' : 'spellcasting',
-              formula: spec.saveDc !== undefined ? String(spec.saveDc) : '',
-            },
-          };
-        }
-        // Save-only actions (no attack activity) carry damage on the save activity.
-        if (spec.damageParts && spec.damageParts.length > 0 && !hasAttackActivity) {
-          activity.damage = activity.damage ?? { parts: [] };
-          activity.damage.parts = spec.damageParts.map(damagePartPayloadForModule);
-          if (spec.onSaveHalf) activity.damage.onSave = 'half';
-        }
-      }
-
-      if (type === 'damage' && spec.damageParts && spec.damageParts.length > 0) {
-        activity.damage = activity.damage ?? { parts: [] };
-        activity.damage.parts = spec.damageParts.map(damagePartPayloadForModule);
-      }
-    }
-  }
-
   if (spec.uses) {
     item.system = item.system ?? {};
     item.system.uses = (foundry.utils as any).mergeObject(
@@ -6154,6 +6105,93 @@ function applyPatchSpec(item: any, spec: ActionPatchSpec): void {
       spec.uses,
     );
   }
+}
+
+/**
+ * Build an updateEmbeddedDocuments payload that walks the already-created
+ * item's activities and applies spec fields by activity TYPE. Called after
+ * createEmbeddedDocuments so the activity IDs are real.
+ *
+ * Returns null when the spec has nothing activity-relevant (so the caller
+ * can skip the update call).
+ */
+function buildActivityUpdateFromSpec(doc: any, spec: ActionPatchSpec): Record<string, any> | null {
+  const activities = doc?.system?.activities;
+  if (!activities) return null;
+
+  // dnd5e's ActivityCollection extends Map — prefer .entries() if available,
+  // fall back to Object.entries for plain-object inputs.
+  const entries: Array<[string, any]> = [];
+  if (typeof activities.entries === 'function' && !Array.isArray(activities)) {
+    for (const [k, v] of activities.entries()) entries.push([String(k), v]);
+  } else {
+    for (const [k, v] of Object.entries(activities)) entries.push([k, v]);
+  }
+  if (entries.length === 0) return null;
+
+  const update: Record<string, any> = { _id: doc.id || doc._id };
+  let hasPatch = false;
+  const hasAttackActivity = entries.some(([_, a]) => a?.type === 'attack');
+
+  for (const [activityId, activity] of entries) {
+    const type = activity?.type;
+    const base = `system.activities.${activityId}`;
+
+    if (type === 'attack') {
+      if (spec.attackBonus !== undefined) {
+        update[`${base}.attack.bonus`] = (spec.attackBonus >= 0 ? '+' : '') + spec.attackBonus;
+        update[`${base}.attack.flat`] = true;
+        hasPatch = true;
+      }
+      if (spec.attackType) {
+        update[`${base}.attack.type.value`] = spec.attackType;
+        hasPatch = true;
+      }
+      if (spec.damageParts && spec.damageParts.length > 0) {
+        update[`${base}.damage.parts`] = spec.damageParts.map(damagePartPayloadForModule);
+        hasPatch = true;
+      }
+      if (spec.reach !== undefined) {
+        update[`${base}.range.reach`] = spec.reach;
+        update[`${base}.range.units`] = 'ft';
+        hasPatch = true;
+      }
+      if (spec.rangeNormal !== undefined) {
+        update[`${base}.range.value`] = spec.rangeNormal;
+        if (spec.rangeLong !== undefined) update[`${base}.range.long`] = spec.rangeLong;
+        update[`${base}.range.units`] = 'ft';
+        hasPatch = true;
+      }
+    }
+
+    if (type === 'save') {
+      // dnd5e 5.x SaveActivity: save = { ability: SetField, dc: { calculation, formula } }.
+      // calculation="" + formula="<N>" = literal DC override. Write the whole
+      // save object (not dot-path fragments) so the SetField initializes properly.
+      if (spec.saveDc !== undefined || spec.saveAbility) {
+        update[`${base}.save`] = {
+          ability: spec.saveAbility ? [spec.saveAbility] : [],
+          dc: {
+            calculation: spec.saveDc !== undefined ? '' : 'spellcasting',
+            formula: spec.saveDc !== undefined ? String(spec.saveDc) : '',
+          },
+        };
+        hasPatch = true;
+      }
+      if (spec.damageParts && spec.damageParts.length > 0 && !hasAttackActivity) {
+        update[`${base}.damage.parts`] = spec.damageParts.map(damagePartPayloadForModule);
+        if (spec.onSaveHalf) update[`${base}.damage.onSave`] = 'half';
+        hasPatch = true;
+      }
+    }
+
+    if (type === 'damage' && spec.damageParts && spec.damageParts.length > 0) {
+      update[`${base}.damage.parts`] = spec.damageParts.map(damagePartPayloadForModule);
+      hasPatch = true;
+    }
+  }
+
+  return hasPatch ? update : null;
 }
 
 function damagePartPayloadForModule(d: { formula: string; type: string }): any {
