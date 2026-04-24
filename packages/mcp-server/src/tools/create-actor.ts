@@ -192,8 +192,13 @@ export class CreateActorTools {
 
       // 5. Pull the newly-spawned actor's items so we can diff against
       //    Reloaded (decide which traits to add vs. let stand).
+      //    Query by ID (not name) so pre-existing same-named actors don't
+      //    pollute existingItemNames — without this, a second build of
+      //    "Volenta, First Form" reads the OLD Volenta's items and wrongly
+      //    marks Reloaded traits as already-present + routes every action to
+      //    actionsSkippedNoActivity with stale item ids.
       const actorFull: any = await this.foundryClient.query('foundry-forge-mcp.getCharacterInfo', {
-        characterName: newActor.name,
+        characterName: newActor.id,
       });
       const existingItemNames = new Set(
         (actorFull?.items ?? []).map((i: any) => String(i.name ?? '').toLowerCase()),
@@ -1403,6 +1408,10 @@ function buildActionPatchSpec(parsed: ParsedAction): Record<string, any> {
     if (parsed.range.long !== undefined) spec.rangeLong = parsed.range.long;
   }
   if (parsed.save?.onSuccess === 'half') spec.onSaveHalf = true;
+  if (parsed.save) {
+    spec.saveAbility = parsed.save.ability;
+    spec.saveDc = parsed.save.dc;
+  }
 
   if (parsed.usage) {
     if ('recharge' in parsed.usage) {

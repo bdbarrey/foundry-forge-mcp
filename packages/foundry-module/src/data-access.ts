@@ -224,7 +224,7 @@ interface CreatedActorInfo {
  * A parsed-action-derived patch spec for addActorItemFromCompendium.
  * Interpreted by ACTIVITY TYPE on the target item:
  *   - `attack` activities get bonus / type / damage / range applied
- *   - `save` activities get damage applied (DC is derived, not written)
+ *   - `save` activities get damage applied + custom DC/ability written
  * Top-level `uses` is merged onto the item's system.uses.
  */
 interface ActionPatchSpec {
@@ -235,6 +235,8 @@ interface ActionPatchSpec {
   rangeNormal?: number;          // ranged normal range in feet
   rangeLong?: number;            // ranged long range in feet
   onSaveHalf?: boolean;          // set damage.onSave = 'half' on save activities
+  saveAbility?: string;          // dnd5e ability key (e.g. 'dex')
+  saveDc?: number;               // literal DC, overrides derivation
   uses?: {
     max?: number | string;
     recovery?: Array<{ period: string; type?: string; formula?: string }>;
@@ -6117,9 +6119,20 @@ function applyPatchSpec(item: any, spec: ActionPatchSpec): void {
       }
 
       if (type === 'save') {
-        // Save DC + ability aren't stored in dnd5e 4.x save activities (derived
-        // at roll time). When the action is save-only (no attack activity),
-        // damage lives on the save activity.
+        // dnd5e 5.x SaveActivity schema: save = { ability: SetField, dc: { calculation, formula } }.
+        // calculation="" + formula="<N>" makes the activity use the literal DC
+        // instead of deriving 8+prof+mod. Write the full object — partial
+        // dot-path merge leaves the SetField uninitialized and drops the update.
+        if (spec.saveDc !== undefined || spec.saveAbility) {
+          activity.save = {
+            ability: spec.saveAbility ? [spec.saveAbility] : [],
+            dc: {
+              calculation: spec.saveDc !== undefined ? '' : 'spellcasting',
+              formula: spec.saveDc !== undefined ? String(spec.saveDc) : '',
+            },
+          };
+        }
+        // Save-only actions (no attack activity) carry damage on the save activity.
         if (spec.damageParts && spec.damageParts.length > 0 && !hasAttackActivity) {
           activity.damage = activity.damage ?? { parts: [] };
           activity.damage.parts = spec.damageParts.map(damagePartPayloadForModule);
