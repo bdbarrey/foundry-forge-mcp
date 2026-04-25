@@ -176,7 +176,21 @@ function* matchDamageParts(scope: string): Generator<DamagePart> {
   // "10 (2d6 + 3) necrotic damage", "14 (4d6) poison damage"
   const re = /\d+\s*\(([^)]+)\)\s*([a-z]+(?:\s+or\s+[a-z]+)?)\s*damage/gi;
   let m: RegExpExecArray | null;
+  let found = 0;
   while ((m = re.exec(scope)) !== null) {
+    found++;
+    yield { formula: normalizeFormula(m[1]), type: m[2].toLowerCase().trim() };
+  }
+  if (found > 0) return;
+
+  // Fallback for save-or-damage prose that omits the printed average and parens
+  // (Volenta's Firebomb: "must succeed on a DC 14 Dexterity saving throw or
+  // take 2d6 fire damage"). Anchored to "or take" / "saving throw, taking" so
+  // we don't pick up secondary/ongoing effects further down the description
+  // (e.g. "1d4 fire damage at the start of each of its turns").
+  const re2 =
+    /(?:\bor\s+(?:take|takes)\s+|saving throw,?\s+(?:taking|takes)\s+)(\d+d\d+(?:\s*[+-]\s*\d+)?)\s+([a-z]+(?:\s+or\s+[a-z]+)?)\s+damage/gi;
+  while ((m = re2.exec(scope)) !== null) {
     yield { formula: normalizeFormula(m[1]), type: m[2].toLowerCase().trim() };
   }
 }

@@ -149,3 +149,50 @@ describe('parseActionDescription — edge cases', () => {
     expect(r.damage).toEqual([{ formula: '1d6 - 1', type: 'bludgeoning' }]);
   });
 });
+
+describe('parseActionDescription — Volenta Firebomb (save-or-damage prose, no average)', () => {
+  const desc =
+    'Volenta hurls a flask of concentrated alchemist\'s fire at a point within 30 feet. ' +
+    'The vial shatters on impact and detonates in a 10-foot radius. ' +
+    'Any creature in that area must succeed on a DC 14 Dexterity saving throw or take 2d6 fire damage and be set ablaze. ' +
+    'A creature set ablaze in this way takes 1d4 fire damage at the start of each of its turns, ' +
+    'and can make an additional DC 14 Dexterity saving throw at the end of each of its turns to extinguish the flames.';
+  const r = parseActionDescription(desc)!;
+
+  it('parses the DC 14 Dexterity save', () => {
+    // Earlier code used to set onSuccess='half' from ANY mention of "half"; Volenta has none.
+    expect(r.save).toEqual({ dc: 14, ability: 'dex' });
+  });
+
+  it('extracts primary 2d6 fire damage from "or take" prose, NOT the secondary 1d4 ongoing', () => {
+    expect(r.damage).toEqual([{ formula: '2d6', type: 'fire' }]);
+  });
+
+  it('has no attack', () => {
+    expect(r.attackType).toBeUndefined();
+    expect(r.attackBonus).toBeUndefined();
+  });
+});
+
+describe('parseActionDescription — save-only with no damage (Tanglefoot / Thunderstone)', () => {
+  it('Tanglefoot: save with no damage is recognized but damage stays empty', () => {
+    const desc =
+      'Volenta hurls a bag of writhing, sticky black tar at a point on the ground within 30 feet. ' +
+      'The bag bursts on impact, covering up to two creatures within 5 feet of one another with sticky tar ' +
+      'and forcing each target to succeed on a DC 14 Strength saving throw or be restrained.';
+    const r = parseActionDescription(desc)!;
+    expect(r.save).toEqual({ dc: 14, ability: 'str' });
+    expect(r.damage).toEqual([]);
+  });
+
+  it('Thunderstone: save without damage is parsed cleanly (no false positive on "deafened")', () => {
+    const desc =
+      'Volenta hurls a crystalline shard at a creature, object, or surface within 30 feet. ' +
+      'The shard shatters on impact with a blast of concussive energy. ' +
+      'Each creature within 10 feet of the point of impact must succeed on a DC 14 Constitution saving throw ' +
+      'or be knocked prone and pushed 10 feet away from that point.';
+    const r = parseActionDescription(desc)!;
+    expect(r.save).toEqual({ dc: 14, ability: 'con' });
+    expect(r.damage).toEqual([]);
+  });
+});
