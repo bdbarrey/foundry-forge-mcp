@@ -271,6 +271,16 @@ export class CreateActorTools {
         // `save` activity (e.g. Wight Commander Life Drain) — both need
         // Reloaded's values applied.
         const itemUpdate = buildItemActivityUpdate(item.id, activities, action.parsed);
+        // Phase 3A: Reloaded is truth for action descriptions. Sync the
+        // item's description.value so the sheet shows the Reloaded text
+        // (e.g. compendium base Multiattack reads "two longsword attacks";
+        // Reloaded says "hail of daggers twice, dagger twice, or...").
+        // Push to update payload regardless of whether activities changed —
+        // Multiattack-shaped items (no attack/save/damage to sync) wouldn't
+        // otherwise reach actionsSynced.
+        if (action.description) {
+          itemUpdate['system.description.value'] = `<p>${escapeHtml(action.description)}</p>`;
+        }
         if (Object.keys(itemUpdate).length > 1) {
           itemUpdates.push(itemUpdate);
           actionsSynced.push(action.name);
@@ -407,6 +417,14 @@ export class CreateActorTools {
                     sourceActivities,
                     action.parsed,
                   );
+                  // Phase 3A also for copy-patched items: imported compendium
+                  // items carry SRD descriptions ("This sticky, adhesive
+                  // fluid..."); overwrite with Reloaded prose so the sheet
+                  // shows what the DM authored.
+                  if (action.description) {
+                    activityUpdate['system.description.value'] =
+                      `<p>${escapeHtml(action.description)}</p>`;
+                  }
                   diag.updateKeys = Object.keys(activityUpdate).filter((k) => k !== '_id');
 
                   if (diag.updateKeys.length === 0) {
