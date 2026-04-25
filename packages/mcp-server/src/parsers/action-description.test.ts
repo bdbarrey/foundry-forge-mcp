@@ -171,6 +171,62 @@ describe('parseActionDescription — Volenta Dagger (Reloaded drops the colon af
   });
 });
 
+describe('parseActionDescription — bare-distance reach (Reloaded drops "reach")', () => {
+  it('parses reach 5 ft. when keyword "reach" is missing on a melee attack (Volenta Dagger)', () => {
+    const r = parseActionDescription(
+      'Melee Weapon Attack +7 to hit, 5 ft., one target. Hit: 6 (1d4 + 4) piercing damage.',
+    )!;
+    expect(r.attackType).toBe('melee');
+    expect(r.reach).toBe(5);
+  });
+
+  it('does NOT use bare-distance fallback for ranged attacks (Hail of Daggers explicit "range")', () => {
+    const r = parseActionDescription(
+      'Ranged Weapon Attack: +7 to hit, range 15 ft., one target. Hit: 9 (2d4 + 4) piercing damage.',
+    )!;
+    expect(r.range).toEqual({ normal: 15 });
+    expect(r.reach).toBeUndefined();
+  });
+});
+
+describe('parseActionDescription — prose range/area for save AoEs (Phase 2C)', () => {
+  it('captures "within 30 feet" as range.normal (Tanglefoot/Thunderstone)', () => {
+    const r = parseActionDescription(
+      'Volenta hurls a bag at a point on the ground within 30 feet. ' +
+      'Each target must succeed on a DC 14 Strength saving throw or be restrained.',
+    )!;
+    expect(r.range).toEqual({ normal: 30 });
+    expect(r.save).toEqual({ dc: 14, ability: 'str' });
+  });
+
+  it('captures "10-foot radius" as range (Firebomb area)', () => {
+    const r = parseActionDescription(
+      'Volenta hurls a flask at a point within 30 feet. ' +
+      'The vial detonates in a 10-foot radius. Any creature in that area must succeed ' +
+      'on a DC 14 Dexterity saving throw or take 2d6 fire damage.',
+    )!;
+    // "within 30 feet" wins (first match — the action's range to the target point)
+    expect(r.range).toEqual({ normal: 30 });
+  });
+
+  it('skips caster-relative qualifiers like "within 5 feet of one another"', () => {
+    const r = parseActionDescription(
+      'Volenta hurls a bag covering up to two creatures within 5 feet of one another. ' +
+      'Each target must succeed on a DC 14 Strength saving throw or be restrained.',
+    )!;
+    // "within 5 feet of" is "within X feet of <target>" — that describes target
+    // grouping, not the action's range. Should NOT set range to 5.
+    expect(r.range).toBeUndefined();
+  });
+
+  it('captures "20-foot radius" for Smokestick area', () => {
+    const r = parseActionDescription(
+      'Releases a cloud of opaque smoke that creates a heavily obscured area in a 20-foot radius.',
+    )!;
+    expect(r.range).toEqual({ normal: 20 });
+  });
+});
+
 describe('parseActionDescription — Volenta Firebomb (save-or-damage prose, no average)', () => {
   const desc =
     'Volenta hurls a flask of concentrated alchemist\'s fire at a point within 30 feet. ' +

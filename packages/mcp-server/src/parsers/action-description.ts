@@ -94,6 +94,30 @@ export function parseActionDescription(desc: string): ParsedAction | null {
       : { normal };
   }
 
+  // Bare-distance reach fallback: Reloaded sometimes drops the "reach" keyword
+  // ("Melee Weapon Attack +7 to hit, 5 ft., one target." — Volenta's Dagger).
+  // Only use as fallback for melee attacks when explicit reach didn't match.
+  if (out.reach === undefined && out.attackType === 'melee') {
+    const bareReach = text.match(/Attack(?:\s+Roll)?[^.]*?,\s*(\d+)\s*ft\.?\s*,/i);
+    if (bareReach) out.reach = parseInt(bareReach[1], 10);
+  }
+
+  // Prose range/area fallback for save-only AoEs (Volenta's Tanglefoot,
+  // Thunderstone, Firebomb, Smokestick). Only fires when the explicit
+  // "range X ft." pattern didn't match. Pulls the FIRST distance qualifier
+  // attached to the action — "within 30 feet" / "10-foot radius" / "X-foot
+  // cone" / "X-foot line". Caster-relative distance ("within 5 feet of one
+  // another", "within 5 feet of a hostile creature") is skipped: it describes
+  // target relationships, not the action's range.
+  if (!out.range) {
+    const proseDistance =
+      text.match(/within\s+(\d+)\s*(?:feet|ft\.?)(?!\s+of)/i) ??
+      text.match(/(\d+)-foot\s+(?:radius|cone|line|cube|sphere)/i);
+    if (proseDistance) {
+      out.range = { normal: parseInt(proseDistance[1], 10) };
+    }
+  }
+
   // Target — everything between reach/range and the terminating period, or
   // before "Hit:".
   const targetMatch = text.match(

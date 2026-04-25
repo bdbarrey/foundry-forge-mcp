@@ -851,6 +851,13 @@ export class CreateActorTools {
           onSave: parsed.save.onSuccess === 'half' ? 'half' : 'none',
         };
       }
+      if (parsed.range) {
+        saveActivity.range = {
+          value: parsed.range.normal,
+          units: 'ft',
+          ...(parsed.range.long ? { long: parsed.range.long } : {}),
+        };
+      }
       system.activities = { [activityId]: saveActivity };
     }
 
@@ -1022,6 +1029,7 @@ export class CreateActorTools {
       u[`system.abilities.${ab}.value`] = sb.abilities[ab].score;
     }
     if (sb.challengeNumeric !== null) u['system.details.cr'] = sb.challengeNumeric;
+    if (sb.alignment) u['system.details.alignment'] = sb.alignment;
     return u;
   }
 
@@ -1043,14 +1051,30 @@ export class CreateActorTools {
 
   private buildSkillsChunk(sb: ReloadedStatblock): Record<string, any> {
     const u: Record<string, any> = {};
-    for (const skillName of Object.keys(sb.skills)) {
+    const prof = sb.proficiencyBonus ?? 0;
+    for (const [skillName, printedMod] of Object.entries(sb.skills)) {
       const abbr = SKILL_NAME_TO_ABBR[skillName.toLowerCase()];
       if (!abbr) continue;
-      // dnd5e 4.x uses `.value` (0=none, 1=full, 2=expertise) as the canonical
-      // proficiency level. `.proficient` is a legacy boolean alias still read
-      // by some call sites; we set both so display + derivation stay in sync.
-      u[`system.skills.${abbr}.value`] = 1;
-      u[`system.skills.${abbr}.proficient`] = 1;
+      const abilityKey = SKILL_TO_ABILITY[abbr];
+      const abilityScore = abilityKey ? sb.abilities[abilityKey]?.score : undefined;
+      // Infer proficiency level from the printed modifier:
+      //   delta == prof_bonus       → expertise   (value=2)
+      //   delta == ceil(prof / 2)   → half-prof   (value=0.5)
+      //   else                      → basic prof  (value=1)
+      // Falls back to basic when ability score / prof isn't known. Volenta's
+      // Acrobatics/Stealth +10 (Dex 18, prof +3) → mod +4 + prof 3 = basic +7,
+      // delta +3 = prof, so expertise. Perception +5 = Wis 14 mod +2 + prof 3,
+      // delta 0, so basic.
+      let level: 1 | 2 | 0.5 = 1;
+      if (abilityScore !== undefined && prof > 0) {
+        const abilityMod = Math.floor((abilityScore - 10) / 2);
+        const baseProf = abilityMod + prof;
+        const delta = printedMod - baseProf;
+        if (delta === prof) level = 2;
+        else if (delta === Math.ceil(prof / 2)) level = 0.5;
+      }
+      u[`system.skills.${abbr}.value`] = level;
+      u[`system.skills.${abbr}.proficient`] = level;
     }
     return u;
   }
@@ -1240,6 +1264,15 @@ const SKILL_NAME_TO_ABBR: Record<string, string> = {
   survival: 'sur',
 };
 
+// Skill-abbr → governing ability (dnd5e 5e default mapping). Used by the
+// skills chunk to compute the basic-prof baseline modifier so we can infer
+// expertise / half-prof from the printed Reloaded modifier.
+const SKILL_TO_ABILITY: Record<string, 'str' | 'dex' | 'con' | 'int' | 'wis' | 'cha'> = {
+  acr: 'dex', ani: 'wis', arc: 'int', ath: 'str', dec: 'cha', his: 'int',
+  ins: 'wis', itm: 'cha', inv: 'int', med: 'wis', nat: 'int', prc: 'wis',
+  prf: 'cha', per: 'cha', rel: 'int', slt: 'dex', ste: 'dex', sur: 'wis',
+};
+
 const SIZE_CODE_TO_WORD_LOCAL: Record<string, string> = {
   tiny: 'tiny', sm: 'small', med: 'medium', lg: 'large', huge: 'huge', grg: 'gargantuan',
 };
@@ -1393,6 +1426,15 @@ export function buildItemActivityUpdate(
         u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
         if (parsed.save.onSuccess === 'half') {
           u[`${base}.damage.onSave`] = 'half';
+        }
+        // Range belongs on whichever activity carries the action (the one
+        // getting damage). For save-only AoE actions like Volenta's Firebomb
+        // ("within 30 feet") the range goes on the save activity since the
+        // attack branch never fires.
+        if (parsed.range) {
+          u[`${base}.range.value`] = parsed.range.normal;
+          if (parsed.range.long) u[`${base}.range.long`] = parsed.range.long;
+          u[`${base}.range.units`] = 'ft';
         }
       }
     }
