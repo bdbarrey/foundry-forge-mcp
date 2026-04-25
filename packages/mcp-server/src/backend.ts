@@ -40,6 +40,8 @@ import { FoldersTools } from './tools/folders.js';
 
 import { CreateActorTools } from './tools/create-actor.js';
 
+import { AuditActorTools } from './tools/audit-actor.js';
+
 import { ForgeAssetsClient } from './forge-assets-client.js';
 
 import { DSA5CharacterCreator } from './systems/dsa5/character-creator.js';
@@ -1095,6 +1097,8 @@ async function startBackend(): Promise<void> {
 
   const createActorTools = new CreateActorTools({ foundryClient, logger });
 
+  const auditActorTools = new AuditActorTools({ foundryClient, logger });
+
   // Initialize mapgen-style backend components for map generation
   let mapGenerationJobQueue: any = null;
   let mapGenerationComfyUIClient: any = null;
@@ -1355,6 +1359,8 @@ async function startBackend(): Promise<void> {
 
     ...createActorTools.getToolDefinitions(),
 
+    ...auditActorTools.getToolDefinitions(),
+
   ];
 
   // Start Foundry connector (owns app port 31415)
@@ -1476,6 +1482,12 @@ async function startBackend(): Promise<void> {
                 case 'infer-base-action':
 
                   result = await createActorTools.handleInferBaseAction(args);
+
+                  break;
+
+                case 'audit-actor':
+
+                  result = await auditActorTools.handleAuditActor(args);
 
                   break;
 
