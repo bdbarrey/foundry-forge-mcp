@@ -3075,6 +3075,18 @@ export class FoundryDataAccess {
         return sanitizedMap;
       }
 
+      // Sets serialize as {} via Object.entries (no own enumerable properties).
+      // dnd5e 5.x stores activity save.ability as a SetField (Set<string>),
+      // and without this branch every save activity readback shows
+      // ability={} — same shape as an empty Set, so the data looks broken
+      // even when it's correct. Emit the Set's contents as an array so the
+      // shape round-trips through JSON.
+      if (obj instanceof Set) {
+        return Array.from(obj.values()).map((item) =>
+          this.removeSensitiveFields(item, visited, depth + 1),
+        );
+      }
+
       // Create a new sanitized object
       const sanitized: any = {};
 
