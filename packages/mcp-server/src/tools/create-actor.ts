@@ -307,6 +307,11 @@ export class CreateActorTools {
       const actionsCopyPatched: Array<{ name: string; base: string; score: number }> = [];
       const actionsScratchBuilt: string[] = [];
       const actionsBuildFailures: Array<{ name: string; error: string }> = [];
+      // Per copy-patched item: traces every step of the post-create activity-update
+      // orchestration so failures surface in the response (manual hot-patches were
+      // needed because the in-flight update silently no-op'd). Persistent — leave
+      // in place even after Phase 0 closes; cheap data, large debugging payoff.
+      const copyPatchDiag: Array<Record<string, any>> = [];
 
       // Build a quick lookup from action-name to the raw action struct (we need
       // both .name and .parsed + .description for the build).
@@ -364,27 +369,62 @@ export class CreateActorTools {
               // via updateActorItems is proven reliable, so orchestrate from
               // here: read the new item's activities, build the dot-path
               // patch, issue the update.
+              // Read activity dict from the compendium source (top.doc) — this
+              // is the same source the module's createEmbeddedDocuments copies
+              // from, so its activity ids match the new item's. getCharacterInfo
+              // was unreliable here: the freshly-created Item exposes
+              // system.activities as an ActivityCollection that intermittently
+              // iterates empty under for-of right after create (see the
+              // addActorItemFromCompendium "doc.system.activities ... sometimes
+              // returns empty" comment). The compendium doc has none of that
+              // race because it's a static read.
+              const sourceActivities: Record<string, any> =
+                ((top.doc as any)?.system?.activities ??
+                  (top.doc as any)?.fullData?.system?.activities ??
+                  {}) as Record<string, any>;
+              const sourceActivityIds = Object.keys(sourceActivities);
+              const diag: Record<string, any> = {
+                name,
+                baseItemId: r.added._id,
+                step: 'start',
+                parsedHas: {
+                  attackBonus: action.parsed.attackBonus !== undefined,
+                  save: !!action.parsed.save,
+                  damage: action.parsed.damage.length > 0,
+                  reach: action.parsed.reach !== undefined,
+                  range: !!action.parsed.range,
+                },
+                sourceActivityIds,
+                sourceActivityTypes: sourceActivityIds.map((id) => sourceActivities[id]?.type),
+              };
+              copyPatchDiag.push(diag);
               try {
-                const actorSnap: any = await this.foundryClient.query(
-                  'foundry-forge-mcp.getCharacterInfo',
-                  { characterName: newActor.id },
-                );
-                const newItem = actorSnap?.items?.find((i: any) => i.id === r.added._id);
-                const activities = newItem?.system?.activities ?? {};
-                if (Object.keys(activities).length > 0) {
+                if (sourceActivityIds.length === 0) {
+                  diag.step = 'noSourceActivities';
+                } else {
                   const activityUpdate = buildItemActivityUpdate(
                     r.added._id,
-                    activities,
+                    sourceActivities,
                     action.parsed,
                   );
-                  if (Object.keys(activityUpdate).length > 1) {
-                    await this.foundryClient.query('foundry-forge-mcp.updateActorItems', {
-                      actorId: newActor.id,
-                      updates: [activityUpdate],
-                    });
+                  diag.updateKeys = Object.keys(activityUpdate).filter((k) => k !== '_id');
+
+                  if (diag.updateKeys.length === 0) {
+                    diag.step = 'emptyUpdatePayload';
+                  } else {
+                    diag.step = 'sendUpdate';
+                    const upd: any = await this.foundryClient.query(
+                      'foundry-forge-mcp.updateActorItems',
+                      { actorId: newActor.id, updates: [activityUpdate] },
+                    );
+                    diag.updateResult = !!upd?.success;
+                    diag.updatedCount = Array.isArray(upd?.updated) ? upd.updated.length : 0;
+                    diag.step = 'done';
                   }
                 }
               } catch (patchErr: any) {
+                diag.error = patchErr?.message ?? String(patchErr);
+                diag.step = `error:${diag.step}`;
                 this.logger.warn(
                   `copy-patch activity update "${name}" failed (item still landed with base stats)`,
                   { error: patchErr?.message },
@@ -447,6 +487,7 @@ export class CreateActorTools {
           .map(t => t.name),
         actionsSynced: actionsSynced.filter(n => !actionSyncFailures.find(f => f.name === n)),
         actionsCopyPatched,
+        copyPatchDiag,
         actionsScratchBuilt,
         actionsBuildFailures,
         actionsSkippedNoItem,
@@ -710,7 +751,7 @@ export class CreateActorTools {
     actionName: string,
     parsed: ParsedAction,
     topN: number,
-  ): Promise<Array<{ cand: ActionCandidateFull; score: ReturnType<typeof scoreActionCandidate> }>> {
+  ): Promise<Array<{ cand: ActionCandidateFull; score: ReturnType<typeof scoreActionCandidate>; doc: any }>> {
     // 1. Collect unique name-based hits across all variants.
     const uniqueBasic = new Map<string, ActionCandidateBasic>();
     for (const variant of actionNameVariants(actionName)) {
@@ -1252,7 +1293,7 @@ function escapeHtml(s: string): string {
  * an `attack` and a `save` activity (e.g. Life Drain) gets both branches
  * patched in a single update.
  */
-function buildItemActivityUpdate(
+export function buildItemActivityUpdate(
   itemId: string,
   activities: Record<string, any>,
   parsed: import('../parsers/action-description.js').ParsedAction,
