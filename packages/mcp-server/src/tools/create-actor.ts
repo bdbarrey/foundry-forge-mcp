@@ -1300,7 +1300,14 @@ export function buildItemActivityUpdate(
 ): Record<string, any> {
   const u: Record<string, any> = { _id: itemId };
 
-  const hasAttackActivity = Object.values(activities).some(a => a?.type === 'attack');
+  // Where does parsed damage belong? attack-bonus implies a Hit:-style attack,
+  // so damage rides the attack activity. Otherwise (save-only prose like "must
+  // succeed... or take 2d6 fire damage") it rides the save activity, even when
+  // the BASE compendium item happens to also expose an attack activity (some
+  // dnd5e 5.x bases like Alchemist's Fire ship both Midi Attack + Midi Save).
+  // The discriminator is the parsed shape, not the base item's activity set.
+  const damageGoesOnAttack = parsed.attackBonus !== undefined;
+  const damageGoesOnSave = !damageGoesOnAttack && !!parsed.save;
 
   for (const [activityId, activity] of Object.entries(activities)) {
     const base = `system.activities.${activityId}`;
@@ -1313,10 +1320,7 @@ export function buildItemActivityUpdate(
         u[`${base}.attack.type.value`] = parsed.attackType;
       }
 
-      // Damage on the attack activity (when the action has both attack and
-      // save, damage usually lives on the attack side — the save is a
-      // secondary effect like HP-reduction).
-      if (parsed.damage.length > 0) {
+      if (damageGoesOnAttack && parsed.damage.length > 0) {
         u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
       }
 
@@ -1345,8 +1349,7 @@ export function buildItemActivityUpdate(
         dc: { calculation: '', formula: String(parsed.save.dc) },
       };
 
-      // Save-only actions (no attack activity) carry damage on the save activity.
-      if (parsed.damage.length > 0 && !hasAttackActivity) {
+      if (damageGoesOnSave && parsed.damage.length > 0) {
         u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
         if (parsed.save.onSuccess === 'half') {
           u[`${base}.damage.onSave`] = 'half';

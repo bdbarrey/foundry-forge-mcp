@@ -75,6 +75,37 @@ describe('buildItemActivityUpdate', () => {
     ]);
   });
 
+  it('routes save-only damage to the save activity even when base has attack+save (Firebomb on Alchemist\'s Fire base)', () => {
+    // dnd5e 5.x's Alchemist's Fire ships with TWO activities (Midi Attack +
+    // Midi Save). Volenta's Firebomb Reloaded prose is save-only ("must
+    // succeed... or take 2d6 fire damage"). Damage should land on the save
+    // activity — the prose has no attack bonus to anchor an attack roll.
+    const parsed: ParsedAction = {
+      damage: [{ formula: '2d6', type: 'fire' }],
+      save: { dc: 14, ability: 'dex' },
+    };
+    const activities = {
+      attackId: { type: 'attack' },
+      saveId: { type: 'save' },
+    };
+    const update = buildItemActivityUpdate('itemE', activities, parsed);
+
+    // Damage on save, not on attack
+    expect(update['system.activities.saveId.damage.parts']).toEqual([
+      { custom: { enabled: true, formula: '2d6' }, types: ['fire'] },
+    ]);
+    expect(update['system.activities.attackId.damage.parts']).toBeUndefined();
+
+    // Save still gets DC + ability
+    expect(update['system.activities.saveId.save']).toEqual({
+      ability: ['dex'],
+      dc: { calculation: '', formula: '14' },
+    });
+
+    // No attack overrides written (parsed had no attack bonus)
+    expect(update['system.activities.attackId.attack.bonus']).toBeUndefined();
+  });
+
   it('returns only _id (no activity keys) when parsed has neither attack nor save nor damage', () => {
     const parsed: ParsedAction = { damage: [] };
     const activities = { saveId: { type: 'save' } };
