@@ -73,6 +73,10 @@ describe('buildItemActivityUpdate', () => {
     expect(update['system.activities.attackId.damage.parts']).toEqual([
       { custom: { enabled: true, formula: '2d4 + 4' }, types: ['piercing'] },
     ]);
+    // Phase 1A: suppress base contribution when damage is overridden, otherwise
+    // dnd5e adds the weapon's base die on top (Hail of Daggers becomes 4d4+8
+    // instead of 2d4+4).
+    expect(update['system.activities.attackId.damage.includeBase']).toBe(false);
   });
 
   it('routes save-only damage to the save activity even when base has attack+save (Firebomb on Alchemist\'s Fire base)', () => {

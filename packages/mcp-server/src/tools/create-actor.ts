@@ -445,7 +445,7 @@ export class CreateActorTools {
           } else {
             // Scratch-build fallback — tiny payload, goes through the normal
             // addActorItems path.
-            const itemPayload = this.buildScratchActionItem(name, action.description);
+            const itemPayload = this.buildScratchActionItem(name, action.description, action.parsed);
             const addResult = await this.addItemsWithBatchFallback(newActor.id, [itemPayload]);
             if (addResult.added.length > 0) {
               actionsScratchBuilt.push(name);
@@ -818,15 +818,46 @@ export class CreateActorTools {
    * minimal feat item with name + description (HTML) only. Not wired for
    * MidiQOL — the DM sees the printed action but has to roll manually.
    */
-  private buildScratchActionItem(name: string, description: string): Record<string, any> {
+  private buildScratchActionItem(
+    name: string,
+    description: string,
+    parsed?: import('../parsers/action-description.js').ParsedAction,
+  ): Record<string, any> {
+    const system: any = {
+      description: { value: `<p>${escapeHtml(description)}</p>` },
+      source: { book: 'CoS Reloaded' },
+      type: { value: 'monster' },
+    };
+
+    // If the parsed action has a save (Tanglefoot, Thunderstone, etc.) attach
+    // a save activity so the DM can roll it from the sheet. Without this the
+    // feat is description-only — DM has to remember to call for a saving throw
+    // and apply effects manually. Damage rides the save activity when present
+    // (matches the buildItemActivityUpdate damageGoesOnSave path).
+    if (parsed?.save) {
+      const activityId = genActivityId();
+      const saveActivity: any = {
+        type: 'save',
+        _id: activityId,
+        name: 'Save',
+        save: {
+          ability: [parsed.save.ability],
+          dc: { calculation: '', formula: String(parsed.save.dc) },
+        },
+      };
+      if (parsed.damage.length > 0) {
+        saveActivity.damage = {
+          parts: parsed.damage.map(damagePartPayload),
+          onSave: parsed.save.onSuccess === 'half' ? 'half' : 'none',
+        };
+      }
+      system.activities = { [activityId]: saveActivity };
+    }
+
     return {
       name,
       type: 'feat',
-      system: {
-        description: { value: `<p>${escapeHtml(description)}</p>` },
-        source: { book: 'CoS Reloaded' },
-        type: { value: 'monster' },
-      },
+      system,
       flags: {
         'foundry-forge-mcp': { source: 'reloaded-scratch-action' },
       },
@@ -1322,6 +1353,11 @@ export function buildItemActivityUpdate(
 
       if (damageGoesOnAttack && parsed.damage.length > 0) {
         u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
+        // Reloaded prints the FULL damage formula (e.g. "2d4 + 4" already
+        // includes ability mod). dnd5e's default `includeBase=true` adds the
+        // weapon's base die on top, so Hail of Daggers becomes 4d4+8 instead
+        // of 2d4+4. Suppress base contribution whenever we override damage.
+        u[`${base}.damage.includeBase`] = false;
       }
 
       // Reach / range live on the attack activity. dnd5e 4.x normalizes these
@@ -1363,6 +1399,16 @@ export function buildItemActivityUpdate(
   }
 
   return u;
+}
+
+function genActivityId(): string {
+  // dnd5e activity IDs are 16 alphanumeric chars (matches Foundry's standard
+  // doc id length). Random-only — collisions across activities on the same
+  // item are vanishingly unlikely at 16 chars from 62 alphabet.
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let id = '';
+  for (let i = 0; i < 16; i++) id += chars[Math.floor(Math.random() * chars.length)];
+  return id;
 }
 
 function damagePartPayload(d: { formula: string; type: string }) {
