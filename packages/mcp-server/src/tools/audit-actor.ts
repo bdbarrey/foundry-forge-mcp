@@ -399,14 +399,24 @@ function compareTokenList(
 }
 
 function tokenizeTraitList(raw: string, recognized: Set<string>): Set<string> {
+  // Mirror create-actor's assignTraitList: split on `;` FIRST so a
+  // semicolon-prefixed conditional clause (e.g. "necrotic; bludgeoning,
+  // piercing, and slashing from nonmagical attacks") doesn't leak its
+  // damage-type tokens into the recognized set. Within each segment, an
+  // all-or-nothing rule: if ANY token in a segment is unrecognized, the whole
+  // segment is treated as custom prose (so its damage-type words don't count
+  // as proper resistances/immunities).
   const out = new Set<string>();
-  // Same split pattern as create-actor: comma + " and ", trim each.
-  const parts = raw
-    .split(/[,;]|\s+and\s+/i)
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean);
-  for (const p of parts) {
-    if (recognized.has(p)) out.add(p);
+  for (const segment of raw.split(';').map(s => s.trim()).filter(Boolean)) {
+    const tokens = segment
+      .replace(/\band\b/gi, ',')
+      .split(',')
+      .map(t => t.trim().toLowerCase())
+      .filter(Boolean);
+    if (tokens.length === 0) continue;
+    const allRecognized = tokens.every(t => recognized.has(t));
+    if (!allRecognized) continue;
+    for (const t of tokens) out.add(t);
   }
   return out;
 }

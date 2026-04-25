@@ -357,6 +357,41 @@ describe('compareActor — actions', () => {
   });
 });
 
+describe('compareActor — traits list (semicolon conditional clauses)', () => {
+  it('does not flag conditional damage resistances as missing', () => {
+    // Volenta-shape: "necrotic; bludgeoning, piercing, and slashing from nonmagical attacks"
+    // create-actor only writes ['necrotic'] to .value (the second segment goes to .custom
+    // because "from nonmagical attacks" is unrecognized). Audit must mirror that.
+    const sb = makeStatblock({
+      damageResistances: 'necrotic; bludgeoning, piercing, and slashing from nonmagical attacks',
+    });
+    const actor = makeActor({
+      attributes: { hp: { max: 100 }, ac: { flat: 14 } },
+      abilities: { str: { value: 16 }, dex: { value: 14 }, con: { value: 16 },
+        int: { value: 10 }, wis: { value: 12 }, cha: { value: 12 } },
+      traits: { dr: { value: ['necrotic'] } },
+    });
+    const audit = compareActor(actor, sb);
+    const dr = audit.traitsList.find(d => d.field === 'traits.dr');
+    expect(dr!.status).toBe('match');
+    expect(dr!.reloaded).toEqual(['necrotic']);
+  });
+
+  it('flags missing damage resistance from a fully-recognized segment', () => {
+    const sb = makeStatblock({ damageResistances: 'fire, cold' });
+    const actor = makeActor({
+      attributes: { hp: { max: 100 }, ac: { flat: 14 } },
+      abilities: { str: { value: 16 }, dex: { value: 14 }, con: { value: 16 },
+        int: { value: 10 }, wis: { value: 12 }, cha: { value: 12 } },
+      traits: { dr: { value: ['fire'] } },
+    });
+    const audit = compareActor(actor, sb);
+    const dr = audit.traitsList.find(d => d.field === 'traits.dr');
+    expect(dr!.status).toBe('divergence');
+    expect((dr!.note ?? '')).toContain('cold');
+  });
+});
+
 describe('compareActor — summary aggregation', () => {
   it('counts critical/medium/low correctly', () => {
     const sb = makeStatblock({ hp: { avg: 142, formula: null }, alignment: 'chaotic evil' });
