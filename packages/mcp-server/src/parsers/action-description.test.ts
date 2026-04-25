@@ -150,6 +150,27 @@ describe('parseActionDescription — edge cases', () => {
   });
 });
 
+describe('parseActionDescription — Volenta Dagger (Reloaded drops the colon after Attack)', () => {
+  // The CoS Reloaded statblock for Volenta's Dagger writes "Melee Weapon Attack +7"
+  // with no colon — Hail of Daggers RIGHT ABOVE it has a colon. Both must parse.
+  it('parses attack bonus when the colon is missing', () => {
+    const r = parseActionDescription(
+      'Melee Weapon Attack +7 to hit, 5 ft., one target. Hit: 6 (1d4 + 4) piercing damage.',
+    )!;
+    expect(r.attackType).toBe('melee');
+    expect(r.attackBonus).toBe(7);
+    expect(r.damage).toEqual([{ formula: '1d4 + 4', type: 'piercing' }]);
+  });
+
+  it('still parses attack bonus when the colon is present', () => {
+    const r = parseActionDescription(
+      'Ranged Weapon Attack: +7 to hit, range 15 ft., one target. Hit: 9 (2d4 + 4) piercing damage.',
+    )!;
+    expect(r.attackType).toBe('ranged');
+    expect(r.attackBonus).toBe(7);
+  });
+});
+
 describe('parseActionDescription — Volenta Firebomb (save-or-damage prose, no average)', () => {
   const desc =
     'Volenta hurls a flask of concentrated alchemist\'s fire at a point within 30 feet. ' +

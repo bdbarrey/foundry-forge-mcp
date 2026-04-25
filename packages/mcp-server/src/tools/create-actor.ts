@@ -1345,8 +1345,12 @@ export function buildItemActivityUpdate(
     const type = activity?.type;
 
     if (type === 'attack' && parsed.attackBonus !== undefined) {
-      // dnd5e 4.x stores attack bonus as a string with leading sign
+      // dnd5e stores attack bonus as a string with leading sign. flat=true
+      // makes the bonus the FULL attack roll modifier — without it, dnd5e
+      // adds ability + prof on top, so Reloaded's "+7" displays as +14
+      // (bonus +7 + Dex +4 + prof +3) on Hail of Daggers.
       u[`${base}.attack.bonus`] = (parsed.attackBonus >= 0 ? '+' : '') + parsed.attackBonus;
+      u[`${base}.attack.flat`] = true;
       if (parsed.attackType) {
         u[`${base}.attack.type.value`] = parsed.attackType;
       }

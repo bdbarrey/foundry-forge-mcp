@@ -71,8 +71,10 @@ export function parseActionDescription(desc: string): ParsedAction | null {
   // Attack type + bonus
   //   "Melee Weapon Attack: +7 to hit"  (5e 2014)
   //   "Melee Attack Roll: +7"           (5e 2024)
+  //   "Melee Weapon Attack +7 to hit"   (Reloaded sometimes drops the colon
+  //                                      — Volenta's Dagger entry, for one)
   const attackMatch = text.match(
-    /(Melee|Ranged)\s+(?:Weapon\s+)?Attack(?:\s+Roll)?\s*:\s*([+-]?\d+)\s*(?:to hit)?/i,
+    /(Melee|Ranged)\s+(?:Weapon\s+)?Attack(?:\s+Roll)?\s*[:,]?\s*([+-]?\d+)\s*(?:to hit)?/i,
   );
   if (attackMatch) {
     out.attackType = attackMatch[1].toLowerCase() as AttackType;

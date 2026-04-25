@@ -67,6 +67,9 @@ describe('buildItemActivityUpdate', () => {
     const update = buildItemActivityUpdate('itemC', activities, parsed);
 
     expect(update['system.activities.attackId.attack.bonus']).toBe('+7');
+    // attack.flat=true so dnd5e treats +7 as the full to-hit, not as a bonus
+    // added to ability+prof (which would yield +14 on a Dex 18 / prof +3 statblock).
+    expect(update['system.activities.attackId.attack.flat']).toBe(true);
     expect(update['system.activities.attackId.attack.type.value']).toBe('ranged');
     expect(update['system.activities.attackId.range.value']).toBe(15);
     expect(update['system.activities.attackId.range.units']).toBe('ft');
