@@ -994,17 +994,26 @@ export class CreateActorTools {
         };
       }
 
-      const targetUrl = top.entry.url ?? top.entry.path;
+      // Beneos cos_tokens convention: each NPC ships as a pair —
+      // `<stem>.webp` (portrait) + `<stem>_token.webp` (token). When the
+      // resolver picked one, look up the sibling so the actor's `img` and
+      // `prototypeToken.texture.src` get the right image each.
+      const pair = resolveBeneosPair(top.entry, entries);
+      const portraitUrl = pair.portrait.url ?? pair.portrait.path;
+      const tokenUrl = pair.token.url ?? pair.token.path;
+
       try {
-        await this.applyActorImage(actor.id, targetUrl, applyToToken);
+        await this.applyActorPortraitAndToken(actor.id, portraitUrl, tokenUrl, applyToToken);
         return {
           applied: true,
           mode: 'lookup',
           folder,
-          imageUrl: targetUrl,
+          portraitUrl,
+          tokenUrl: applyToToken ? tokenUrl : null,
           matchedFile: top.entry.name,
           matchedAgainst: top.matchedAgainst,
           score: Number(top.score.toFixed(3)),
+          tokenSiblingFound: pair.tokenSiblingFound,
           tokenUpdated: applyToToken,
           candidates: ranked.slice(0, 5),
         };
@@ -1013,7 +1022,8 @@ export class CreateActorTools {
           applied: false,
           mode: 'lookup',
           folder,
-          imageUrl: targetUrl,
+          portraitUrl,
+          tokenUrl,
           matchedFile: top.entry.name,
           error: err?.message ?? String(err),
         };
@@ -1031,6 +1041,24 @@ export class CreateActorTools {
   ): Promise<void> {
     const updates: Record<string, any> = { img: imageUrl };
     if (applyToToken) updates['prototypeToken.texture.src'] = imageUrl;
+    const r: any = await this.foundryClient.query('foundry-forge-mcp.updateActorData', {
+      actorId,
+      updates,
+    });
+    if (r?.success === false) {
+      throw new Error(r?.error ?? 'updateActorData returned success=false');
+    }
+  }
+
+  /** Apply distinct URLs for portrait (`img`) and token (`prototypeToken.texture.src`). */
+  private async applyActorPortraitAndToken(
+    actorId: string,
+    portraitUrl: string,
+    tokenUrl: string,
+    applyToToken: boolean,
+  ): Promise<void> {
+    const updates: Record<string, any> = { img: portraitUrl };
+    if (applyToToken) updates['prototypeToken.texture.src'] = tokenUrl;
     const r: any = await this.foundryClient.query('foundry-forge-mcp.updateActorData', {
       actorId,
       updates,
@@ -1496,6 +1524,50 @@ export function portraitNameScore(query: string, candidate: string): number {
 
 function normalizePortraitName(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * Beneos cos_tokens convention: each NPC ships as a pair —
+ *   `<stem>.webp`         (portrait, larger image)
+ *   `<stem>_token.webp`   (token, round/square ready for the canvas)
+ *
+ * Given the resolver's top match and the full file list, return the right
+ * URL for each slot. If the matched filename is the `_token` variant, find
+ * its non-token sibling for `img`. If the matched filename is the portrait
+ * variant, find its `_token` sibling for `prototypeToken.texture.src`. If
+ * no sibling exists, both fields fall back to the matched URL (correct
+ * behavior for libraries that don't follow the pair convention).
+ *
+ * Pure function — exported for tests.
+ */
+export function resolveBeneosPair(
+  matched: ForgeAssetEntry,
+  allEntries: ForgeAssetEntry[],
+): { portrait: ForgeAssetEntry; token: ForgeAssetEntry; tokenSiblingFound: boolean } {
+  const matchedStem = matched.name.replace(/\.[^.]+$/, '');
+  const matchedExt = matched.name.match(/\.[^.]+$/)?.[0] ?? '';
+  const isTokenVariant = /_token$/i.test(matchedStem);
+
+  if (isTokenVariant) {
+    // Matched file IS the token. Find the portrait sibling.
+    const portraitStem = matchedStem.replace(/_token$/i, '');
+    const portraitName = `${portraitStem}${matchedExt}`;
+    const portrait = allEntries.find(e => e.name.toLowerCase() === portraitName.toLowerCase());
+    if (portrait) {
+      return { portrait, token: matched, tokenSiblingFound: true };
+    }
+    // No portrait sibling — fall back to using the token for both.
+    return { portrait: matched, token: matched, tokenSiblingFound: true };
+  }
+
+  // Matched file IS the portrait. Find the token sibling.
+  const tokenName = `${matchedStem}_token${matchedExt}`;
+  const token = allEntries.find(e => e.name.toLowerCase() === tokenName.toLowerCase());
+  if (token) {
+    return { portrait: matched, token, tokenSiblingFound: true };
+  }
+  // No token sibling — both slots use the matched (portrait) URL.
+  return { portrait: matched, token: matched, tokenSiblingFound: false };
 }
 
 function* nameVariants(name: string): Generator<string> {

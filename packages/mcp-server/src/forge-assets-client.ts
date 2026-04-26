@@ -90,20 +90,32 @@ export class ForgeAssetsClient {
 
   /**
    * List a folder and return rich entries: path (Foundry-relative), full URL
-   * when available, and basename. Tolerant of two known response shapes:
-   *   - `files: string[]` (relative paths) + optional `fileURLs: string[]` (parallel)
-   *   - `files: { path, url?, name? }[]`
+   * when available, and basename. Calls Forge's POST /api/assets/browse with
+   * a JSON body — verified live against forge-vtt.com on 2026-04-26. The
+   * response shape is `{ dirs, files: [{name, path, url, size}], folder, bazaar }`.
    *
-   * Foundry's set-actor-image accepts either form, but full URLs survive
-   * cleaner across Forge's CDN re-routing — preferred when present.
+   * Important: GET /api/assets/browse returns 404 ("Unknown API request"); the
+   * verb has to be POST and the path goes in the JSON body, not the query
+   * string. Older cuts of this client used GET and silently never worked —
+   * cos-pipeline only used the upload path so it stayed hidden.
+   *
+   * Still tolerates the old `files: string[]` shape just in case Forge ever
+   * brings GET back; the parser branches on entry type at the boundary.
    */
   async browseFolder(folder: string): Promise<ForgeAssetEntry[]> {
     try {
-      const response = await axios.get(`${this.baseUrl}/assets/browse`, {
-        params: { path: folder },
-        headers: { 'Authorization': this.apiKey },
-        timeout: 15000,
-      });
+      const response = await axios.post(
+        `${this.baseUrl}/assets/browse`,
+        { path: folder },
+        {
+          headers: {
+            'Authorization': this.apiKey,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          timeout: 15000,
+        },
+      );
 
       const data = response.data ?? {};
       const rawFiles = Array.isArray(data.files) ? data.files : [];

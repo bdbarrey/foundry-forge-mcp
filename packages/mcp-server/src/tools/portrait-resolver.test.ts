@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { portraitNameScore, rankPortraitCandidates } from './create-actor.js';
+import { portraitNameScore, rankPortraitCandidates, resolveBeneosPair } from './create-actor.js';
 import type { ForgeAssetEntry } from '../forge-assets-client.js';
 
 describe('portraitNameScore', () => {
@@ -89,5 +89,60 @@ describe('rankPortraitCandidates', () => {
     const ranked = rankPortraitCandidates(odd, ['Volenta'], 1);
     // "Volenta" is a substring of "volenta token" → 0.85
     expect(ranked[0].score).toBe(0.85);
+  });
+});
+
+describe('resolveBeneosPair', () => {
+  // Mirror the cos_tokens convention discovered live: each NPC = portrait + token pair.
+  const cosTokens: ForgeAssetEntry[] = [
+    { path: 'cos_tokens/valenta_popofsky.webp', name: 'valenta_popofsky.webp',
+      url: 'https://assets.forge-vtt.com/abc/valenta_popofsky.webp' },
+    { path: 'cos_tokens/valenta_popofsky_token.webp', name: 'valenta_popofsky_token.webp',
+      url: 'https://assets.forge-vtt.com/abc/valenta_popofsky_token.webp' },
+    { path: 'cos_tokens/rahadin.webp', name: 'rahadin.webp' },
+    { path: 'cos_tokens/rahadin_token.webp', name: 'rahadin_token.webp' },
+  ];
+
+  it('finds token sibling when matched on portrait variant', () => {
+    const matched = cosTokens[0]; // valenta_popofsky.webp
+    const pair = resolveBeneosPair(matched, cosTokens);
+    expect(pair.portrait.name).toBe('valenta_popofsky.webp');
+    expect(pair.token.name).toBe('valenta_popofsky_token.webp');
+    expect(pair.tokenSiblingFound).toBe(true);
+  });
+
+  it('finds portrait sibling when matched on token variant', () => {
+    const matched = cosTokens[1]; // valenta_popofsky_token.webp
+    const pair = resolveBeneosPair(matched, cosTokens);
+    expect(pair.portrait.name).toBe('valenta_popofsky.webp');
+    expect(pair.token.name).toBe('valenta_popofsky_token.webp');
+    expect(pair.tokenSiblingFound).toBe(true);
+  });
+
+  it('falls back to using matched URL for both slots when no sibling exists', () => {
+    const lone: ForgeAssetEntry[] = [
+      { path: 'tokens/Lonely.webp', name: 'Lonely.webp' },
+    ];
+    const pair = resolveBeneosPair(lone[0], lone);
+    expect(pair.portrait.name).toBe('Lonely.webp');
+    expect(pair.token.name).toBe('Lonely.webp');
+    expect(pair.tokenSiblingFound).toBe(false);
+  });
+
+  it('preserves URL on both portrait and token entries', () => {
+    const matched = cosTokens[0];
+    const pair = resolveBeneosPair(matched, cosTokens);
+    expect(pair.portrait.url).toContain('valenta_popofsky.webp');
+    expect(pair.token.url).toContain('valenta_popofsky_token.webp');
+  });
+
+  it('case-insensitive sibling match (portrait Webp + token WEBP)', () => {
+    const mixed: ForgeAssetEntry[] = [
+      { path: 'p/Foo.webp', name: 'Foo.webp' },
+      { path: 'p/Foo_token.WEBP', name: 'Foo_token.WEBP' },
+    ];
+    const pair = resolveBeneosPair(mixed[0], mixed);
+    expect(pair.tokenSiblingFound).toBe(true);
+    expect(pair.token.name).toBe('Foo_token.WEBP');
   });
 });
