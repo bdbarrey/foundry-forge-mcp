@@ -588,7 +588,15 @@ function compareSingleAction(
       }
 
       if (parsed.reach !== undefined) {
-        const actualReach = numOrNull(attackAct.range?.reach);
+        // dnd5e 5.x AttackActivity doesn't persist a `reach` field on the
+        // activity range — reach lives at item-level (system.range.reach).
+        // We try activity first (in case dnd5e schema gains it back later),
+        // then fall back to item-level so a melee weapon whose item.range.reach
+        // is correctly set isn't flagged as divergent just because the activity
+        // didn't echo the value.
+        const actualReach =
+          numOrNull(attackAct.range?.reach) ??
+          numOrNull(item.system?.range?.reach);
         out.push({
           field: 'attack.range.reach',
           reloaded: parsed.reach,
@@ -598,7 +606,14 @@ function compareSingleAction(
         });
       }
       if (parsed.range) {
-        const actualValue = numOrNull(attackAct.range?.value);
+        // Activity-level range.value is the post-Phase 3a-polish source of
+        // truth (override=true ensures it beats item-level). If the activity
+        // doesn't expose a value (rare — older copy-patched items pre-Phase
+        // 3a-polish), fall back to item-level so the audit isn't a
+        // false-positive on a creature that plays correctly at the table.
+        const actualValue =
+          numOrNull(attackAct.range?.value) ??
+          numOrNull(item.system?.range?.value);
         out.push({
           field: 'attack.range.value',
           reloaded: parsed.range.normal,
@@ -607,7 +622,9 @@ function compareSingleAction(
           severity: 'medium',
         });
         if (parsed.range.long !== undefined) {
-          const actualLong = numOrNull(attackAct.range?.long);
+          const actualLong =
+            numOrNull(attackAct.range?.long) ??
+            numOrNull(item.system?.range?.long);
           out.push({
             field: 'attack.range.long',
             reloaded: parsed.range.long,
