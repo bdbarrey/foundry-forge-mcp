@@ -130,6 +130,10 @@ export class CreateActorTools {
                 },
               },
             },
+            prune_base_items: {
+              type: 'boolean',
+              description: 'Phase 3b extension (Mode A only). When true, after the build runs, walk the actor\'s feat items and remove compendium-base feats that have no name-token overlap with any Reloaded trait or action. Conservative: only type=feat is in scope (weapons/spells/equipment never pruned), an ALWAYS_KEEP list preserves common monster traits (Multiattack, Spellcasting, Legendary Resistance, Sunlight Sensitivity, etc.), items added this run are detected via flags and never pruned, and a hard cap of 5 deletions per run prevents runaway. Off by default — heavy Reloaded renames can produce false positives. Result is reported as `prunedItems` and `prunedCandidatesOverCap`.',
+            },
           },
         },
       },
@@ -212,6 +216,12 @@ export class CreateActorTools {
         convention: z.enum(['auto', 'single', 'tokenizer']).optional(),
         applyToToken: z.boolean().optional(),
       }).optional(),
+      // Phase 3b extension: opt-in pruning of compendium-base feats absent
+      // from the Reloaded source (e.g. drop SRD Vampire's Bite/Claws when
+      // Reloaded only specifies Hail of Daggers/Dagger). Default false —
+      // pruning is conservative (hard cap of 5, type=feat only, ALWAYS_KEEP
+      // list for common monster traits) but still fallible on heavy renames.
+      prune_base_items: z.boolean().optional(),
     }).refine(
       // Three valid input shapes:
       //   A. reloaded_source (or file_path+creature_name) — has statblock or prose
@@ -601,6 +611,20 @@ export class CreateActorTools {
         input.portrait,
       );
 
+      // 11. Phase 3b extension: opt-in pruning of compendium-base feats not
+      //     mentioned in Reloaded. Re-fetches actor items so flags on freshly
+      //     added items (Reloaded traits / scratch-built actions / copy-patched
+      //     items) are visible to the keep-set check. Failures are surfaced in
+      //     the response, never raised — pruning is best-effort.
+      let pruneResult: any = undefined;
+      if (input.prune_base_items === true) {
+        pruneResult = await this.runBaseItemPrune(
+          newActor.id,
+          sb,
+          allReloadedActions.map(a => a.name),
+        );
+      }
+
       return {
         success: true,
         actorId: newActor.id,
@@ -633,13 +657,16 @@ export class CreateActorTools {
         actionsSkippedNoActivity,
         actionSyncFailures,
         portrait: portraitResult,
+        prune: pruneResult,
         flagsStamped: ['foundry-forge-mcp.source', 'foundry-forge-mcp.reloadedName']
           .concat(input.file_path ? ['foundry-forge-mcp.reloadedPath'] : []),
         notes: [
           'Phase 3a-B: numeric overrides + skills/senses/languages/immunities/prof-bonus applied; Reloaded-only traits added as simple feats.',
           'Phase 3a-C: existing action items updated with Reloaded attack bonus, damage parts, save DC, reach/range (targeting the item\'s primary attack/save activity).',
+          'Phase 3a-polish: activity range carries override=true so the activity\'s stored value beats the compendium base (was bleeding through on weapons like Hail of Daggers).',
+          'Phase 3a-polish: versatile alternative damage (e.g. "or 2d10+4 if two-handed") writes to item-level system.damage.versatile so the sheet exposes the second roll.',
           'Reloaded-only ACTIONS (not traits) that don\'t exist on the compendium base are not auto-created yet — add manually or wait for a follow-up phase.',
-          'Versatile weapon alternatives (e.g. "or 2d10+4 slashing if two-handed") are parsed but not yet written to the item — dnd5e represents these via a separate activity path, shipping later.',
+          'Pass `prune_base_items: true` to remove compendium-base feats absent from Reloaded (e.g. drop SRD vampire\'s Bite/Claws on a Volenta build). Default off; conservative; reports kept and pruned items.',
           'Actor landed in default folder "Foundry MCP Creatures" — move manually for now.',
         ],
       };
@@ -1428,6 +1455,78 @@ export class CreateActorTools {
         'foundry-forge-mcp': { source: 'reloaded-scratch-action' },
       },
     };
+  }
+
+  /**
+   * Phase 3b extension. Re-fetch actor items (post all additions, so flags on
+   * freshly-added items participate in the keep-set) and remove compendium-base
+   * feats absent from Reloaded. Best-effort — failures land in the response,
+   * never raised. Default-off via `prune_base_items` arg.
+   */
+  private async runBaseItemPrune(
+    actorId: string,
+    sb: ReloadedStatblock,
+    reloadedActionNames: string[],
+  ): Promise<{
+    enabled: boolean;
+    pruned: Array<{ id: string; name: string; reason: string }>;
+    kept: Array<{ id: string; name: string; reason: string }>;
+    candidatesOverCap: Array<{ id: string; name: string; reason: string }>;
+    error?: string;
+  }> {
+    try {
+      const actorFull: any = await this.foundryClient.query('foundry-forge-mcp.getCharacterInfo', {
+        characterName: actorId,
+      });
+      const items: any[] = actorFull?.items ?? [];
+      const reloadedNames = [
+        ...sb.traits.map(t => t.name),
+        ...reloadedActionNames,
+      ];
+      const { decisions, toPrune, cappedOver } = selectPruneCandidates(items, reloadedNames);
+
+      let removedIds: string[] = [];
+      if (toPrune.length > 0) {
+        const r: any = await this.foundryClient.query('foundry-forge-mcp.removeActorItems', {
+          actorId,
+          itemIds: toPrune.map(p => p.id),
+        });
+        removedIds = Array.isArray(r?.removed) ? r.removed.map(String) : [];
+        if (r?.success === false) {
+          this.logger.warn(`prune removal returned success=false`, { error: r?.error });
+        }
+      }
+
+      const removedSet = new Set(removedIds);
+      const pruned = toPrune
+        .filter(p => removedSet.has(p.id))
+        .map(p => ({ id: p.id, name: p.name, reason: p.reason }));
+      // Decisions that didn't actually delete (network failure, missing on
+      // server) get reported as "candidatesOverCap" too — caller can investigate.
+      const failedToPrune = toPrune
+        .filter(p => !removedSet.has(p.id))
+        .map(p => ({ id: p.id, name: p.name, reason: `attempted but not removed (${p.reason})` }));
+      const kept = decisions
+        .filter(d => d.decision === 'keep')
+        .map(d => ({ id: d.id, name: d.name, reason: d.reason }));
+
+      return {
+        enabled: true,
+        pruned,
+        kept,
+        candidatesOverCap: cappedOver
+          .map(c => ({ id: c.id, name: c.name, reason: c.reason }))
+          .concat(failedToPrune),
+      };
+    } catch (err: any) {
+      return {
+        enabled: true,
+        pruned: [],
+        kept: [],
+        candidatesOverCap: [],
+        error: err?.message ?? String(err),
+      };
+    }
   }
 
   /** Resolve input to one markdown chunk containing a statblock div. */
@@ -2224,14 +2323,20 @@ export function buildItemActivityUpdate(
       // Reach / range live on the attack activity. dnd5e 4.x normalizes these
       // to numbers in the document model — writing strings here used to silently
       // not stick (the compendium dump shows `range.value: 5` etc, never a string).
+      // override=true is REQUIRED — without it, dnd5e treats the activity range
+      // as derived-from-item and the compendium base's value (e.g. 30 ft on a
+      // thrown-daggers SRD weapon) bleeds through to the activity readback even
+      // though we wrote 15. Phase 3a-polish item.
       if (parsed.reach !== undefined) {
         u[`${base}.range.reach`] = parsed.reach;
         u[`${base}.range.units`] = 'ft';
+        u[`${base}.range.override`] = true;
       }
       if (parsed.range) {
         u[`${base}.range.value`] = parsed.range.normal;
         if (parsed.range.long) u[`${base}.range.long`] = parsed.range.long;
         u[`${base}.range.units`] = 'ft';
+        u[`${base}.range.override`] = true;
       }
     }
 
@@ -2254,11 +2359,12 @@ export function buildItemActivityUpdate(
         // Range belongs on whichever activity carries the action (the one
         // getting damage). For save-only AoE actions like Volenta's Firebomb
         // ("within 30 feet") the range goes on the save activity since the
-        // attack branch never fires.
+        // attack branch never fires. override=true matches the attack branch.
         if (parsed.range) {
           u[`${base}.range.value`] = parsed.range.normal;
           if (parsed.range.long) u[`${base}.range.long`] = parsed.range.long;
           u[`${base}.range.units`] = 'ft';
+          u[`${base}.range.override`] = true;
         }
       }
     }
@@ -2266,6 +2372,19 @@ export function buildItemActivityUpdate(
     if (type === 'damage' && parsed.damage.length > 0) {
       u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
     }
+  }
+
+  // Versatile alternative damage (Longsword: "9 (1d8+4) slashing or 13 (2d10+4)
+  // slashing if used with two hands"). dnd5e represents this as item-level
+  // `system.damage.versatile` — when the parent weapon item has a versatile
+  // damage block, the sheet exposes it as an alternate damage roll alongside
+  // the primary. Custom-enabled with our literal formula sidesteps the
+  // number/denomination dice bookkeeping and matches what Reloaded prints.
+  if (parsed.versatile) {
+    u['system.damage.versatile.custom.enabled'] = true;
+    u['system.damage.versatile.custom.formula'] = parsed.versatile.formula;
+    u['system.damage.versatile.types'] = [parsed.versatile.type];
+    u['system.damage.versatile.bonus'] = '';
   }
 
   return u;
@@ -2434,5 +2553,142 @@ function buildActionPatchSpec(parsed: ParsedAction): Record<string, any> {
     }
   }
   return spec;
+}
+
+// ----- Phase 3b extension: opt-in compendium-base pruning -------------------
+
+/**
+ * Items whose names should never be auto-pruned. Most are wrapper/header feats
+ * (Multiattack), structural traits (Spellcasting, Legendary Resistance), or
+ * persistent metadata (Lair Actions). Reloaded statblocks frequently rename
+ * the *body* of these (e.g. "Sunlight Hypersensitivity" replacing the SRD
+ * "Vampire Weaknesses") but Reloaded's keep-set won't catch the rename, so
+ * we err on the side of preserving anything in this list.
+ */
+const PRUNE_ALWAYS_KEEP = new Set<string>([
+  'multiattack',
+  'spellcasting',
+  'innate spellcasting',
+  'legendary resistance',
+  'legendary actions',
+  'lair actions',
+  'reactions',
+  'magic resistance',
+  'magic weapons',
+  'shapechanger',
+  'amphibious',
+  'pack tactics',
+  'keen senses',
+  'keen hearing',
+  'keen smell',
+  'keen sight',
+  'sunlight sensitivity',
+  'sunlight hypersensitivity',
+  'regeneration',
+  'rejuvenation',
+  'misty escape',
+  'children of the night',
+  'vampire weaknesses',
+]);
+
+/** Hard cap on auto-pruned items per build, regardless of candidate count. */
+export const PRUNE_HARD_CAP = 5;
+
+/** English stop-tokens skipped when computing token overlap. */
+const PRUNE_STOP_TOKENS = new Set<string>(['the', 'and', 'with', 'from', 'into', 'for']);
+
+export interface PruneDecision {
+  id: string;
+  name: string;
+  type: string;
+  /** "prune" — pruned (or would have been, if over cap). "keep" with reason — preserved. */
+  decision: 'prune' | 'keep';
+  reason: string;
+}
+
+/**
+ * Pick which compendium-base items to prune, given the Reloaded keep-set.
+ * Pure function — no IO, fully testable in isolation. The caller decides
+ * whether to actually delete (production: caps + opt-in flag; tests: just
+ * inspect the decision list).
+ *
+ * Keep rules (first match wins):
+ *   1. Item carries our own flag (`flags.foundry-forge-mcp.source`) — added
+ *      this run, never prune.
+ *   2. Item type ≠ 'feat' — weapons, spells, equipment, classes, races,
+ *      backgrounds. Pruning these would gut legitimate gear; only the FEAT
+ *      surface is in scope for compendium-base cleanup.
+ *   3. Item name (or its parenthetical-stripped stem) is in PRUNE_ALWAYS_KEEP.
+ *   4. Item name has any 3+-char token overlap with a Reloaded trait/action
+ *      name (case-insensitive, stop-tokens removed).
+ *
+ * Anything that fails all four checks is pruned — bounded by PRUNE_HARD_CAP.
+ * Decisions over the cap come back as `decision='prune'` with a `cappedOver`
+ * marker the caller can split off.
+ */
+export function selectPruneCandidates(
+  items: Array<{ id?: string; _id?: string; name?: string; type?: string; flags?: any }>,
+  reloadedNames: Iterable<string>,
+): { decisions: PruneDecision[]; toPrune: PruneDecision[]; cappedOver: PruneDecision[] } {
+  const reloadedTokens = new Set<string>();
+  for (const n of reloadedNames) {
+    for (const t of nameTokens(n)) reloadedTokens.add(t);
+  }
+
+  const decisions: PruneDecision[] = [];
+  const candidates: PruneDecision[] = [];
+
+  for (const item of items) {
+    const id = String(item.id ?? item._id ?? '');
+    const name = String(item.name ?? '').trim();
+    const type = String(item.type ?? '');
+    if (!id || !name) continue;
+
+    const ourFlag = item.flags?.['foundry-forge-mcp']?.source;
+    if (ourFlag) {
+      decisions.push({ id, name, type, decision: 'keep', reason: `ours: ${ourFlag}` });
+      continue;
+    }
+    if (type !== 'feat') {
+      decisions.push({ id, name, type, decision: 'keep', reason: `type=${type}` });
+      continue;
+    }
+
+    const lower = name.toLowerCase();
+    const stem = lower.replace(/\s*\([^)]*\)\s*$/, '').trim();
+    if (PRUNE_ALWAYS_KEEP.has(lower) || PRUNE_ALWAYS_KEEP.has(stem)) {
+      decisions.push({ id, name, type, decision: 'keep', reason: 'ALWAYS_KEEP' });
+      continue;
+    }
+
+    const itemTokens = nameTokens(name);
+    let matchedToken: string | null = null;
+    for (const t of itemTokens) {
+      if (reloadedTokens.has(t)) {
+        matchedToken = t;
+        break;
+      }
+    }
+    if (matchedToken) {
+      decisions.push({ id, name, type, decision: 'keep', reason: `token-match:${matchedToken}` });
+      continue;
+    }
+
+    candidates.push({ id, name, type, decision: 'prune', reason: 'no Reloaded match (compendium-base feat)' });
+  }
+
+  const toPrune = candidates.slice(0, PRUNE_HARD_CAP);
+  const cappedOver = candidates.slice(PRUNE_HARD_CAP);
+  return { decisions: decisions.concat(candidates), toPrune, cappedOver };
+}
+
+function nameTokens(s: string): Set<string> {
+  const stem = s.toLowerCase().replace(/\s*\([^)]*\)\s*$/, '').trim();
+  const out = new Set<string>();
+  for (const tok of stem.split(/[\s,;:'"-]+/)) {
+    const clean = tok.replace(/[^a-z]/g, '');
+    if (clean.length >= 3 && !PRUNE_STOP_TOKENS.has(clean)) out.add(clean);
+  }
+  return out;
 }
 

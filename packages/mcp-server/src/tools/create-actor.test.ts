@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildItemActivityUpdate } from './create-actor.js';
+import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP } from './create-actor.js';
 import type { ParsedAction } from '../parsers/action-description.js';
 
 describe('buildItemActivityUpdate', () => {
@@ -73,6 +73,10 @@ describe('buildItemActivityUpdate', () => {
     expect(update['system.activities.attackId.attack.type.value']).toBe('ranged');
     expect(update['system.activities.attackId.range.value']).toBe(15);
     expect(update['system.activities.attackId.range.units']).toBe('ft');
+    // Phase 3a-polish #1: range.override=true required, otherwise dnd5e treats
+    // activity range as derived-from-item and the compendium base's value
+    // (e.g. 30 ft on thrown daggers) bleeds through despite our 15.
+    expect(update['system.activities.attackId.range.override']).toBe(true);
     expect(update['system.activities.attackId.damage.parts']).toEqual([
       { custom: { enabled: true, formula: '2d4 + 4' }, types: ['piercing'] },
     ]);
@@ -80,6 +84,66 @@ describe('buildItemActivityUpdate', () => {
     // dnd5e adds the weapon's base die on top (Hail of Daggers becomes 4d4+8
     // instead of 2d4+4).
     expect(update['system.activities.attackId.damage.includeBase']).toBe(false);
+  });
+
+  it('writes range.override on melee reach + on save-activity range (Phase 3a-polish #1)', () => {
+    // Melee reach: range.override must accompany reach for the same reason
+    // (compendium base's reach can be 0/null and bleed in).
+    const meleeParsed: ParsedAction = {
+      damage: [{ formula: '1d8 + 4', type: 'slashing' }],
+      attackBonus: 8,
+      attackType: 'melee',
+      reach: 5,
+    };
+    const meleeUpdate = buildItemActivityUpdate('itemMelee', { aId: { type: 'attack' } }, meleeParsed);
+    expect(meleeUpdate['system.activities.aId.range.reach']).toBe(5);
+    expect(meleeUpdate['system.activities.aId.range.override']).toBe(true);
+
+    // Save-only activity carrying range (Volenta Firebomb "within 30 feet").
+    const saveParsed: ParsedAction = {
+      damage: [{ formula: '2d6', type: 'fire' }],
+      save: { dc: 14, ability: 'dex', onSuccess: 'half' },
+      range: { normal: 30 },
+    };
+    const saveUpdate = buildItemActivityUpdate('itemSave', { sId: { type: 'save' } }, saveParsed);
+    expect(saveUpdate['system.activities.sId.range.value']).toBe(30);
+    expect(saveUpdate['system.activities.sId.range.override']).toBe(true);
+  });
+
+  it('writes versatile damage at item-level when parsed.versatile is set (Longsword two-handed)', () => {
+    // Volenta Second Form Longsword: "9 (1d8+4) slashing, or 13 (2d10+4) slashing
+    // if used with two hands". Primary damage rides the attack activity; the
+    // versatile alternative goes on item-level system.damage.versatile so the
+    // sheet exposes both damage rolls.
+    const parsed: ParsedAction = {
+      damage: [{ formula: '1d8 + 4', type: 'slashing' }],
+      versatile: { formula: '2d10 + 4', type: 'slashing' },
+      attackBonus: 8,
+      attackType: 'melee',
+      reach: 5,
+    };
+    const update = buildItemActivityUpdate('itemV', { aId: { type: 'attack' } }, parsed);
+
+    // Primary on the attack activity
+    expect(update['system.activities.aId.damage.parts']).toEqual([
+      { custom: { enabled: true, formula: '1d8 + 4' }, types: ['slashing'] },
+    ]);
+    // Versatile at item level — custom-enabled with the literal Reloaded formula
+    expect(update['system.damage.versatile.custom.enabled']).toBe(true);
+    expect(update['system.damage.versatile.custom.formula']).toBe('2d10 + 4');
+    expect(update['system.damage.versatile.types']).toEqual(['slashing']);
+  });
+
+  it('does NOT write versatile when parsed has only primary damage', () => {
+    const parsed: ParsedAction = {
+      damage: [{ formula: '2d4 + 4', type: 'piercing' }],
+      attackBonus: 7,
+      attackType: 'ranged',
+      range: { normal: 15 },
+    };
+    const update = buildItemActivityUpdate('itemNoV', { aId: { type: 'attack' } }, parsed);
+    expect(update['system.damage.versatile.custom.enabled']).toBeUndefined();
+    expect(update['system.damage.versatile.custom.formula']).toBeUndefined();
   });
 
   it('routes save-only damage to the save activity even when base has attack+save (Firebomb on Alchemist\'s Fire base)', () => {
@@ -119,5 +183,114 @@ describe('buildItemActivityUpdate', () => {
     const update = buildItemActivityUpdate('itemD', activities, parsed);
 
     expect(Object.keys(update)).toEqual(['_id']);
+  });
+});
+
+describe('selectPruneCandidates (Phase 3b extension)', () => {
+  // Volenta Reloaded keep-set: traits like "Sunlight Hypersensitivity" and
+  // "Misty Escape" plus actions "Multiattack", "Hail of Daggers", "Dagger",
+  // "Tanglefoot", "Thunderstone", "Smokestick", "Firebomb".
+  const VOLENTA_RELOADED = [
+    'Sunlight Hypersensitivity', 'Misty Escape', 'Spider Climb', 'Regeneration',
+    'Multiattack', 'Hail of Daggers', 'Dagger', 'Tanglefoot', 'Thunderstone',
+    'Smokestick', 'Firebomb',
+  ];
+
+  it('keeps non-feat items unconditionally (weapons, spells, equipment)', () => {
+    const items = [
+      { id: 'a', name: 'Longsword', type: 'weapon' },
+      { id: 'b', name: 'Spell of Some Kind', type: 'spell' },
+      { id: 'c', name: 'Backpack', type: 'equipment' },
+    ];
+    const { toPrune, decisions } = selectPruneCandidates(items, VOLENTA_RELOADED);
+    expect(toPrune).toHaveLength(0);
+    expect(decisions.every(d => d.decision === 'keep')).toBe(true);
+  });
+
+  it('keeps items added by us (flags.foundry-forge-mcp.source)', () => {
+    const items = [
+      { id: 'a', name: 'Reloaded-Only Trait', type: 'feat',
+        flags: { 'foundry-forge-mcp': { source: 'reloaded-trait' } } },
+      { id: 'b', name: 'Copy-patched Action', type: 'feat',
+        flags: { 'foundry-forge-mcp': { source: 'reloaded-copy-patch' } } },
+    ];
+    const { toPrune, decisions } = selectPruneCandidates(items, VOLENTA_RELOADED);
+    expect(toPrune).toHaveLength(0);
+    expect(decisions.every(d => d.reason.startsWith('ours:'))).toBe(true);
+  });
+
+  it('keeps items in ALWAYS_KEEP (Multiattack, Spellcasting, Legendary Resistance, Sunlight Sensitivity)', () => {
+    const items = [
+      { id: 'a', name: 'Multiattack', type: 'feat' },
+      { id: 'b', name: 'Spellcasting', type: 'feat' },
+      { id: 'c', name: 'Legendary Resistance (3/Day)', type: 'feat' },
+      { id: 'd', name: 'Sunlight Sensitivity', type: 'feat' },
+      // Reloaded usually preserves vampire-family traits even after rename;
+      // ALWAYS_KEEP covers the most common ones so they survive even when
+      // Reloaded's rename has zero token overlap with the SRD name.
+      { id: 'e', name: 'Vampire Weaknesses', type: 'feat' },
+      { id: 'f', name: 'Misty Escape', type: 'feat' },
+    ];
+    const { toPrune } = selectPruneCandidates(items, []); // empty Reloaded
+    expect(toPrune).toHaveLength(0);
+  });
+
+  it('keeps feats whose name has token overlap with a Reloaded trait/action', () => {
+    const items = [
+      // "Hail of Daggers" → token "daggers" overlaps with Reloaded "Dagger"... actually
+      // "dagger" is 6 chars vs "daggers" 7 chars, both case-insensitive token-set; "dagger"
+      // is in Reloaded. We tokenize the item name "Hail of Daggers" → {hail, daggers}.
+      // Reloaded names tokenize to {hail, daggers, dagger, tanglefoot, ...}. Match on "daggers".
+      { id: 'a', name: 'Hail of Daggers', type: 'feat' },
+      // SRD "Dagger Throw" not in Reloaded explicit, but tokens "dagger"/"throw" — "dagger" matches "Dagger".
+      { id: 'b', name: 'Dagger Throw', type: 'feat' },
+    ];
+    const { toPrune, decisions } = selectPruneCandidates(items, VOLENTA_RELOADED);
+    expect(toPrune).toHaveLength(0);
+    const reasons = decisions.map(d => d.reason);
+    expect(reasons.some(r => r.startsWith('token-match:'))).toBe(true);
+  });
+
+  it('prunes compendium-base feats with no Reloaded match (Bite, Claws on a non-bite Reloaded)', () => {
+    const items = [
+      { id: 'a', name: 'Bite', type: 'feat' },
+      { id: 'b', name: 'Claws', type: 'feat' },
+      { id: 'c', name: 'Multiattack', type: 'feat' },                  // ALWAYS_KEEP
+      { id: 'd', name: 'Hail of Daggers', type: 'feat',                // token match
+        flags: {} },
+    ];
+    const { toPrune } = selectPruneCandidates(items, VOLENTA_RELOADED);
+    expect(toPrune.map(p => p.name).sort()).toEqual(['Bite', 'Claws']);
+    for (const p of toPrune) expect(p.decision).toBe('prune');
+  });
+
+  it('caps deletions at PRUNE_HARD_CAP, surfaces overflow as candidatesOverCap', () => {
+    const items: any[] = [];
+    for (let i = 0; i < PRUNE_HARD_CAP + 3; i++) {
+      items.push({ id: `id${i}`, name: `Orphan Feat ${i}`, type: 'feat' });
+    }
+    const { toPrune, cappedOver } = selectPruneCandidates(items, []); // nothing in Reloaded
+    expect(toPrune).toHaveLength(PRUNE_HARD_CAP);
+    expect(cappedOver).toHaveLength(3);
+  });
+
+  it('handles parenthetical usage suffixes via stem stripping ("Multiattack (1/Day)" honored as ALWAYS_KEEP)', () => {
+    const items = [
+      { id: 'a', name: 'Multiattack (1/Day)', type: 'feat' },
+      { id: 'b', name: 'Legendary Resistance (3/Day)', type: 'feat' },
+    ];
+    const { toPrune } = selectPruneCandidates(items, []);
+    expect(toPrune).toHaveLength(0);
+  });
+
+  it('skips items missing id or name (defensive)', () => {
+    const items = [
+      { name: 'No ID', type: 'feat' },
+      { id: 'x', type: 'feat' }, // no name
+      { id: 'y', name: '', type: 'feat' }, // empty name
+    ];
+    const { toPrune, decisions } = selectPruneCandidates(items, []);
+    expect(toPrune).toHaveLength(0);
+    expect(decisions).toHaveLength(0);
   });
 });
