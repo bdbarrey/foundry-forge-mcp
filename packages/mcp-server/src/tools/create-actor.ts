@@ -5,6 +5,7 @@ import { Logger } from '../logger.js';
 import { ErrorHandler } from '../utils/error-handler.js';
 import { parseReloadedStatblock, ReloadedStatblock } from '../parsers/reloaded-statblock.js';
 import { ParsedAction, parseActionDescription } from '../parsers/action-description.js';
+import { ForgeAssetsClient, ForgeAssetEntry } from '../forge-assets-client.js';
 import {
   CONFIDENCE_FLOOR,
   CandidateBasic,
@@ -27,6 +28,7 @@ import {
 export interface CreateActorToolsOptions {
   foundryClient: FoundryClient;
   logger: Logger;
+  forgeAssetsClient?: ForgeAssetsClient | null;
 }
 
 interface CompendiumBase {
@@ -34,15 +36,24 @@ interface CompendiumBase {
   itemId: string;
 }
 
+/** Default folder for Phase 5 token lookups. Beneos battlemaps CoS pack. */
+const DEFAULT_BENEOS_TOKEN_FOLDER =
+  'moulinette/adventures/beneos-battlemaps-universe/beneos_assets/beneos_battlemaps/map_assets/tokens/cos_tokens';
+
+/** Minimum fuzzy-match score to auto-apply a Forge token without confirmation. */
+const PORTRAIT_MATCH_FLOOR = 0.5;
+
 export class CreateActorTools {
   private foundryClient: FoundryClient;
   private logger: Logger;
   private errorHandler: ErrorHandler;
+  private forgeAssetsClient: ForgeAssetsClient | null;
 
-  constructor({ foundryClient, logger }: CreateActorToolsOptions) {
+  constructor({ foundryClient, logger, forgeAssetsClient }: CreateActorToolsOptions) {
     this.foundryClient = foundryClient;
     this.logger = logger.child({ component: 'CreateActorTools' });
     this.errorHandler = new ErrorHandler(this.logger);
+    this.forgeAssetsClient = forgeAssetsClient ?? null;
   }
 
   getToolDefinitions() {
@@ -74,6 +85,36 @@ export class CreateActorTools {
                 itemId: { type: 'string', description: 'Entry ID within the pack.' },
               },
               required: ['packId', 'itemId'],
+            },
+            portrait: {
+              type: 'object',
+              description: 'Phase 5: optionally apply a portrait + token image after the actor is built. Three modes: explicit `path` (just applies it via set-actor-image), `lookup` (browses a Forge folder and fuzzy-matches the creature name against filenames), or omit to skip. Requires FORGE_ASSETS_API_KEY in backend env for `lookup` mode.',
+              properties: {
+                path: {
+                  type: 'string',
+                  description: 'Explicit Foundry-relative path or full URL (e.g. "moulinette/.../cos_tokens/Volenta.webp"). Applied as-is via set-actor-image.',
+                },
+                lookup: {
+                  type: 'object',
+                  description: 'Fuzzy-match a token in a Forge folder by creature name. Used to auto-discover an existing token from a curated library (Beneos cos_tokens by default).',
+                  properties: {
+                    folder: {
+                      type: 'string',
+                      description: 'Foundry-relative Forge folder to browse. Defaults to the Beneos CoS tokens path.',
+                    },
+                    minScore: {
+                      type: 'number',
+                      description: 'Minimum fuzzy-match score [0..1] to auto-apply (default 0.5). Below this, the resolver returns the top candidates without applying anything so the caller can confirm.',
+                      minimum: 0,
+                      maximum: 1,
+                    },
+                  },
+                },
+                applyToToken: {
+                  type: 'boolean',
+                  description: 'Also set prototypeToken.texture.src (default true).',
+                },
+              },
             },
           },
         },
@@ -142,6 +183,14 @@ export class CreateActorTools {
       compendium_base: z.object({
         packId: z.string().min(1),
         itemId: z.string().min(1),
+      }).optional(),
+      portrait: z.object({
+        path: z.string().optional(),
+        lookup: z.object({
+          folder: z.string().optional(),
+          minScore: z.number().min(0).max(1).optional(),
+        }).optional(),
+        applyToToken: z.boolean().optional(),
       }).optional(),
     }).refine(
       d => d.reloaded_source || (d.file_path && d.creature_name),
@@ -480,6 +529,16 @@ export class CreateActorTools {
         }
       }
 
+      // 10. Phase 5: portrait wire-up. Either an explicit path or a fuzzy
+      //     lookup against a Forge folder (Beneos cos_tokens by default).
+      //     Best-effort: failures don't fail the build — we surface them in
+      //     `portraitResult` so the caller can retry / supply an explicit path.
+      const portraitResult = await this.resolveAndApplyPortrait(
+        newActor,
+        sb,
+        input.portrait,
+      );
+
       return {
         success: true,
         actorId: newActor.id,
@@ -511,6 +570,7 @@ export class CreateActorTools {
         actionsSkippedNoItem,
         actionsSkippedNoActivity,
         actionSyncFailures,
+        portrait: portraitResult,
         flagsStamped: ['foundry-forge-mcp.source', 'foundry-forge-mcp.reloadedName']
           .concat(input.file_path ? ['foundry-forge-mcp.reloadedPath'] : []),
         notes: [
@@ -836,6 +896,150 @@ export class CreateActorTools {
    * minimal feat item with name + description (HTML) only. Not wired for
    * MidiQOL — the DM sees the printed action but has to roll manually.
    */
+  /**
+   * Phase 5 portrait orchestration. Three paths:
+   *   - explicit `path` → just call setActorImage
+   *   - `lookup` → browse Forge folder, fuzzy-match creature name, apply if
+   *     score ≥ minScore (default 0.5); otherwise return candidates so the
+   *     caller can pick manually.
+   *   - omitted → no-op, return `{ applied: false, reason: 'not_requested' }`.
+   *
+   * Best-effort: a Forge browse/apply failure is captured into the result
+   * shape, never thrown. The actor build is the headline; portrait is a nice-
+   * to-have that shouldn't roll back combat math if the asset library is down.
+   */
+  private async resolveAndApplyPortrait(
+    actor: { id: string; name: string },
+    sb: ReloadedStatblock,
+    options:
+      | {
+          path?: string | undefined;
+          lookup?: { folder?: string | undefined; minScore?: number | undefined } | undefined;
+          applyToToken?: boolean | undefined;
+        }
+      | undefined,
+  ): Promise<Record<string, any>> {
+    if (!options) return { applied: false, reason: 'not_requested' };
+
+    const applyToToken = options.applyToToken ?? true;
+
+    // Mode 1: explicit path — apply directly.
+    if (options.path) {
+      try {
+        await this.applyActorImage(actor.id, options.path, applyToToken);
+        return {
+          applied: true,
+          mode: 'explicit',
+          imageUrl: options.path,
+          tokenUpdated: applyToToken,
+        };
+      } catch (err: any) {
+        return {
+          applied: false,
+          mode: 'explicit',
+          imageUrl: options.path,
+          error: err?.message ?? String(err),
+        };
+      }
+    }
+
+    // Mode 2: fuzzy lookup against a Forge folder.
+    if (options.lookup) {
+      if (!this.forgeAssetsClient) {
+        return {
+          applied: false,
+          mode: 'lookup',
+          reason: 'forge_client_unavailable',
+          hint: 'Set FORGE_ASSETS_API_KEY in the backend env to enable folder lookup.',
+        };
+      }
+
+      const folder = options.lookup.folder ?? DEFAULT_BENEOS_TOKEN_FOLDER;
+      const minScore = options.lookup.minScore ?? PORTRAIT_MATCH_FLOOR;
+      let entries: ForgeAssetEntry[] = [];
+      try {
+        entries = await this.forgeAssetsClient.browseFolder(folder);
+      } catch (err: any) {
+        return {
+          applied: false,
+          mode: 'lookup',
+          folder,
+          error: err?.message ?? String(err),
+        };
+      }
+      if (entries.length === 0) {
+        return {
+          applied: false,
+          mode: 'lookup',
+          folder,
+          reason: 'empty_folder',
+        };
+      }
+
+      // Build candidate name list — the same variants we use for compendium
+      // matching: full name, pre-comma stem, role-stripped stem.
+      const candidates = Array.from(nameVariants(sb.name));
+      const ranked = rankPortraitCandidates(entries, candidates, 5);
+      const top = ranked[0];
+
+      if (!top || top.score < minScore) {
+        return {
+          applied: false,
+          mode: 'lookup',
+          folder,
+          reason: 'no_match_above_floor',
+          minScore,
+          topPick: top ?? null,
+          candidates: ranked.slice(0, 5),
+        };
+      }
+
+      const targetUrl = top.entry.url ?? top.entry.path;
+      try {
+        await this.applyActorImage(actor.id, targetUrl, applyToToken);
+        return {
+          applied: true,
+          mode: 'lookup',
+          folder,
+          imageUrl: targetUrl,
+          matchedFile: top.entry.name,
+          matchedAgainst: top.matchedAgainst,
+          score: Number(top.score.toFixed(3)),
+          tokenUpdated: applyToToken,
+          candidates: ranked.slice(0, 5),
+        };
+      } catch (err: any) {
+        return {
+          applied: false,
+          mode: 'lookup',
+          folder,
+          imageUrl: targetUrl,
+          matchedFile: top.entry.name,
+          error: err?.message ?? String(err),
+        };
+      }
+    }
+
+    return { applied: false, reason: 'no_path_or_lookup_provided' };
+  }
+
+  /** Apply an image URL/path to an actor's portrait + token via updateActorData. */
+  private async applyActorImage(
+    actorId: string,
+    imageUrl: string,
+    applyToToken: boolean,
+  ): Promise<void> {
+    const updates: Record<string, any> = { img: imageUrl };
+    if (applyToToken) updates['prototypeToken.texture.src'] = imageUrl;
+    const r: any = await this.foundryClient.query('foundry-forge-mcp.updateActorData', {
+      actorId,
+      updates,
+    });
+    if (r?.success === false) {
+      throw new Error(r?.error ?? 'updateActorData returned success=false');
+    }
+  }
+
   private buildScratchActionItem(
     name: string,
     description: string,
@@ -1214,6 +1418,86 @@ export class CreateActorTools {
 // ----- helpers --------------------------------------------------------------
 
 /** Yield name variants to search for in a compendium: exact, pre-comma stem, role-stripped stem. */
+// ----- Phase 5: portrait fuzzy-matching ------------------------------------
+
+export interface PortraitMatch {
+  entry: ForgeAssetEntry;
+  /** Which candidate name matched best (e.g. "Volenta" vs "Volenta, First Form"). */
+  matchedAgainst: string;
+  /** Score in [0..1]. Exact normalized match = 1.0; substring = 0.85; token Jaccard otherwise. */
+  score: number;
+}
+
+/**
+ * Rank Forge asset entries against a list of candidate creature-name variants.
+ * Pure function, exported for tests. Returns best-first up to `limit`.
+ *
+ * Scoring is intentionally permissive in the substring branch (0.85) so tokens
+ * named "Volenta_First_Form.webp" still beat purely-token-overlapped neighbors
+ * when the full creature name is "Volenta, First Form". Below 0.5 the resolver
+ * returns candidates without applying — caller decides.
+ */
+export function rankPortraitCandidates(
+  entries: ForgeAssetEntry[],
+  candidates: string[],
+  limit: number,
+): PortraitMatch[] {
+  const ranked: PortraitMatch[] = [];
+  for (const entry of entries) {
+    // Strip extension off the basename for the match. Multi-dot names like
+    // "Volenta.First.webp" lose only the trailing extension.
+    const stem = entry.name.replace(/\.[^.]+$/, '');
+    let bestForEntry: { score: number; matchedAgainst: string } | null = null;
+    for (const cand of candidates) {
+      const score = portraitNameScore(cand, stem);
+      if (!bestForEntry || score > bestForEntry.score) {
+        bestForEntry = { score, matchedAgainst: cand };
+      }
+    }
+    if (bestForEntry && bestForEntry.score > 0) {
+      ranked.push({ entry, matchedAgainst: bestForEntry.matchedAgainst, score: bestForEntry.score });
+    }
+  }
+  ranked.sort((a, b) => b.score - a.score);
+  return ranked.slice(0, limit);
+}
+
+/**
+ * Score how well `candidate` (stripped filename like "Volenta_First_Form")
+ * matches `query` (a creature-name variant like "Volenta, First Form"). Both
+ * are normalized (lowercase, non-alphanumerics → spaces) before comparison.
+ *
+ * - 1.0 — normalized exact match
+ * - 0.85 — one is a normalized substring of the other (length-disparity-tolerant)
+ * - 0..1 — Jaccard token overlap (tokens of length ≥ 3, lowercased)
+ *
+ * The substring branch is what catches "Volenta" → "Volenta_First_Form" or
+ * "Volenta, First Form" → "Volenta_First_Form" — both score 0.85 here, well
+ * above the 0.5 auto-apply floor.
+ */
+export function portraitNameScore(query: string, candidate: string): number {
+  const normQ = normalizePortraitName(query);
+  const normC = normalizePortraitName(candidate);
+  if (!normQ || !normC) return 0;
+  if (normQ === normC) return 1.0;
+  // Compact (no-space) substring check — "volentafirstform" includes "volenta"
+  // and vice-versa.
+  const compactQ = normQ.replace(/\s+/g, '');
+  const compactC = normC.replace(/\s+/g, '');
+  if (compactC.includes(compactQ) || compactQ.includes(compactC)) return 0.85;
+
+  const qTokens = new Set(normQ.split(/\s+/).filter(t => t.length >= 3));
+  const cTokens = new Set(normC.split(/\s+/).filter(t => t.length >= 3));
+  if (qTokens.size === 0 || cTokens.size === 0) return 0;
+  let overlap = 0;
+  for (const t of qTokens) if (cTokens.has(t)) overlap++;
+  return overlap / Math.max(qTokens.size, cTokens.size);
+}
+
+function normalizePortraitName(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
 function* nameVariants(name: string): Generator<string> {
   yield name;
   const preComma = name.split(',')[0].trim();

@@ -1095,7 +1095,22 @@ async function startBackend(): Promise<void> {
 
   const foldersTools = new FoldersTools({ foundryClient, logger });
 
-  const createActorTools = new CreateActorTools({ foundryClient, logger });
+  // Initialize Forge Assets client BEFORE tools that need it (CreateActorTools'
+  // Phase 5 portrait wire-up reads from this folder; npcPortraitTools below
+  // also depends on it).
+  let forgeAssetsClient: ForgeAssetsClient | null = null;
+  const forgeApiKey = process.env.FORGE_ASSETS_API_KEY;
+  if (forgeApiKey) {
+    forgeAssetsClient = new ForgeAssetsClient({
+      logger,
+      config: { apiKey: forgeApiKey },
+    });
+    logger.info('Forge Assets client initialized');
+  } else {
+    logger.warn('FORGE_ASSETS_API_KEY not set — Forge browse/upload disabled (Phase 5 portrait lookup will skip)');
+  }
+
+  const createActorTools = new CreateActorTools({ foundryClient, logger, forgeAssetsClient });
 
   const auditActorTools = new AuditActorTools({ foundryClient, logger });
 
@@ -1137,19 +1152,6 @@ async function startBackend(): Promise<void> {
     }
   } catch (error) {
     logger.warn('Failed to initialize map generation components', { error });
-  }
-
-  // Initialize Forge Assets client for NPC portrait uploads
-  let forgeAssetsClient: ForgeAssetsClient | null = null;
-  const forgeApiKey = process.env.FORGE_ASSETS_API_KEY;
-  if (forgeApiKey) {
-    forgeAssetsClient = new ForgeAssetsClient({
-      logger,
-      config: { apiKey: forgeApiKey },
-    });
-    logger.info('Forge Assets client initialized');
-  } else {
-    logger.warn('FORGE_ASSETS_API_KEY not set — portrait uploads to Forge will be unavailable');
   }
 
   // Initialize NPC portrait tools (reuses same ComfyUI client as map generation)

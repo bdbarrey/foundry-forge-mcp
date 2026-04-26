@@ -89,9 +89,73 @@ export class ForgeAssetsClient {
   }
 
   /**
+   * List a folder and return rich entries: path (Foundry-relative), full URL
+   * when available, and basename. Tolerant of two known response shapes:
+   *   - `files: string[]` (relative paths) + optional `fileURLs: string[]` (parallel)
+   *   - `files: { path, url?, name? }[]`
+   *
+   * Foundry's set-actor-image accepts either form, but full URLs survive
+   * cleaner across Forge's CDN re-routing — preferred when present.
+   */
+  async browseFolder(folder: string): Promise<ForgeAssetEntry[]> {
+    try {
+      const response = await axios.get(`${this.baseUrl}/assets/browse`, {
+        params: { path: folder },
+        headers: { 'Authorization': this.apiKey },
+        timeout: 15000,
+      });
+
+      const data = response.data ?? {};
+      const rawFiles = Array.isArray(data.files) ? data.files : [];
+      const rawUrls = Array.isArray(data.fileURLs) ? data.fileURLs : [];
+      const entries: ForgeAssetEntry[] = [];
+
+      for (let i = 0; i < rawFiles.length; i++) {
+        const f = rawFiles[i];
+        if (typeof f === 'string') {
+          const path = f;
+          const name = path.split(/[\\/]/).pop() ?? path;
+          const url = typeof rawUrls[i] === 'string' ? rawUrls[i] : undefined;
+          entries.push(url ? { path, name, url } : { path, name });
+        } else if (f && typeof f === 'object') {
+          const path = String(f.path ?? f.name ?? '');
+          if (!path) continue;
+          const name = String(f.name ?? path.split(/[\\/]/).pop() ?? path);
+          const url: string | undefined = typeof f.url === 'string' ? f.url
+            : typeof rawUrls[i] === 'string' ? rawUrls[i]
+            : undefined;
+          entries.push(url ? { path, name, url } : { path, name });
+        }
+      }
+
+      this.logger.info('Browsed Forge folder', {
+        folder, fileCount: entries.length,
+        urlsAttached: entries.filter(e => e.url).length,
+      });
+      return entries;
+    } catch (error: any) {
+      this.logger.error('Failed to browse Forge folder', {
+        folder,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        status: error?.response?.status,
+      });
+      throw new Error(`Forge browse failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
    * Sanitize an NPC name for use as a filename
    */
   static sanitizeFilename(npcName: string): string {
     return npcName.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_\-]/g, '');
   }
+}
+
+export interface ForgeAssetEntry {
+  /** Foundry-relative path (e.g., "moulinette/adventures/.../Volenta.webp"). */
+  path: string;
+  /** Basename (e.g., "Volenta.webp"). */
+  name: string;
+  /** Full https URL if Forge returned one. Optional. */
+  url?: string;
 }
