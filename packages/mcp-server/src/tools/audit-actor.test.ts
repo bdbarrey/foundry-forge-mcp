@@ -392,6 +392,98 @@ describe('compareActor — traits list (semicolon conditional clauses)', () => {
   });
 });
 
+describe('compareActor — versatile damage (Phase 3a-polish #2)', () => {
+  function makeWithVersatileLongsword(versatileSystem: any | undefined): { sb: ReloadedStatblock; actor: ActorSnapshot } {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Longsword',
+        description: 'Melee Weapon Attack: +7 to hit, reach 5 ft., one target. Hit: 13 (2d8 + 4) slashing damage, or 15 (2d10 + 4) slashing damage if used with two hands.',
+        parsed: {
+          attackBonus: 7, attackType: 'melee', reach: 5,
+          damage: [{ formula: '2d8 + 4', type: 'slashing' }],
+          versatile: { formula: '2d10 + 4', type: 'slashing' },
+        },
+      }],
+    });
+    const actor = makeActor(
+      { attributes: { hp: { max: 100 }, ac: { flat: 14 } },
+        abilities: { str: { value: 16 }, dex: { value: 14 }, con: { value: 16 },
+          int: { value: 10 }, wis: { value: 12 }, cha: { value: 12 } } },
+      [{
+        id: 'longswordItemId',
+        name: 'Longsword',
+        type: 'weapon',
+        system: {
+          activities: { attackId: { type: 'attack', attack: { bonus: '+7', flat: true, type: { value: 'melee' } },
+            range: { reach: 5, units: 'ft', override: true },
+            damage: { parts: [{ types: ['slashing'], custom: { enabled: true, formula: '2d8 + 4' } }], includeBase: false } } },
+          ...(versatileSystem !== undefined ? { damage: { versatile: versatileSystem } } : {}),
+        },
+      }],
+    );
+    return { sb, actor };
+  }
+
+  it('reports no versatile-related divergence when item.system.damage.versatile.custom matches parsed', () => {
+    // compareSingleAction filters out matches, so a successful versatile write
+    // should not surface in the action's divergences list. (Other unrelated
+    // checks may still produce divergences for an action — we only assert on
+    // the versatile fields.)
+    const { sb, actor } = makeWithVersatileLongsword({
+      number: 1, denomination: 10,
+      types: ['slashing'],
+      custom: { enabled: true, formula: '2d10 + 4' },
+    });
+    const audit = compareActor(actor, sb);
+    const longsword = audit.actions.find(a => a.name === 'Longsword')!;
+    expect(longsword.divergences.find(d => d.field?.startsWith('damage.versatile'))).toBeUndefined();
+  });
+
+  it('flags as divergence when versatile.custom.enabled is false (write didn\'t land)', () => {
+    const { sb, actor } = makeWithVersatileLongsword({
+      types: [], custom: { enabled: false },
+    });
+    const audit = compareActor(actor, sb);
+    const longsword = audit.actions.find(a => a.name === 'Longsword')!;
+    const versatile = longsword.divergences.find(d => d.field === 'damage.versatile');
+    expect(versatile).toBeDefined();
+    expect(versatile!.status).toBe('divergence');
+    expect(versatile!.severity).toBe('medium');
+    expect(versatile!.foundry).toBe('not-set');
+  });
+
+  it('flags as divergence when versatile is missing entirely from item.system.damage', () => {
+    const { sb, actor } = makeWithVersatileLongsword(undefined);
+    const audit = compareActor(actor, sb);
+    const longsword = audit.actions.find(a => a.name === 'Longsword')!;
+    const versatile = longsword.divergences.find(d => d.field === 'damage.versatile');
+    expect(versatile).toBeDefined();
+    expect(versatile!.status).toBe('divergence');
+  });
+
+  it('does not emit versatile checks when parsed has no versatile (Reloaded action without two-handed alt)', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Bite',
+        description: 'Melee: +5 to hit, reach 5 ft., 6 (1d6+3) piercing damage.',
+        parsed: { attackBonus: 5, attackType: 'melee', reach: 5,
+          damage: [{ formula: '1d6 + 3', type: 'piercing' }] },
+      }],
+    });
+    const actor = makeActor(
+      { attributes: { hp: { max: 100 }, ac: { flat: 14 } },
+        abilities: { str: { value: 16 }, dex: { value: 14 }, con: { value: 16 },
+          int: { value: 10 }, wis: { value: 12 }, cha: { value: 12 } } },
+      [{ id: 'bite', name: 'Bite', type: 'weapon',
+        system: { activities: { aId: { type: 'attack', attack: { bonus: '+5', flat: true },
+          range: { reach: 5 }, damage: { parts: [{ types: ['piercing'], custom: { enabled: true, formula: '1d6 + 3' } }] } } } } }],
+    );
+    const audit = compareActor(actor, sb);
+    const bite = audit.actions.find(a => a.name === 'Bite')!;
+    expect(bite.divergences.find(d => d.field?.startsWith('damage.versatile'))).toBeUndefined();
+  });
+});
+
 describe('compareActor — summary aggregation', () => {
   it('counts critical/medium/low correctly', () => {
     const sb = makeStatblock({ hp: { avg: 142, formula: null }, alignment: 'chaotic evil' });

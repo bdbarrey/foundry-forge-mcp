@@ -196,15 +196,20 @@ describe('selectPruneCandidates (Phase 3b extension)', () => {
     'Smokestick', 'Firebomb',
   ];
 
-  it('keeps non-feat items unconditionally (weapons, spells, equipment)', () => {
+  it('keeps non-prune-eligible types unconditionally (spells, equipment, classes — but NOT weapons)', () => {
+    // dnd5e NPC attacks are type=weapon, so weapon must be in the prune-eligible
+    // set. Spells/equipment/etc. stay protected.
     const items = [
-      { id: 'a', name: 'Longsword', type: 'weapon' },
-      { id: 'b', name: 'Spell of Some Kind', type: 'spell' },
-      { id: 'c', name: 'Backpack', type: 'equipment' },
+      { id: 'a', name: 'Spell of Some Kind', type: 'spell' },
+      { id: 'b', name: 'Backpack', type: 'equipment' },
+      { id: 'c', name: 'Some Class', type: 'class' },
+      { id: 'd', name: 'Some Race', type: 'race' },
+      { id: 'e', name: 'Loot', type: 'loot' },
+      { id: 'f', name: 'Container', type: 'container' },
     ];
     const { toPrune, decisions } = selectPruneCandidates(items, VOLENTA_RELOADED);
     expect(toPrune).toHaveLength(0);
-    expect(decisions.every(d => d.decision === 'keep')).toBe(true);
+    expect(decisions.every(d => d.decision === 'keep' && d.reason.startsWith('type='))).toBe(true);
   });
 
   it('keeps items added by us (flags.foundry-forge-mcp.source)', () => {
@@ -235,29 +240,32 @@ describe('selectPruneCandidates (Phase 3b extension)', () => {
     expect(toPrune).toHaveLength(0);
   });
 
-  it('keeps feats whose name has token overlap with a Reloaded trait/action', () => {
+  it('keeps feats AND weapons whose name has token overlap with a Reloaded trait/action', () => {
     const items = [
-      // "Hail of Daggers" → token "daggers" overlaps with Reloaded "Dagger"... actually
-      // "dagger" is 6 chars vs "daggers" 7 chars, both case-insensitive token-set; "dagger"
-      // is in Reloaded. We tokenize the item name "Hail of Daggers" → {hail, daggers}.
-      // Reloaded names tokenize to {hail, daggers, dagger, tanglefoot, ...}. Match on "daggers".
-      { id: 'a', name: 'Hail of Daggers', type: 'feat' },
-      // SRD "Dagger Throw" not in Reloaded explicit, but tokens "dagger"/"throw" — "dagger" matches "Dagger".
+      // Both shapes — feat and weapon — when name tokens overlap Reloaded.
+      // "Hail of Daggers" → {hail, daggers} ∩ Reloaded {..., daggers, ...} = match on "daggers".
+      { id: 'a', name: 'Hail of Daggers', type: 'weapon' },
+      // SRD "Dagger Throw" not explicit in Reloaded, but token "dagger" matches Reloaded "Dagger".
       { id: 'b', name: 'Dagger Throw', type: 'feat' },
     ];
     const { toPrune, decisions } = selectPruneCandidates(items, VOLENTA_RELOADED);
     expect(toPrune).toHaveLength(0);
     const reasons = decisions.map(d => d.reason);
-    expect(reasons.some(r => r.startsWith('token-match:'))).toBe(true);
+    expect(reasons.every(r => r.startsWith('token-match:'))).toBe(true);
   });
 
-  it('prunes compendium-base feats with no Reloaded match (Bite, Claws on a non-bite Reloaded)', () => {
+  it('prunes compendium-base weapons AND feats with no Reloaded match (Bite, Claws on Volenta)', () => {
+    // Real Volenta-shape input: Vampire Spawn base ships Bite + Claws as type=weapon
+    // (dnd5e 5.x NPC attacks are weapons, not feats). Reloaded Volenta has Hail of
+    // Daggers + Dagger instead. Pruning must reach into type=weapon to delete the
+    // compendium leftovers.
     const items = [
-      { id: 'a', name: 'Bite', type: 'feat' },
-      { id: 'b', name: 'Claws', type: 'feat' },
+      { id: 'a', name: 'Bite', type: 'weapon' },                       // compendium leftover
+      { id: 'b', name: 'Claws', type: 'weapon' },                      // compendium leftover
       { id: 'c', name: 'Multiattack', type: 'feat' },                  // ALWAYS_KEEP
-      { id: 'd', name: 'Hail of Daggers', type: 'feat',                // token match
-        flags: {} },
+      { id: 'd', name: 'Hail of Daggers', type: 'weapon' },            // token-match on "daggers"
+      { id: 'e', name: 'Dagger', type: 'weapon' },                     // token-match on "dagger"
+      { id: 'f', name: 'Vampire Weaknesses', type: 'feat' },           // ALWAYS_KEEP
     ];
     const { toPrune } = selectPruneCandidates(items, VOLENTA_RELOADED);
     expect(toPrune.map(p => p.name).sort()).toEqual(['Bite', 'Claws']);

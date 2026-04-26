@@ -132,7 +132,7 @@ export class CreateActorTools {
             },
             prune_base_items: {
               type: 'boolean',
-              description: 'Phase 3b extension (Mode A only). When true, after the build runs, walk the actor\'s feat items and remove compendium-base feats that have no name-token overlap with any Reloaded trait or action. Conservative: only type=feat is in scope (weapons/spells/equipment never pruned), an ALWAYS_KEEP list preserves common monster traits (Multiattack, Spellcasting, Legendary Resistance, Sunlight Sensitivity, etc.), items added this run are detected via flags and never pruned, and a hard cap of 5 deletions per run prevents runaway. Off by default — heavy Reloaded renames can produce false positives. Result is reported as `prunedItems` and `prunedCandidatesOverCap`.',
+              description: 'Phase 3b extension (Mode A only). When true, after the build runs, walk the actor\'s feat AND weapon items and remove compendium-base entries that have no name-token overlap with any Reloaded trait or action. In dnd5e 5.x NPC attacks (Bite, Claws, Longsword, Hail of Daggers) are `type=weapon` items, so weapon-pruning is required to drop SRD vampire\'s Bite/Claws on a Volenta build. Spells/equipment/classes/races/backgrounds/containers/loot stay safe. ALWAYS_KEEP list preserves common monster traits (Multiattack, Spellcasting, Legendary Resistance, Sunlight Sensitivity, etc.), token-overlap with Reloaded names preserves matched items (e.g. our copy-patched "Hail of Daggers" overlaps "daggers" with Reloaded\'s action of the same name). Hard cap of 5 deletions per run. Off by default — heavy Reloaded renames can produce false positives. Result is reported as `prunedItems` and `prunedCandidatesOverCap`.',
             },
           },
         },
@@ -2614,10 +2614,14 @@ export interface PruneDecision {
  *
  * Keep rules (first match wins):
  *   1. Item carries our own flag (`flags.foundry-forge-mcp.source`) — added
- *      this run, never prune.
- *   2. Item type ≠ 'feat' — weapons, spells, equipment, classes, races,
- *      backgrounds. Pruning these would gut legitimate gear; only the FEAT
- *      surface is in scope for compendium-base cleanup.
+ *      this run, never prune. (Note: module-side getCharacterInfo currently
+ *      strips item.flags from the response, so this branch is dead at runtime;
+ *      kept as forward-compatibility for when flags become readable. Real
+ *      preservation of our additions is via token-overlap below.)
+ *   2. Item type is NOT in the prune-eligible set {'feat', 'weapon'}.
+ *      Spells/equipment/classes/races/backgrounds/containers/loot stay safe;
+ *      feats and weapons are in-scope because in dnd5e 5.x NPC attacks are
+ *      `type=weapon` items (Bite, Claws, Longsword, Hail of Daggers), not feats.
  *   3. Item name (or its parenthetical-stripped stem) is in PRUNE_ALWAYS_KEEP.
  *   4. Item name has any 3+-char token overlap with a Reloaded trait/action
  *      name (case-insensitive, stop-tokens removed).
@@ -2649,7 +2653,7 @@ export function selectPruneCandidates(
       decisions.push({ id, name, type, decision: 'keep', reason: `ours: ${ourFlag}` });
       continue;
     }
-    if (type !== 'feat') {
+    if (type !== 'feat' && type !== 'weapon') {
       decisions.push({ id, name, type, decision: 'keep', reason: `type=${type}` });
       continue;
     }

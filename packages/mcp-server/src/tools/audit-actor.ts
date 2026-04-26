@@ -637,6 +637,48 @@ function compareSingleAction(
     }
   }
 
+  // ----- versatile damage (item-level system.damage.versatile) -----
+  // Reloaded prose like "13 (2d8+4) slashing damage, or 15 (2d10+4) slashing
+  // damage if used with two hands" parses to parsed.versatile. Phase 3a-polish
+  // writes it to item-level system.damage.versatile.custom.{enabled,formula}.
+  // Audit checks the formula matches; missing means the second damage roll
+  // isn't on the sheet even though the parser saw it.
+  if (parsed.versatile) {
+    const versatile = item.system?.damage?.versatile;
+    const customEnabled = versatile?.custom?.enabled === true;
+    const customFormula = versatile?.custom?.formula;
+    if (!customEnabled || !customFormula) {
+      out.push({
+        field: 'damage.versatile',
+        reloaded: parsed.versatile,
+        foundry: customEnabled ? { formula: customFormula ?? null } : 'not-set',
+        status: 'divergence',
+        severity: 'medium',
+        note: 'Reloaded prose has a versatile alternative (e.g. "or 2d10+4 if two-handed") but item.system.damage.versatile.custom is not set; sheet won\'t expose the alternate damage roll.',
+      });
+    } else {
+      const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
+      const formulaMatch = norm(String(customFormula)) === norm(parsed.versatile.formula);
+      out.push({
+        field: 'damage.versatile.formula',
+        reloaded: parsed.versatile.formula,
+        foundry: customFormula,
+        status: formulaMatch ? 'match' : 'divergence',
+        severity: 'medium',
+      });
+      const versatileTypes = Array.isArray(versatile?.types) ? versatile.types : [];
+      const typeMatch = versatileTypes.length > 0
+        && String(versatileTypes[0]).toLowerCase() === parsed.versatile.type.toLowerCase();
+      out.push({
+        field: 'damage.versatile.type',
+        reloaded: parsed.versatile.type,
+        foundry: versatileTypes,
+        status: typeMatch ? 'match' : 'divergence',
+        severity: 'medium',
+      });
+    }
+  }
+
   // ----- save (save activity) -----
   if (parsed.save) {
     if (!saveAct) {
