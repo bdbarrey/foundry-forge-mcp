@@ -42,6 +42,8 @@ import { CreateActorTools } from './tools/create-actor.js';
 
 import { AuditActorTools } from './tools/audit-actor.js';
 
+import { ApplyActorPortraitTools } from './tools/apply-actor-portrait.js';
+
 import { ForgeAssetsClient } from './forge-assets-client.js';
 
 import { DSA5CharacterCreator } from './systems/dsa5/character-creator.js';
@@ -1114,6 +1116,12 @@ async function startBackend(): Promise<void> {
 
   const auditActorTools = new AuditActorTools({ foundryClient, logger });
 
+  // apply-actor-portrait delegates to createActorTools' resolver, so it must
+  // be constructed AFTER createActorTools.
+  const applyActorPortraitTools = new ApplyActorPortraitTools({
+    foundryClient, logger, createActorTools,
+  });
+
   // Initialize mapgen-style backend components for map generation
   let mapGenerationJobQueue: any = null;
   let mapGenerationComfyUIClient: any = null;
@@ -1363,6 +1371,8 @@ async function startBackend(): Promise<void> {
 
     ...auditActorTools.getToolDefinitions(),
 
+    ...applyActorPortraitTools.getToolDefinitions(),
+
   ];
 
   // Start Foundry connector (owns app port 31415)
@@ -1490,6 +1500,12 @@ async function startBackend(): Promise<void> {
                 case 'audit-actor':
 
                   result = await auditActorTools.handleAuditActor(args);
+
+                  break;
+
+                case 'apply-actor-portrait':
+
+                  result = await applyActorPortraitTools.handleApplyActorPortrait(args);
 
                   break;
 

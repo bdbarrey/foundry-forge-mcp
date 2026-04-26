@@ -1176,7 +1176,10 @@ export class CreateActorTools {
    * shape, never thrown. The actor build is the headline; portrait is a nice-
    * to-have that shouldn't roll back combat math if the asset library is down.
    */
-  private async resolveAndApplyPortrait(
+  // Public so apply-actor-portrait (standalone tool) can delegate to the same
+  // resolver/pair-detector/apply pipeline create-actor uses for new builds.
+  // No state beyond `this`; safe to call from other tools that hold a ref.
+  public async resolveAndApplyPortrait(
     actor: { id: string; name: string },
     sb: ReloadedStatblock,
     options:
