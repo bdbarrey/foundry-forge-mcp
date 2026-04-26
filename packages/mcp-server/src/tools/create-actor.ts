@@ -88,15 +88,15 @@ export class CreateActorTools {
             },
             portrait: {
               type: 'object',
-              description: 'Phase 5: optionally apply a portrait + token image after the actor is built. Three modes: explicit `path` (just applies it via set-actor-image), `lookup` (browses a Forge folder and fuzzy-matches the creature name against filenames), or omit to skip. Requires FORGE_ASSETS_API_KEY in backend env for `lookup` mode.',
+              description: 'Phase 5: optionally apply a portrait + token image after the actor is built. Two modes: explicit `path` (applies as-is) or `lookup` (browses a Forge folder, fuzzy-matches the creature name, detects portrait/token pair conventions). Requires FORGE_ASSETS_API_KEY in backend env for `lookup` mode.',
               properties: {
                 path: {
                   type: 'string',
-                  description: 'Explicit Foundry-relative path or full URL (e.g. "moulinette/.../cos_tokens/Volenta.webp"). Applied as-is via set-actor-image.',
+                  description: 'Explicit Foundry-relative path or full URL (e.g. "moulinette/.../cos_tokens/Volenta.webp"). Applied as-is.',
                 },
                 lookup: {
                   type: 'object',
-                  description: 'Fuzzy-match a token in a Forge folder by creature name. Used to auto-discover an existing token from a curated library (Beneos cos_tokens by default).',
+                  description: 'Fuzzy-match a portrait in a Forge folder by creature name. Recursively walks subdirs (My Avatars, NPCs, Strahd\'s Minions etc. live in subfolders) and detects pair conventions (Beneos `_token` suffix, Tokenizer `.Avatar`/`.Token` suffix, sibling Avatars/Tokens or Portrait/Token folders).',
                   properties: {
                     folder: {
                       type: 'string',
@@ -104,15 +104,28 @@ export class CreateActorTools {
                     },
                     minScore: {
                       type: 'number',
-                      description: 'Minimum fuzzy-match score [0..1] to auto-apply (default 0.5). Below this, the resolver returns the top candidates without applying anything so the caller can confirm.',
-                      minimum: 0,
-                      maximum: 1,
+                      description: 'Minimum fuzzy-match score [0..1] to auto-apply (default 0.5). Below this, the resolver returns top candidates without applying so the caller can confirm.',
+                      minimum: 0, maximum: 1,
+                    },
+                    names: {
+                      type: 'array',
+                      description: 'Override the candidate names for the fuzzy match. By default the resolver uses variants of the Reloaded creature name (full / pre-comma / role-stripped). Pass alternate spellings here when needed (e.g. ["valenta", "valenta popofsky"] for Beneos\'s Volenta).',
+                      items: { type: 'string' },
+                    },
+                    recursive: {
+                      type: 'boolean',
+                      description: 'Walk subdirs (default true). Required for `My Avatars` whose actual files live in nested folders. Bounded at depth 3.',
                     },
                   },
                 },
+                convention: {
+                  type: 'string',
+                  enum: ['auto', 'single', 'tokenizer'],
+                  description: 'How to apply the resolved image to the actor. `auto` (default): detect pair convention; if pair found, set portrait + token from the right sibling files; otherwise behave like `single`. `single`: same URL for `img` + `prototypeToken.texture.src`. `tokenizer`: set only `img` and leave `prototypeToken.texture.src` alone — the Tokenizer module on the client will auto-generate a token from the portrait when actor.img changes.',
+                },
                 applyToToken: {
                   type: 'boolean',
-                  description: 'Also set prototypeToken.texture.src (default true).',
+                  description: 'Also set prototypeToken.texture.src (default true; ignored under convention=tokenizer).',
                 },
               },
             },
@@ -189,7 +202,10 @@ export class CreateActorTools {
         lookup: z.object({
           folder: z.string().optional(),
           minScore: z.number().min(0).max(1).optional(),
+          names: z.array(z.string()).optional(),
+          recursive: z.boolean().optional(),
         }).optional(),
+        convention: z.enum(['auto', 'single', 'tokenizer']).optional(),
         applyToToken: z.boolean().optional(),
       }).optional(),
     }).refine(
@@ -914,41 +930,56 @@ export class CreateActorTools {
     options:
       | {
           path?: string | undefined;
-          lookup?: { folder?: string | undefined; minScore?: number | undefined } | undefined;
+          lookup?: {
+            folder?: string | undefined;
+            minScore?: number | undefined;
+            names?: string[] | undefined;
+            recursive?: boolean | undefined;
+          } | undefined;
+          convention?: 'auto' | 'single' | 'tokenizer' | undefined;
           applyToToken?: boolean | undefined;
         }
       | undefined,
   ): Promise<Record<string, any>> {
     if (!options) return { applied: false, reason: 'not_requested' };
 
+    const convention = options.convention ?? 'auto';
     const applyToToken = options.applyToToken ?? true;
 
-    // Mode 1: explicit path — apply directly.
+    // Mode 1: explicit path. With convention=tokenizer, only `img` is set.
+    // With auto/single + applyToToken=true, both fields get the same URL
+    // (no pair detection — caller knew exactly what file to apply).
     if (options.path) {
       try {
-        await this.applyActorImage(actor.id, options.path, applyToToken);
+        if (convention === 'tokenizer') {
+          await this.applyActorPortraitOnly(actor.id, options.path);
+        } else {
+          await this.applyActorImage(actor.id, options.path, applyToToken);
+        }
         return {
           applied: true,
           mode: 'explicit',
-          imageUrl: options.path,
-          tokenUpdated: applyToToken,
+          convention,
+          portraitUrl: options.path,
+          tokenUrl: convention === 'tokenizer' ? null : (applyToToken ? options.path : null),
+          tokenUpdated: convention !== 'tokenizer' && applyToToken,
         };
       } catch (err: any) {
         return {
           applied: false,
           mode: 'explicit',
-          imageUrl: options.path,
+          convention,
+          portraitUrl: options.path,
           error: err?.message ?? String(err),
         };
       }
     }
 
-    // Mode 2: fuzzy lookup against a Forge folder.
+    // Mode 2: fuzzy lookup against a Forge folder (recursive by default).
     if (options.lookup) {
       if (!this.forgeAssetsClient) {
         return {
-          applied: false,
-          mode: 'lookup',
+          applied: false, mode: 'lookup',
           reason: 'forge_client_unavailable',
           hint: 'Set FORGE_ASSETS_API_KEY in the backend env to enable folder lookup.',
         };
@@ -956,74 +987,78 @@ export class CreateActorTools {
 
       const folder = options.lookup.folder ?? DEFAULT_BENEOS_TOKEN_FOLDER;
       const minScore = options.lookup.minScore ?? PORTRAIT_MATCH_FLOOR;
+      const recursive = options.lookup.recursive ?? true;
+
       let entries: ForgeAssetEntry[] = [];
       try {
-        entries = await this.forgeAssetsClient.browseFolder(folder);
+        entries = await this.forgeAssetsClient.browseFolder(folder, { recursive });
       } catch (err: any) {
         return {
-          applied: false,
-          mode: 'lookup',
-          folder,
+          applied: false, mode: 'lookup', folder,
           error: err?.message ?? String(err),
         };
       }
       if (entries.length === 0) {
-        return {
-          applied: false,
-          mode: 'lookup',
-          folder,
-          reason: 'empty_folder',
-        };
+        return { applied: false, mode: 'lookup', folder, reason: 'empty_folder' };
       }
 
-      // Build candidate name list — the same variants we use for compendium
-      // matching: full name, pre-comma stem, role-stripped stem.
-      const candidates = Array.from(nameVariants(sb.name));
+      // Candidate names: caller override OR the standard nameVariants (full,
+      // pre-comma stem, role-stripped) used by compendium matching.
+      const candidates = options.lookup.names && options.lookup.names.length > 0
+        ? options.lookup.names
+        : Array.from(nameVariants(sb.name));
+
       const ranked = rankPortraitCandidates(entries, candidates, 5);
       const top = ranked[0];
 
       if (!top || top.score < minScore) {
         return {
-          applied: false,
-          mode: 'lookup',
-          folder,
+          applied: false, mode: 'lookup', folder,
           reason: 'no_match_above_floor',
           minScore,
+          candidatesSearched: candidates,
           topPick: top ?? null,
           candidates: ranked.slice(0, 5),
         };
       }
 
-      // Beneos cos_tokens convention: each NPC ships as a pair —
-      // `<stem>.webp` (portrait) + `<stem>_token.webp` (token). When the
-      // resolver picked one, look up the sibling so the actor's `img` and
-      // `prototypeToken.texture.src` get the right image each.
-      const pair = resolveBeneosPair(top.entry, entries);
+      // Detect the pair convention based on the matched file + folder layout.
+      const pair = resolveAssetPair(top.entry, entries);
       const portraitUrl = pair.portrait.url ?? pair.portrait.path;
       const tokenUrl = pair.token.url ?? pair.token.path;
 
       try {
-        await this.applyActorPortraitAndToken(actor.id, portraitUrl, tokenUrl, applyToToken);
+        if (convention === 'tokenizer') {
+          // Only set img; let Tokenizer hook generate the token client-side.
+          await this.applyActorPortraitOnly(actor.id, portraitUrl);
+        } else if (convention === 'single' || pair.convention === 'none') {
+          // Same URL on both slots.
+          await this.applyActorImage(actor.id, portraitUrl, applyToToken);
+        } else {
+          // auto + pair found → distinct URLs for portrait and token.
+          await this.applyActorPortraitAndToken(actor.id, portraitUrl, tokenUrl, applyToToken);
+        }
         return {
           applied: true,
           mode: 'lookup',
           folder,
+          convention,
+          pairConvention: pair.convention,
           portraitUrl,
-          tokenUrl: applyToToken ? tokenUrl : null,
+          tokenUrl: convention === 'tokenizer'
+            ? null
+            : (applyToToken ? (pair.convention === 'none' ? portraitUrl : tokenUrl) : null),
           matchedFile: top.entry.name,
           matchedAgainst: top.matchedAgainst,
           score: Number(top.score.toFixed(3)),
           tokenSiblingFound: pair.tokenSiblingFound,
-          tokenUpdated: applyToToken,
+          tokenUpdated: convention !== 'tokenizer' && applyToToken,
           candidates: ranked.slice(0, 5),
         };
       } catch (err: any) {
         return {
-          applied: false,
-          mode: 'lookup',
-          folder,
-          portraitUrl,
-          tokenUrl,
+          applied: false, mode: 'lookup', folder, convention,
+          portraitUrl, tokenUrl,
           matchedFile: top.entry.name,
           error: err?.message ?? String(err),
         };
@@ -1062,6 +1097,25 @@ export class CreateActorTools {
     const r: any = await this.foundryClient.query('foundry-forge-mcp.updateActorData', {
       actorId,
       updates,
+    });
+    if (r?.success === false) {
+      throw new Error(r?.error ?? 'updateActorData returned success=false');
+    }
+  }
+
+  /**
+   * Apply only the portrait (`img`), leave `prototypeToken.texture.src`
+   * untouched. For the Tokenizer convention: setting actor.img triggers
+   * Tokenizer's `updateActor` hook on the client, which generates a token
+   * from the portrait + frame and writes prototypeToken.texture.src itself.
+   */
+  private async applyActorPortraitOnly(
+    actorId: string,
+    portraitUrl: string,
+  ): Promise<void> {
+    const r: any = await this.foundryClient.query('foundry-forge-mcp.updateActorData', {
+      actorId,
+      updates: { img: portraitUrl },
     });
     if (r?.success === false) {
       throw new Error(r?.error ?? 'updateActorData returned success=false');
@@ -1540,34 +1594,148 @@ function normalizePortraitName(s: string): string {
  *
  * Pure function — exported for tests.
  */
+export type PairConventionMatched = 'same-folder-suffix' | 'sibling-folder' | 'none';
+
+/**
+ * Resolve a portrait/token pair across the four conventions observed in
+ * Ben's libraries (probed live 2026-04-26):
+ *
+ *   1. Same-folder suffix `_token` — Beneos cos_tokens (valenta_popofsky.webp +
+ *      valenta_popofsky_token.webp).
+ *   2. Same-folder suffix `.Avatar` / `.Token` — Tokenizer pc-images
+ *      (aezael.Avatar.webp + aezael.Token.webp).
+ *   3. Sibling-folder pair — My Avatars/NPCs/Avatars/Doru.png +
+ *      My Avatars/NPCs/Tokens/Doru.png; or Strahd's Minions/Portrait/...
+ *      and Strahd's Minions/Token/... — same filename, different folder.
+ *   4. No sibling — single file. Caller decides single vs tokenizer mode.
+ *
+ * Pure function. Returns the resolved pair plus which convention won (for
+ * diagnostics surfaced in the tool response).
+ */
+export function resolveAssetPair(
+  matched: ForgeAssetEntry,
+  allEntries: ForgeAssetEntry[],
+): {
+  portrait: ForgeAssetEntry;
+  token: ForgeAssetEntry;
+  tokenSiblingFound: boolean;
+  convention: PairConventionMatched;
+} {
+  const suffixMatch = trySuffixPair(matched, allEntries);
+  if (suffixMatch) {
+    return { ...suffixMatch, tokenSiblingFound: true, convention: 'same-folder-suffix' };
+  }
+
+  const siblingMatch = trySiblingFolderPair(matched, allEntries);
+  if (siblingMatch) {
+    return { ...siblingMatch, tokenSiblingFound: true, convention: 'sibling-folder' };
+  }
+
+  return { portrait: matched, token: matched, tokenSiblingFound: false, convention: 'none' };
+}
+
+/** Same-folder suffix pair: `_token` (Beneos) or `.Token`/`.Avatar` (Tokenizer). */
+function trySuffixPair(
+  matched: ForgeAssetEntry,
+  allEntries: ForgeAssetEntry[],
+): { portrait: ForgeAssetEntry; token: ForgeAssetEntry } | null {
+  const stem = matched.name.replace(/\.[^.]+$/, '');
+  const ext = matched.name.match(/\.[^.]+$/)?.[0] ?? '';
+  const matchedDir = directoryOf(matched.path);
+
+  // Tokenizer-style `.Token` / `.Avatar` first since it's more specific.
+  const tokenizerSuffix = stem.match(/\.(Token|Avatar)$/i);
+  if (tokenizerSuffix) {
+    const flip = tokenizerSuffix[1].toLowerCase() === 'token' ? 'Avatar' : 'Token';
+    const otherStem = stem.replace(/\.(Token|Avatar)$/i, `.${flip}`);
+    const otherName = `${otherStem}${ext}`;
+    const other = allEntries.find(e =>
+      directoryOf(e.path) === matchedDir &&
+      e.name.toLowerCase() === otherName.toLowerCase());
+    if (other) {
+      return tokenizerSuffix[1].toLowerCase() === 'token'
+        ? { portrait: other, token: matched }
+        : { portrait: matched, token: other };
+    }
+  }
+
+  // Beneos `_token` suffix (only the token side carries the suffix).
+  const isToken = /_token$/i.test(stem);
+  if (isToken) {
+    const portraitName = `${stem.replace(/_token$/i, '')}${ext}`;
+    const portrait = allEntries.find(e =>
+      directoryOf(e.path) === matchedDir &&
+      e.name.toLowerCase() === portraitName.toLowerCase());
+    if (portrait) return { portrait, token: matched };
+  } else {
+    const tokenName = `${stem}_token${ext}`;
+    const token = allEntries.find(e =>
+      directoryOf(e.path) === matchedDir &&
+      e.name.toLowerCase() === tokenName.toLowerCase());
+    if (token) return { portrait: matched, token };
+  }
+
+  return null;
+}
+
+/**
+ * Sibling-folder pair: portraits + tokens in parallel folders sharing a parent.
+ * Recognized pairs (case-insensitive): Avatars/Tokens, Avatar/Token,
+ * Portraits/Tokens, Portrait/Token. Filenames must match across the pair.
+ */
+function trySiblingFolderPair(
+  matched: ForgeAssetEntry,
+  allEntries: ForgeAssetEntry[],
+): { portrait: ForgeAssetEntry; token: ForgeAssetEntry } | null {
+  const matchedDir = directoryOf(matched.path);
+  const matchedDirName = matchedDir.split('/').pop() ?? '';
+  const parentDir = matchedDir.slice(0, matchedDir.length - matchedDirName.length).replace(/\/$/, '');
+
+  const SIBLING_PAIRS: Array<[string, string]> = [
+    ['avatars', 'tokens'], ['avatar', 'token'],
+    ['portraits', 'tokens'], ['portrait', 'token'],
+  ];
+
+  for (const [a, b] of SIBLING_PAIRS) {
+    const lc = matchedDirName.toLowerCase();
+    let siblingDirName: string | null = null;
+    let matchedIsPortrait = false;
+    if (lc === a) { siblingDirName = b; matchedIsPortrait = true; }
+    else if (lc === b) { siblingDirName = a; matchedIsPortrait = false; }
+    if (!siblingDirName) continue;
+
+    // Preserve the case style of the matched dir for the sibling lookup.
+    const cased = matchedDirName === matchedDirName.toLowerCase()
+      ? siblingDirName
+      : siblingDirName.charAt(0).toUpperCase() + siblingDirName.slice(1);
+
+    const candidatePrefix = parentDir ? `${parentDir}/${cased}/` : `${cased}/`;
+    const candidatePrefixLower = candidatePrefix.toLowerCase();
+
+    const sibling = allEntries.find(e =>
+      e.path.toLowerCase().startsWith(candidatePrefixLower) &&
+      e.name.toLowerCase() === matched.name.toLowerCase());
+    if (sibling) {
+      return matchedIsPortrait
+        ? { portrait: matched, token: sibling }
+        : { portrait: sibling, token: matched };
+    }
+  }
+  return null;
+}
+
+function directoryOf(path: string): string {
+  const idx = path.lastIndexOf('/');
+  return idx === -1 ? '' : path.slice(0, idx);
+}
+
+/** @deprecated Use resolveAssetPair. Kept for backward-compat tests. */
 export function resolveBeneosPair(
   matched: ForgeAssetEntry,
   allEntries: ForgeAssetEntry[],
 ): { portrait: ForgeAssetEntry; token: ForgeAssetEntry; tokenSiblingFound: boolean } {
-  const matchedStem = matched.name.replace(/\.[^.]+$/, '');
-  const matchedExt = matched.name.match(/\.[^.]+$/)?.[0] ?? '';
-  const isTokenVariant = /_token$/i.test(matchedStem);
-
-  if (isTokenVariant) {
-    // Matched file IS the token. Find the portrait sibling.
-    const portraitStem = matchedStem.replace(/_token$/i, '');
-    const portraitName = `${portraitStem}${matchedExt}`;
-    const portrait = allEntries.find(e => e.name.toLowerCase() === portraitName.toLowerCase());
-    if (portrait) {
-      return { portrait, token: matched, tokenSiblingFound: true };
-    }
-    // No portrait sibling — fall back to using the token for both.
-    return { portrait: matched, token: matched, tokenSiblingFound: true };
-  }
-
-  // Matched file IS the portrait. Find the token sibling.
-  const tokenName = `${matchedStem}_token${matchedExt}`;
-  const token = allEntries.find(e => e.name.toLowerCase() === tokenName.toLowerCase());
-  if (token) {
-    return { portrait: matched, token, tokenSiblingFound: true };
-  }
-  // No token sibling — both slots use the matched (portrait) URL.
-  return { portrait: matched, token: matched, tokenSiblingFound: false };
+  const r = resolveAssetPair(matched, allEntries);
+  return { portrait: r.portrait, token: r.token, tokenSiblingFound: r.tokenSiblingFound };
 }
 
 function* nameVariants(name: string): Generator<string> {

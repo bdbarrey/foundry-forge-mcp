@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { portraitNameScore, rankPortraitCandidates, resolveBeneosPair } from './create-actor.js';
+import {
+  portraitNameScore, rankPortraitCandidates,
+  resolveBeneosPair, resolveAssetPair,
+} from './create-actor.js';
 import type { ForgeAssetEntry } from '../forge-assets-client.js';
 
 describe('portraitNameScore', () => {
@@ -144,5 +147,101 @@ describe('resolveBeneosPair', () => {
     const pair = resolveBeneosPair(mixed[0], mixed);
     expect(pair.tokenSiblingFound).toBe(true);
     expect(pair.token.name).toBe('Foo_token.WEBP');
+  });
+});
+
+describe('resolveAssetPair — multi-convention', () => {
+  it('detects same-folder _token suffix (Beneos)', () => {
+    const entries: ForgeAssetEntry[] = [
+      { path: 'cos_tokens/valenta_popofsky.webp', name: 'valenta_popofsky.webp' },
+      { path: 'cos_tokens/valenta_popofsky_token.webp', name: 'valenta_popofsky_token.webp' },
+    ];
+    const r = resolveAssetPair(entries[0], entries);
+    expect(r.convention).toBe('same-folder-suffix');
+    expect(r.tokenSiblingFound).toBe(true);
+    expect(r.portrait.name).toBe('valenta_popofsky.webp');
+    expect(r.token.name).toBe('valenta_popofsky_token.webp');
+  });
+
+  it('detects same-folder .Avatar/.Token suffix (Tokenizer pc-images)', () => {
+    const entries: ForgeAssetEntry[] = [
+      { path: 'tokenizer/pc-images/aezael.Avatar.webp', name: 'aezael.Avatar.webp' },
+      { path: 'tokenizer/pc-images/aezael.Token.webp', name: 'aezael.Token.webp' },
+    ];
+    // Match on the Avatar (portrait) variant
+    const r = resolveAssetPair(entries[0], entries);
+    expect(r.convention).toBe('same-folder-suffix');
+    expect(r.portrait.name).toBe('aezael.Avatar.webp');
+    expect(r.token.name).toBe('aezael.Token.webp');
+  });
+
+  it('detects same-folder .Token (matched on token variant)', () => {
+    const entries: ForgeAssetEntry[] = [
+      { path: 'tokenizer/pc-images/aezael.Avatar.webp', name: 'aezael.Avatar.webp' },
+      { path: 'tokenizer/pc-images/aezael.Token.webp', name: 'aezael.Token.webp' },
+    ];
+    const r = resolveAssetPair(entries[1], entries);
+    expect(r.convention).toBe('same-folder-suffix');
+    expect(r.portrait.name).toBe('aezael.Avatar.webp');
+    expect(r.token.name).toBe('aezael.Token.webp');
+  });
+
+  it('detects sibling-folder pair Avatars/Tokens (My Avatars/NPCs)', () => {
+    const entries: ForgeAssetEntry[] = [
+      { path: 'My Avatars/NPCs/Avatars/Doru.png', name: 'Doru.png' },
+      { path: 'My Avatars/NPCs/Tokens/Doru.png', name: 'Doru.png' },
+    ];
+    const r = resolveAssetPair(entries[0], entries);
+    expect(r.convention).toBe('sibling-folder');
+    expect(r.tokenSiblingFound).toBe(true);
+    expect(r.portrait.path).toContain('/Avatars/');
+    expect(r.token.path).toContain('/Tokens/');
+  });
+
+  it('detects sibling-folder pair Portrait/Token (Strahd\'s Minions)', () => {
+    const entries: ForgeAssetEntry[] = [
+      { path: "My Avatars/Strahd's Minions/Portrait/Izek Strazni.png", name: 'Izek Strazni.png' },
+      { path: "My Avatars/Strahd's Minions/Token/Izek Strazni.png", name: 'Izek Strazni.png' },
+    ];
+    const r = resolveAssetPair(entries[0], entries);
+    expect(r.convention).toBe('sibling-folder');
+    expect(r.portrait.path).toContain('/Portrait/');
+    expect(r.token.path).toContain('/Token/');
+  });
+
+  it('flips to portrait when matched on the Token side of a sibling pair', () => {
+    const entries: ForgeAssetEntry[] = [
+      { path: 'My Avatars/NPCs/Avatars/Doru.png', name: 'Doru.png' },
+      { path: 'My Avatars/NPCs/Tokens/Doru.png', name: 'Doru.png' },
+    ];
+    // Match on token entry; portrait should still come back as the /Avatars one.
+    const r = resolveAssetPair(entries[1], entries);
+    expect(r.portrait.path).toContain('/Avatars/');
+    expect(r.token.path).toContain('/Tokens/');
+  });
+
+  it('returns convention=none when no pair found (single file)', () => {
+    const entries: ForgeAssetEntry[] = [
+      { path: 'My Avatars/Monsters/Greater Strix.png', name: 'Greater Strix.png' },
+    ];
+    const r = resolveAssetPair(entries[0], entries);
+    expect(r.convention).toBe('none');
+    expect(r.tokenSiblingFound).toBe(false);
+    expect(r.portrait.name).toBe('Greater Strix.png');
+    expect(r.token.name).toBe('Greater Strix.png'); // fallback
+  });
+
+  it('does NOT cross-match across unrelated folders', () => {
+    // A `valenta_popofsky_token.webp` in cos_tokens shouldn't pair with a
+    // `valenta_popofsky.webp` in cos-npc-portraits — different libraries.
+    const entries: ForgeAssetEntry[] = [
+      { path: 'moulinette/.../cos_tokens/valenta_popofsky_token.webp',
+        name: 'valenta_popofsky_token.webp' },
+      { path: 'cos-npc-portraits/valenta_popofsky.webp',
+        name: 'valenta_popofsky.webp' },
+    ];
+    const r = resolveAssetPair(entries[0], entries);
+    // No same-folder portrait sibling for the token → falls through to none.
+    expect(r.convention).toBe('none');
   });
 });

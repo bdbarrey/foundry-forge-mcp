@@ -101,8 +101,28 @@ export class ForgeAssetsClient {
    *
    * Still tolerates the old `files: string[]` shape just in case Forge ever
    * brings GET back; the parser branches on entry type at the boundary.
+   *
+   * Recursion: when `recursive: true`, walks subdirs depth-first up to
+   * `maxDepth` (default 3). Needed for libraries like `My Avatars` whose
+   * actual files live in subdirs (Monsters/, NPCs/Avatars/, NPCs/Tokens/,
+   * Strahd's Minions/Portrait/, etc.) — a non-recursive browse of the root
+   * returns 0 files there.
    */
-  async browseFolder(folder: string): Promise<ForgeAssetEntry[]> {
+  async browseFolder(
+    folder: string,
+    options: { recursive?: boolean; maxDepth?: number } = {},
+  ): Promise<ForgeAssetEntry[]> {
+    const recursive = options.recursive ?? false;
+    const maxDepth = options.maxDepth ?? 3;
+    return this.browseRecursive(folder, recursive, maxDepth, 0);
+  }
+
+  private async browseRecursive(
+    folder: string,
+    recursive: boolean,
+    maxDepth: number,
+    depth: number,
+  ): Promise<ForgeAssetEntry[]> {
     try {
       const response = await axios.post(
         `${this.baseUrl}/assets/browse`,
@@ -140,14 +160,41 @@ export class ForgeAssetsClient {
         }
       }
 
-      this.logger.info('Browsed Forge folder', {
-        folder, fileCount: entries.length,
-        urlsAttached: entries.filter(e => e.url).length,
-      });
+      // Recursion: walk subdirs and concatenate. Depth-limited so a
+      // pathological folder tree can't run away. Errors in a subdir are
+      // logged but don't abort the whole walk — return what we got.
+      if (recursive && depth < maxDepth) {
+        const rawDirs = Array.isArray(data.dirs) ? data.dirs : [];
+        for (const d of rawDirs) {
+          const subPath = typeof d === 'string'
+            ? d
+            : (typeof d?.path === 'string' ? d.path : null);
+          if (!subPath) continue;
+          // Forge dir paths come back with a trailing slash; strip for the next call.
+          const cleaned = subPath.replace(/\/$/, '');
+          try {
+            const subEntries = await this.browseRecursive(cleaned, true, maxDepth, depth + 1);
+            entries.push(...subEntries);
+          } catch (err: any) {
+            this.logger.warn('Recursive browse subdir failed; continuing', {
+              subPath: cleaned,
+              error: err?.message ?? String(err),
+            });
+          }
+        }
+      }
+
+      if (depth === 0) {
+        this.logger.info('Browsed Forge folder', {
+          folder, fileCount: entries.length,
+          urlsAttached: entries.filter(e => e.url).length,
+          recursive, maxDepth,
+        });
+      }
       return entries;
     } catch (error: any) {
       this.logger.error('Failed to browse Forge folder', {
-        folder,
+        folder, depth,
         error: error instanceof Error ? error.message : 'Unknown error',
         status: error?.response?.status,
       });
