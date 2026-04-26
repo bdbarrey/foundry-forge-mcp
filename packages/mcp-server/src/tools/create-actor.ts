@@ -5,6 +5,7 @@ import { Logger } from '../logger.js';
 import { ErrorHandler } from '../utils/error-handler.js';
 import { parseReloadedStatblock, ReloadedStatblock } from '../parsers/reloaded-statblock.js';
 import { ParsedAction, parseActionDescription } from '../parsers/action-description.js';
+import { parseReloadedProseSpec, ReloadedProseSpec, FeatureOverride } from '../parsers/reloaded-prose.js';
 import { ForgeAssetsClient, ForgeAssetEntry } from '../forge-assets-client.js';
 import {
   CONFIDENCE_FLOOR,
@@ -61,7 +62,7 @@ export class CreateActorTools {
       {
         name: 'create-actor',
         description:
-          'Build a Foundry actor from a CoS Reloaded statblock. Phase 2 MVP: compendium-hybrid path only — spawns from a compendium base (auto-searched by creature name if not given) and overrides numeric stats from the Reloaded statblock (HP, AC, speed, ability scores, CR, save proficiencies). Does NOT yet sync custom traits/actions, skills, damage/condition immunities, portraits, or move to a specific folder — those land in Phase 3+. Provide EITHER reloaded_source (the raw markdown chunk) OR file_path+creature_name (the tool reads the file and extracts the `### <creature_name>` section).',
+          'Build a Foundry actor from a CoS Reloaded entry. Three input shapes:\n\nA. Statblock div — Reloaded provides a full `<div class="statblock">` block. Tool spawns from a matched compendium base and overrides every field Reloaded specifies (HP, AC, abilities, skills, traits, actions with attack/save/damage activities, etc.).\n\nB. Prose-only — Reloaded says e.g. "retains the statistics of a **priest**" + "her ***Divine Eminence*** feature now reads as follows:". Tool spawns from the prose-referenced base and rewrites only the named feature descriptions.\n\nC. Pure passthrough — no Reloaded source, just `compendium_base`. Spawn the compendium entry as-is, optionally apply portrait. For NPCs whose Reloaded entry is just a reference (e.g. Rictavio in DDB pack with no modifications).\n\nProvide EITHER reloaded_source/file_path+creature_name (modes A/B), OR compendium_base alone (mode C). Optional `portrait` arg applies in all modes.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -197,6 +198,9 @@ export class CreateActorTools {
         packId: z.string().min(1),
         itemId: z.string().min(1),
       }).optional(),
+      // Optional name override for the spawned actor when no Reloaded source
+      // is given (Mode C: pure passthrough). Defaults to compendium entry name.
+      actor_name: z.string().optional(),
       portrait: z.object({
         path: z.string().optional(),
         lookup: z.object({
@@ -209,8 +213,11 @@ export class CreateActorTools {
         applyToToken: z.boolean().optional(),
       }).optional(),
     }).refine(
-      d => d.reloaded_source || (d.file_path && d.creature_name),
-      { message: 'Provide reloaded_source OR both file_path and creature_name' },
+      // Three valid input shapes:
+      //   A. reloaded_source (or file_path+creature_name) — has statblock or prose
+      //   B. compendium_base alone — pure passthrough (Rictavio case)
+      d => !!d.reloaded_source || !!(d.file_path && d.creature_name) || !!d.compendium_base,
+      { message: 'Provide reloaded_source, file_path+creature_name, or compendium_base' },
     );
     const input = schema.parse(args);
 
@@ -222,11 +229,50 @@ export class CreateActorTools {
     });
 
     try {
-      // 1. Get markdown source
+      // ROUTER: three input shapes, three pipelines.
+      //
+      //   A. reloaded_source has a `<div class="statblock">`  → existing rich
+      //      Phase 0-3 build (numeric overrides, traits, actions, etc.)
+      //   B. reloaded_source has prose only (no statblock div) → spawn from
+      //      `baseHint` + apply feature_overrides + portrait
+      //   C. no reloaded_source, compendium_base alone        → pure spawn +
+      //      portrait (Rictavio case)
+      //
+      // Resolve source first if we have one. If not and we have compendium_base,
+      // run the passthrough pipeline.
+      const hasSource = !!input.reloaded_source || !!(input.file_path && input.creature_name);
+      if (!hasSource) {
+        // Mode C — passthrough.
+        return await this.runPassthroughBuild(input);
+      }
+
+      // 1. Get markdown source (Modes A + B share this).
       const markdown = await this.resolveSource(input);
 
-      // 2. Parse Reloaded statblock
-      const sb = parseReloadedStatblock(markdown);
+      // 2. Parse — try statblock first; fall back to prose if no div found.
+      let sbParsed: ReloadedStatblock | null = null;
+      let proseSpec: ReloadedProseSpec | null = null;
+      try {
+        sbParsed = parseReloadedStatblock(markdown);
+      } catch (err) {
+        // No statblock div — try prose.
+        proseSpec = parseReloadedProseSpec(markdown);
+        if (!proseSpec) {
+          throw new Error(
+            'Reloaded source has no <div class="statblock"> and no recognizable prose patterns ' +
+            '("retains the statistics of a X" / "treat as **X**" / feature override bullets). ' +
+            'Pass a full Reloaded statblock OR use compendium_base for pure passthrough.',
+          );
+        }
+      }
+
+      // Mode B — prose dispatch.
+      if (proseSpec) {
+        return await this.runProseBuild(proseSpec, input);
+      }
+
+      // Mode A — full statblock build (existing Phases 0-3).
+      const sb = sbParsed!;
       this.logger.debug('Parsed statblock', { name: sb.name, cr: sb.challenge });
 
       // 3. Find compendium base
@@ -599,6 +645,212 @@ export class CreateActorTools {
       };
     } catch (error) {
       this.errorHandler.handleToolError(error, 'create-actor', 'actor creation');
+    }
+  }
+
+  /**
+   * Mode B — prose-spec build. Reloaded references a base creature with
+   * narrative ("retains the statistics of a **priest**") and optionally
+   * overrides specific feature descriptions ("his ***Divine Eminence***
+   * feature now reads as follows: ..."). We spawn the base and apply only
+   * the overrides Reloaded specifies.
+   */
+  private async runProseBuild(
+    spec: ReloadedProseSpec,
+    input: any,
+  ): Promise<any> {
+    this.logger.info('create-actor prose-mode', {
+      name: spec.name,
+      baseHint: spec.baseHint,
+      overrideCount: spec.featureOverrides.length,
+    });
+
+    // Find the base. Either explicit compendium_base or search by baseHint.
+    const base = input.compendium_base ?? (spec.baseHint
+      ? await this.searchForCompendiumBase(spec.baseHint)
+      : null);
+    if (!base) {
+      throw new Error(
+        `Prose-mode build needs a compendium base. Reloaded prose ${spec.baseHint
+          ? `references "${spec.baseHint}" but no compendium match was found`
+          : 'does not name a base creature'}. Pass compendium_base explicitly.`,
+      );
+    }
+
+    const actorName = spec.name ?? input.actor_name ?? 'Unnamed';
+    const newActor = await this.spawnFromCompendium(base, actorName);
+
+    // Apply feature overrides — find each feature item by name on the spawned
+    // actor, replace its description with Reloaded's prose. Failures isolated.
+    const overrideResult = spec.featureOverrides.length > 0
+      ? await this.applyFeatureOverrides(newActor.id, spec.featureOverrides)
+      : { applied: [], failed: [] };
+
+    // Stamp source flags so audit-actor can recognize prose-built actors.
+    await this.stampProseFlags(newActor.id, spec, input);
+
+    // Apply portrait (Phase 5) — same path as Mode A.
+    const portraitResult = await this.resolveAndApplyPortrait(
+      newActor,
+      // Synthesize a minimal ReloadedStatblock for nameVariants() — only `.name` is read.
+      { name: actorName } as any,
+      input.portrait,
+    );
+
+    return {
+      success: true,
+      mode: 'prose',
+      actorId: newActor.id,
+      actorName: newActor.name,
+      compendiumBase: base,
+      parsed: {
+        name: spec.name,
+        baseHint: spec.baseHint,
+        overrideCount: spec.featureOverrides.length,
+      },
+      featureOverridesApplied: overrideResult.applied,
+      featureOverrideFailures: overrideResult.failed,
+      portrait: portraitResult,
+      notes: [
+        'Mode B (prose): spawned from compendium base referenced in Reloaded prose, ' +
+        'applied feature description overrides only. Numeric stats / actions / traits ' +
+        'come unmodified from the compendium base (Reloaded prose-mode only rewrites ' +
+        'feature descriptions, not stats).',
+      ],
+    };
+  }
+
+  /**
+   * Mode C — pure passthrough. No Reloaded source, just spawn the named
+   * compendium actor and apply portrait. For NPCs whose Reloaded entry is
+   * just a reference (Rictavio: "use the Rictavio in DDB compendium").
+   */
+  private async runPassthroughBuild(input: any): Promise<any> {
+    if (!input.compendium_base) {
+      throw new Error('Passthrough mode requires compendium_base.');
+    }
+    this.logger.info('create-actor passthrough-mode', {
+      base: input.compendium_base,
+      actorName: input.actor_name,
+    });
+
+    const actorName = input.actor_name; // optional; if undefined, spawn uses compendium entry name
+    const newActor = await this.spawnFromCompendium(input.compendium_base, actorName);
+
+    const portraitResult = await this.resolveAndApplyPortrait(
+      newActor,
+      { name: newActor.name } as any,
+      input.portrait,
+    );
+
+    return {
+      success: true,
+      mode: 'passthrough',
+      actorId: newActor.id,
+      actorName: newActor.name,
+      compendiumBase: input.compendium_base,
+      portrait: portraitResult,
+      notes: [
+        'Mode C (passthrough): spawned from compendium with no Reloaded modifications. ' +
+        'The actor is the compendium entry as-is, plus any portrait specified.',
+      ],
+    };
+  }
+
+  /**
+   * Spawn an actor from a compendium pack, optionally renaming. Wraps the
+   * createActorFromCompendium query so all three modes share one path.
+   */
+  private async spawnFromCompendium(
+    base: { packId: string; itemId: string },
+    actorName: string | undefined,
+  ): Promise<{ id: string; name: string }> {
+    const params: any = {
+      packId: base.packId,
+      itemId: base.itemId,
+      quantity: 1,
+      addToScene: false,
+    };
+    if (actorName) params.customNames = [actorName];
+    const spawn: any = await this.foundryClient.query('foundry-forge-mcp.createActorFromCompendium', params);
+    if (!spawn?.success || !spawn.actors?.length) {
+      throw new Error(
+        `Compendium spawn failed for pack=${base.packId} item=${base.itemId}: ${spawn?.errors?.join('; ') ?? 'unknown error'}`,
+      );
+    }
+    const actor = spawn.actors[0] as { id: string; name: string };
+    this.logger.info('Actor spawned from compendium', { id: actor.id, name: actor.name });
+    return actor;
+  }
+
+  /**
+   * Apply prose-style feature description overrides. Looks up each feature
+   * by name on the actor's items list (case-insensitive), replaces its
+   * `system.description.value` with Reloaded's prose (HTML-escaped + wrapped
+   * in <p>). Failures are captured per-override and returned, never thrown.
+   */
+  private async applyFeatureOverrides(
+    actorId: string,
+    overrides: FeatureOverride[],
+  ): Promise<{ applied: string[]; failed: Array<{ name: string; error: string }> }> {
+    // Pull current items so we can map name → id.
+    const actorFull: any = await this.foundryClient.query(
+      'foundry-forge-mcp.getCharacterInfo',
+      { characterName: actorId },
+    );
+    const itemsByLcName = new Map<string, any>();
+    for (const item of actorFull?.items ?? []) {
+      const n = String(item.name ?? '').toLowerCase();
+      if (n) itemsByLcName.set(n, item);
+    }
+
+    const applied: string[] = [];
+    const failed: Array<{ name: string; error: string }> = [];
+
+    for (const ov of overrides) {
+      const item = itemsByLcName.get(ov.name.toLowerCase());
+      if (!item) {
+        failed.push({ name: ov.name, error: `Feature "${ov.name}" not found on actor` });
+        continue;
+      }
+      try {
+        const update = {
+          _id: item.id,
+          'system.description.value': `<p>${escapeHtml(ov.description)}</p>`,
+        };
+        const r: any = await this.foundryClient.query('foundry-forge-mcp.updateActorItems', {
+          actorId,
+          updates: [update],
+        });
+        if (r?.success === false) {
+          failed.push({ name: ov.name, error: r?.error ?? 'updateActorItems success=false' });
+        } else {
+          applied.push(ov.name);
+        }
+      } catch (err: any) {
+        failed.push({ name: ov.name, error: err?.message ?? String(err) });
+      }
+    }
+
+    return { applied, failed };
+  }
+
+  /** Stamp source flags so audit-actor distinguishes prose-built from statblock-built. */
+  private async stampProseFlags(
+    actorId: string,
+    spec: ReloadedProseSpec,
+    input: any,
+  ): Promise<void> {
+    const updates: Record<string, any> = {
+      'flags.foundry-forge-mcp.source': 'reloaded-prose',
+    };
+    if (spec.name) updates['flags.foundry-forge-mcp.reloadedName'] = spec.name;
+    if (input.file_path) updates['flags.foundry-forge-mcp.reloadedPath'] = input.file_path;
+    updates['flags.foundry-forge-mcp.createdAt'] = new Date().toISOString();
+    try {
+      await this.foundryClient.query('foundry-forge-mcp.updateActorData', { actorId, updates });
+    } catch (err: any) {
+      this.logger.warn('stampProseFlags failed (non-fatal)', { error: err?.message ?? String(err) });
     }
   }
 
@@ -1766,18 +2018,45 @@ function extractSearchHits(result: any): any[] {
   return [];
 }
 
-/** Extract the markdown chunk under `### <heading>` in a file. Stops at next `##`/`###`. */
+/**
+ * Extract the markdown chunk under a heading. Tries (in order):
+ *   1. Exact match: `### <heading>`
+ *   2. Numbered prefix: `### N. <heading>` / `### Na. <heading>` (e.g.
+ *      Father Lucian appears under `### 2. Father Lucian`)
+ *   3. Substring case-insensitive: any `### ...<heading>...` heading line
+ *
+ * Stops at the next heading of any level. Used both for statblock-div sections
+ * and prose-only sections (Lucian, Wensencia's steed, etc.).
+ */
 export function extractStatblockSection(
   fileContent: string,
   heading: string,
   sourcePath?: string,
 ): string {
   const lines = fileContent.split(/\r?\n/);
-  const startIdx = lines.findIndex(l => l.trim() === `### ${heading}`);
+  const target = heading.toLowerCase().trim();
+
+  let startIdx = lines.findIndex(l => l.trim() === `### ${heading}`);
+  if (startIdx < 0) {
+    // Numbered prefix — `### 2. Father Lucian`, `### D4c. Volenta's Trap`.
+    const prefixed = new RegExp(
+      `^###\\s+[\\dA-Za-z]+\\.\\s+${heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`,
+    );
+    startIdx = lines.findIndex(l => prefixed.test(l));
+  }
+  if (startIdx < 0) {
+    // Substring fallback (case-insensitive). Picks the FIRST `### ...<target>...`
+    // — caller should pass enough of the name to disambiguate.
+    startIdx = lines.findIndex(l => {
+      const m = l.match(/^###\s+(.+?)\s*$/);
+      return !!m && m[1].toLowerCase().includes(target);
+    });
+  }
   if (startIdx < 0) {
     const where = sourcePath ? ` in ${sourcePath}` : '';
-    throw new Error(`Heading "### ${heading}" not found${where}`);
+    throw new Error(`No "### ..." heading matching "${heading}" found${where}`);
   }
+
   const relEnd = lines.slice(startIdx + 1).findIndex(l => /^#{1,3}\s/.test(l));
   const end = relEnd < 0 ? lines.length : startIdx + 1 + relEnd;
   return lines.slice(startIdx, end).join('\n');
