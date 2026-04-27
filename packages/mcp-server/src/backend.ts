@@ -44,6 +44,8 @@ import { AuditActorTools } from './tools/audit-actor.js';
 
 import { ApplyActorPortraitTools } from './tools/apply-actor-portrait.js';
 
+import { LinkActorPhasesTools } from './tools/link-actor-phases.js';
+
 import { ForgeAssetsClient } from './forge-assets-client.js';
 
 import { DSA5CharacterCreator } from './systems/dsa5/character-creator.js';
@@ -1122,6 +1124,8 @@ async function startBackend(): Promise<void> {
     foundryClient, logger, createActorTools,
   });
 
+  const linkActorPhasesTools = new LinkActorPhasesTools({ foundryClient, logger });
+
   // Initialize mapgen-style backend components for map generation
   let mapGenerationJobQueue: any = null;
   let mapGenerationComfyUIClient: any = null;
@@ -1373,6 +1377,8 @@ async function startBackend(): Promise<void> {
 
     ...applyActorPortraitTools.getToolDefinitions(),
 
+    ...linkActorPhasesTools.getToolDefinitions(),
+
   ];
 
   // Start Foundry connector (owns app port 31415)
@@ -1506,6 +1512,18 @@ async function startBackend(): Promise<void> {
                 case 'apply-actor-portrait':
 
                   result = await applyActorPortraitTools.handleApplyActorPortrait(args);
+
+                  break;
+
+                case 'link-actor-phases':
+
+                  result = await linkActorPhasesTools.handleLinkActorPhases(args);
+
+                  break;
+
+                case 'link-phase-chain':
+
+                  result = await linkActorPhasesTools.handleLinkPhaseChain(args);
 
                   break;
 
