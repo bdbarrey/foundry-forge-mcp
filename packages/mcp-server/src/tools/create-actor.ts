@@ -1709,7 +1709,11 @@ export class CreateActorTools {
 
   private buildSkillsChunk(sb: ReloadedStatblock): Record<string, any> {
     const u: Record<string, any> = {};
-    const prof = sb.proficiencyBonus ?? 0;
+    // Reloaded statblocks sometimes omit the printed Proficiency Bonus line
+    // (e.g. Volenta, Second Form). Fall back to deriving PB from CR so
+    // expertise inference still fires. Final fallback is 0, which short-circuits
+    // the level calc below and leaves skills at basic proficiency.
+    const prof = sb.proficiencyBonus ?? derivePBFromCR(sb.challengeNumeric);
     for (const [skillName, printedMod] of Object.entries(sb.skills)) {
       const abbr = SKILL_NAME_TO_ABBR[skillName.toLowerCase()];
       if (!abbr) continue;
@@ -2165,6 +2169,18 @@ export function extractStatblockSection(
 }
 
 // ----- dnd5e system maps -----------------------------------------------------
+
+/**
+ * Derive proficiency bonus from CR per the dnd5e SRD table
+ * (CR 0-4 → +2, 5-8 → +3, 9-12 → +4, 13-16 → +5, 17-20 → +6, 21-24 → +7,
+ * 25-28 → +8, 29-30 → +9). Used as a fallback when Reloaded omits the
+ * printed Proficiency Bonus line. Returns 0 when CR is null so callers can
+ * detect "no info available" and skip downstream PB-dependent inference.
+ */
+export function derivePBFromCR(cr: number | null): number {
+  if (cr === null) return 0;
+  return Math.max(2, Math.ceil(cr / 4) + 1);
+}
 
 const SKILL_NAME_TO_ABBR: Record<string, string> = {
   acrobatics: 'acr',

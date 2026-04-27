@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP } from './create-actor.js';
+import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR } from './create-actor.js';
 import type { ParsedAction } from '../parsers/action-description.js';
 
 describe('buildItemActivityUpdate', () => {
@@ -300,5 +300,41 @@ describe('selectPruneCandidates (Phase 3b extension)', () => {
     const { toPrune, decisions } = selectPruneCandidates(items, []);
     expect(toPrune).toHaveLength(0);
     expect(decisions).toHaveLength(0);
+  });
+});
+
+describe('derivePBFromCR (PB fallback when Reloaded omits the printed line)', () => {
+  // SRD table: CR 0-4 → +2, 5-8 → +3, 9-12 → +4, 13-16 → +5,
+  // 17-20 → +6, 21-24 → +7, 25-28 → +8, 29-30 → +9.
+  it('returns 2 for CR 0 through 4 (including fractional)', () => {
+    expect(derivePBFromCR(0)).toBe(2);
+    expect(derivePBFromCR(0.125)).toBe(2);
+    expect(derivePBFromCR(0.25)).toBe(2);
+    expect(derivePBFromCR(0.5)).toBe(2);
+    expect(derivePBFromCR(1)).toBe(2);
+    expect(derivePBFromCR(4)).toBe(2);
+  });
+
+  it('returns 3 for CR 5-8 (Volenta 2nd Form is CR 6 → +3 expected)', () => {
+    expect(derivePBFromCR(5)).toBe(3);
+    expect(derivePBFromCR(6)).toBe(3);
+    expect(derivePBFromCR(8)).toBe(3);
+  });
+
+  it('returns 4 for CR 9-12, 5 for 13-16, all the way to 9 for CR 30', () => {
+    expect(derivePBFromCR(9)).toBe(4);
+    expect(derivePBFromCR(12)).toBe(4);
+    expect(derivePBFromCR(13)).toBe(5);
+    expect(derivePBFromCR(16)).toBe(5);
+    expect(derivePBFromCR(17)).toBe(6);
+    expect(derivePBFromCR(20)).toBe(6);
+    expect(derivePBFromCR(21)).toBe(7);
+    expect(derivePBFromCR(25)).toBe(8);
+    expect(derivePBFromCR(29)).toBe(9);
+    expect(derivePBFromCR(30)).toBe(9);
+  });
+
+  it('returns 0 for null CR so callers can short-circuit', () => {
+    expect(derivePBFromCR(null)).toBe(0);
   });
 });
