@@ -363,9 +363,18 @@ export class CreateActorTools {
       //    has a save; otherwise first activity). Items without activities
       //    (pre-dnd5e-4.x legacy items or pure-narrative feats) are skipped —
       //    their legacy field updates land in a follow-up.
+      // Phase 8: Index items by stem (with usage suffix stripped) so a base
+      // item named "Tanglefoot" matches a Reloaded action named
+      // "Tanglefoot (1/day)" and vice versa. We also keep the full lower-case
+      // name lookup as a fallback to preserve exact-match semantics for items
+      // whose names happen to contain parens that aren't usage markers.
       const itemsByName = new Map<string, any>();
+      const itemsByStem = new Map<string, any>();
       for (const item of actorFull?.items ?? []) {
-        itemsByName.set(String(item.name ?? '').toLowerCase(), item);
+        const fullName = String(item.name ?? '');
+        itemsByName.set(fullName.toLowerCase(), item);
+        const itemStem = stripUsageSuffix(fullName).stem.toLowerCase();
+        if (itemStem) itemsByStem.set(itemStem, item);
       }
       const allReloadedActions = [
         ...sb.actions, ...sb.bonusActions, ...sb.reactions,
@@ -377,7 +386,12 @@ export class CreateActorTools {
       const actionsSkippedNoActivity: string[] = [];
 
       for (const action of allReloadedActions) {
-        const item = itemsByName.get(action.name.toLowerCase());
+        const actionStem = stripUsageSuffix(action.name).stem.toLowerCase();
+        // Prefer exact full-name match (covers items with parens that aren't
+        // usage markers); fall back to stem-stripped lookup.
+        const item =
+          itemsByName.get(action.name.toLowerCase())
+          ?? itemsByStem.get(actionStem);
         if (!item) {
           actionsSkippedNoItem.push(action.name);
           continue;
@@ -393,14 +407,24 @@ export class CreateActorTools {
         // Reloaded's values applied.
         const itemUpdate = buildItemActivityUpdate(item.id, activities, action.parsed);
         // Phase 3A: Reloaded is truth for action descriptions. Sync the
-        // item's description.value so the sheet shows the Reloaded text
-        // (e.g. compendium base Multiattack reads "two longsword attacks";
-        // Reloaded says "hail of daggers twice, dagger twice, or...").
-        // Push to update payload regardless of whether activities changed —
-        // Multiattack-shaped items (no attack/save/damage to sync) wouldn't
-        // otherwise reach actionsSynced.
+        // item's description.value so the sheet shows the Reloaded text.
         if (action.description) {
           itemUpdate['system.description.value'] = `<p>${escapeHtml(action.description)}</p>`;
+        }
+        // Phase 8: write `system.uses` (max + recovery) when Reloaded
+        // encoded usage in the name parenthetical. Also normalize the
+        // existing item's name to the bare stem so the sheet shows
+        // "Tanglefoot" with a 1/day counter rather than "Tanglefoot (1/day)"
+        // duplicating the usage in two places. Skip the rename if the item
+        // already has the bare stem name (avoids a no-op write).
+        const usesPayload = buildUsesPayload(action.parsed.usage);
+        if (usesPayload) {
+          itemUpdate['system.uses'] = usesPayload;
+        }
+        const reloadedStem = stripUsageSuffix(action.name).stem;
+        const itemFullName = String(item.name ?? '');
+        if (reloadedStem && itemFullName.toLowerCase() !== reloadedStem.toLowerCase()) {
+          itemUpdate['name'] = reloadedStem;
         }
         if (Object.keys(itemUpdate).length > 1) {
           itemUpdates.push(itemUpdate);
@@ -480,13 +504,18 @@ export class CreateActorTools {
                 baseName: top.cand.name,
               },
             };
+            // Phase 8: rename to the bare stem so the new item lands as
+            // "Tanglefoot" (with system.uses set via patchSpec) rather than
+            // "Tanglefoot (1/day)". The patchSpec.uses payload encodes the
+            // "(1/day)" semantics mechanically.
+            const renameTo = stripUsageSuffix(name).stem || name;
             const r: any = await this.foundryClient.query(
               'foundry-forge-mcp.addActorItemFromCompendium',
               {
                 actorId: newActor.id,
                 packId: top.cand.packId,
                 itemId: top.cand.itemId,
-                renameTo: name,
+                renameTo,
                 patchSpec,
                 flagsPatch,
               },
@@ -1415,6 +1444,16 @@ export class CreateActorTools {
       type: { value: 'monster' },
     };
 
+    // Phase 8: store usage on the item (system.uses.max + recovery) and use
+    // the bare stem as the item name so the sheet renders a recharge counter
+    // next to "Tanglefoot" instead of repeating "(1/day)" in the name.
+    const { stem, marker } = stripUsageSuffix(name);
+    const finalName = stem || name;
+    const usesPayload = buildUsesPayload(marker ?? parsed?.usage);
+    if (usesPayload) {
+      system.uses = usesPayload;
+    }
+
     // If the parsed action has a save (Tanglefoot, Thunderstone, etc.) attach
     // a save activity so the DM can roll it from the sheet. Without this the
     // feat is description-only — DM has to remember to call for a saving throw
@@ -1448,7 +1487,7 @@ export class CreateActorTools {
     }
 
     return {
-      name,
+      name: finalName,
       type: 'feat',
       system,
       flags: {
@@ -2422,6 +2461,79 @@ function damagePartPayload(d: { formula: string; type: string }) {
   return {
     custom: { enabled: true, formula: d.formula },
     types: [d.type],
+  };
+}
+
+// ----- Phase 8: usage-suffix normalization ---------------------------------
+
+/**
+ * Strip a trailing usage parenthetical like "(1/Day)", "(3/Day)",
+ * "(Recharge 5-6)", "(Short Rest)" from an action name and return both the
+ * bare stem and the structured usage marker. Returns `marker: null` when the
+ * name has no recognizable usage suffix.
+ *
+ * Reloaded encodes per-day / recharge limits in the action NAME ("Tanglefoot
+ * (1/day)"). dnd5e 2024 / 5.x stores the same data on the item via
+ * `system.uses.max` + `system.uses.recovery`. Phase 8 peels the suffix out so
+ * built actors land with bare item names + mechanical recharge counters,
+ * matching dnd5e's native UI and avoiding name-collisions when a compendium
+ * base already has the bare name (e.g. world's "Tanglefoot" base versus
+ * Reloaded's "Tanglefoot (1/day)" — same thing, same item).
+ */
+export function stripUsageSuffix(
+  name: string,
+): { stem: string; marker: ParsedAction['usage'] | null } {
+  if (!name) return { stem: name, marker: null };
+  const re = /\s*\(\s*(?:(\d+)\s*\/\s*(day|short\s*rest|long\s*rest|turn)|recharge\s+(\d+)(?:\s*[-–]\s*(\d+))?)\s*\)\s*$/i;
+  const m = name.match(re);
+  if (!m) return { stem: name.trim(), marker: null };
+  const stem = name.slice(0, name.length - m[0].length).trim();
+  if (m[1]) {
+    const count = parseInt(m[1], 10);
+    const periodLower = m[2].toLowerCase().replace(/\s+/g, '-');
+    const period =
+      periodLower === 'day' ? 'day'
+      : periodLower === 'short-rest' ? 'short-rest'
+      : periodLower === 'long-rest' ? 'long-rest'
+      : 'turn';
+    return { stem, marker: { count, period } };
+  }
+  if (m[3]) {
+    const lo = parseInt(m[3], 10);
+    const hi = m[4] ? parseInt(m[4], 10) : lo;
+    return { stem, marker: { recharge: [lo, hi] } };
+  }
+  return { stem, marker: null };
+}
+
+/**
+ * Convert a ParsedAction['usage'] marker into the dnd5e 5.x `system.uses` shape.
+ * Returns `null` when the marker is null/undefined so callers can skip the
+ * write entirely instead of clobbering with empty values.
+ */
+export function buildUsesPayload(marker: ParsedAction['usage'] | null | undefined): Record<string, any> | null {
+  if (!marker) return null;
+  if ('recharge' in marker) {
+    const [min] = marker.recharge;
+    return {
+      max: '1',
+      value: 1,
+      spent: 0,
+      recovery: [{ period: 'recharge', type: 'recoverAll', formula: String(min) }],
+    };
+  }
+  const periodMap: Record<string, string> = {
+    'day': 'lr',
+    'long-rest': 'lr',
+    'short-rest': 'sr',
+    'turn': 'turn',
+  };
+  const recoveryPeriod = periodMap[marker.period] ?? 'lr';
+  return {
+    max: String(marker.count),
+    value: marker.count,
+    spent: 0,
+    recovery: [{ period: recoveryPeriod, type: 'recoverAll' }],
   };
 }
 

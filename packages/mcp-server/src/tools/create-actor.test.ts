@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR } from './create-actor.js';
+import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload } from './create-actor.js';
 import type { ParsedAction } from '../parsers/action-description.js';
 
 describe('buildItemActivityUpdate', () => {
@@ -336,5 +336,96 @@ describe('derivePBFromCR (PB fallback when Reloaded omits the printed line)', ()
 
   it('returns 0 for null CR so callers can short-circuit', () => {
     expect(derivePBFromCR(null)).toBe(0);
+  });
+});
+
+describe('stripUsageSuffix (Phase 8 name normalization)', () => {
+  it('strips per-day suffix and returns the count + period', () => {
+    const r = stripUsageSuffix('Tanglefoot (1/day)');
+    expect(r.stem).toBe('Tanglefoot');
+    expect(r.marker).toEqual({ count: 1, period: 'day' });
+  });
+
+  it('handles 3/day, multiple counts', () => {
+    expect(stripUsageSuffix('Innate Spell (3/day)')).toEqual({
+      stem: 'Innate Spell',
+      marker: { count: 3, period: 'day' },
+    });
+  });
+
+  it('handles short rest and long rest periods (with space)', () => {
+    expect(stripUsageSuffix('Power Attack (1/short rest)').marker).toEqual({
+      count: 1, period: 'short-rest',
+    });
+    expect(stripUsageSuffix('Battle Cry (2/long rest)').marker).toEqual({
+      count: 2, period: 'long-rest',
+    });
+  });
+
+  it('handles recharge ranges', () => {
+    expect(stripUsageSuffix('Fire Breath (Recharge 5-6)').marker).toEqual({
+      recharge: [5, 6],
+    });
+    expect(stripUsageSuffix('Frightful Presence (Recharge 6)').marker).toEqual({
+      recharge: [6, 6],
+    });
+  });
+
+  it('is case-insensitive on the period word', () => {
+    expect(stripUsageSuffix('Foo (1/Day)').marker).toEqual({ count: 1, period: 'day' });
+    expect(stripUsageSuffix('Foo (1/DAY)').marker).toEqual({ count: 1, period: 'day' });
+  });
+
+  it('returns null marker for names without a usage suffix', () => {
+    expect(stripUsageSuffix('Bite').marker).toBeNull();
+    expect(stripUsageSuffix('Multiattack').marker).toBeNull();
+  });
+
+  it('does NOT strip parens that are not usage markers', () => {
+    // e.g. trait name with a non-usage parenthetical — leave it alone
+    expect(stripUsageSuffix('Saber (Magical)').marker).toBeNull();
+    expect(stripUsageSuffix('Saber (Magical)').stem).toBe('Saber (Magical)');
+  });
+
+  it('handles empty input safely', () => {
+    expect(stripUsageSuffix('')).toEqual({ stem: '', marker: null });
+  });
+
+  it('trims surrounding whitespace from the stem', () => {
+    expect(stripUsageSuffix('Tanglefoot (1/day)  ').stem).toBe('Tanglefoot');
+  });
+});
+
+describe('buildUsesPayload (Phase 8 dnd5e system.uses shape)', () => {
+  it('returns null for null/undefined marker so callers can skip the write', () => {
+    expect(buildUsesPayload(null)).toBeNull();
+    expect(buildUsesPayload(undefined)).toBeNull();
+  });
+
+  it('builds a long-rest recovery for "day" period (1/day → max 1, recovery lr)', () => {
+    expect(buildUsesPayload({ count: 1, period: 'day' })).toEqual({
+      max: '1',
+      value: 1,
+      spent: 0,
+      recovery: [{ period: 'lr', type: 'recoverAll' }],
+    });
+  });
+
+  it('builds a short-rest recovery for "short-rest" period', () => {
+    expect(buildUsesPayload({ count: 2, period: 'short-rest' })).toEqual({
+      max: '2',
+      value: 2,
+      spent: 0,
+      recovery: [{ period: 'sr', type: 'recoverAll' }],
+    });
+  });
+
+  it('builds a recharge recovery with the lower bound as the formula', () => {
+    expect(buildUsesPayload({ recharge: [5, 6] })).toEqual({
+      max: '1',
+      value: 1,
+      spent: 0,
+      recovery: [{ period: 'recharge', type: 'recoverAll', formula: '5' }],
+    });
   });
 });

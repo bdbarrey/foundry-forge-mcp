@@ -20,7 +20,7 @@ import { Logger } from '../logger.js';
 import { ErrorHandler } from '../utils/error-handler.js';
 import { parseReloadedStatblock, ReloadedStatblock, StatblockFeature } from '../parsers/reloaded-statblock.js';
 import { ParsedAction, AbilityKey } from '../parsers/action-description.js';
-import { extractStatblockSection } from './create-actor.js';
+import { extractStatblockSection, stripUsageSuffix } from './create-actor.js';
 
 export type Severity = 'critical' | 'medium' | 'low';
 export type Status = 'match' | 'divergence' | 'missing';
@@ -60,6 +60,13 @@ export interface AuditResult {
     presentOnActor: string[];
     missingFromActor: string[];
     extraOnActor: string[];
+    /**
+     * Pairs of items on the actor whose names are stem-equivalent (i.e.
+     * "Tanglefoot" + "Tanglefoot (1/day)") — leftovers of pre-Phase-8 builds
+     * where the usage suffix wasn't normalized away. Caller can issue
+     * `remove-actor-items` to clean up.
+     */
+    duplicates: Array<{ stem: string; ids: string[]; names: string[] }>;
   };
   actions: AuditActionResult[];
 }
@@ -429,23 +436,52 @@ function compareFeatures(
 ): AuditResult['features'] {
   const presentOnReloaded = sb.traits.map(t => t.name);
   const items = actor.items ?? [];
+
+  // Phase 8: index by both full lower-case name AND stem (usage suffix
+  // stripped) so a base item "Tanglefoot" matches a Reloaded "Tanglefoot
+  // (1/day)" and vice versa.
   const itemsByLcName = new Map<string, ActorItemSnapshot>();
+  const itemsByLcStem = new Map<string, ActorItemSnapshot>();
   for (const it of items) {
-    const n = String(it.name ?? '').toLowerCase();
-    if (n) itemsByLcName.set(n, it);
+    const fullName = String(it.name ?? '');
+    if (!fullName) continue;
+    itemsByLcName.set(fullName.toLowerCase(), it);
+    const stem = stripUsageSuffix(fullName).stem.toLowerCase();
+    if (stem) itemsByLcStem.set(stem, it);
   }
 
-  const allReloadedNames = new Set<string>(
+  const allReloadedNamesFull = new Set<string>(
     [...sb.traits, ...sb.actions, ...sb.bonusActions, ...sb.reactions,
       ...sb.legendaryActions, ...sb.lairActions]
       .map(f => f.name.toLowerCase()),
   );
+  const allReloadedNamesStem = new Set<string>(
+    [...sb.traits, ...sb.actions, ...sb.bonusActions, ...sb.reactions,
+      ...sb.legendaryActions, ...sb.lairActions]
+      .map(f => stripUsageSuffix(f.name).stem.toLowerCase()),
+  );
 
   const missingFromActor: string[] = [];
   for (const trait of sb.traits) {
-    if (!itemsByLcName.has(trait.name.toLowerCase())) {
+    const traitLc = trait.name.toLowerCase();
+    const traitStem = stripUsageSuffix(trait.name).stem.toLowerCase();
+    if (!itemsByLcName.has(traitLc) && !itemsByLcStem.has(traitStem)) {
       missingFromActor.push(trait.name);
     }
+  }
+
+  // Group items by stem so "Tanglefoot" + "Tanglefoot (1/day)" (a leftover
+  // from a pre-Phase-8 build) collapse into one duplicate entry instead of
+  // both showing up in extraOnActor.
+  const itemsByStemAll = new Map<string, ActorItemSnapshot[]>();
+  for (const item of items) {
+    const fullName = String(item.name ?? '');
+    if (!fullName) continue;
+    const stem = stripUsageSuffix(fullName).stem.toLowerCase();
+    if (!stem) continue;
+    const arr = itemsByStemAll.get(stem) ?? [];
+    arr.push(item);
+    itemsByStemAll.set(stem, arr);
   }
 
   // Anything present on the actor that isn't on Reloaded (any section). Skip
@@ -453,21 +489,39 @@ function compareFeatures(
   // Multiattack always wraps other actions; skip from "extra" too.
   const presentOnActor: string[] = [];
   const extraOnActor: string[] = [];
+  const duplicates: AuditResult['features']['duplicates'] = [];
+  const dupeStems = new Set<string>();
+  for (const [stem, group] of itemsByStemAll) {
+    if (group.length > 1) {
+      duplicates.push({
+        stem,
+        ids: group.map(g => g.id ?? g._id ?? '').filter(Boolean),
+        names: group.map(g => String(g.name ?? '')),
+      });
+      dupeStems.add(stem);
+    }
+  }
+
   for (const item of items) {
     const name = String(item.name ?? '');
     if (!name) continue;
     presentOnActor.push(name);
     const lc = name.toLowerCase();
-    if (allReloadedNames.has(lc)) continue;
-    if (SKIP_ACTION_NAMES.has(lc.replace(/\s*\([^)]*\)\s*$/, '').trim())) continue;
+    const stem = stripUsageSuffix(name).stem.toLowerCase();
+    if (allReloadedNamesFull.has(lc)) continue;
+    if (allReloadedNamesStem.has(stem)) continue;
+    if (SKIP_ACTION_NAMES.has(stripUsageSuffix(name).stem.toLowerCase())) continue;
     // Items added by create-actor are flagged — they're not "extras" relative
     // to Reloaded since create-actor put them there from a Reloaded entry.
     const flagSrc = item.flags?.['foundry-forge-mcp']?.source as string | undefined;
     if (flagSrc && flagSrc.startsWith('reloaded-')) continue;
+    // If this item is part of a duplicate stem-pair, the duplicates field
+    // already surfaces it — don't double-report in extraOnActor.
+    if (dupeStems.has(stem)) continue;
     extraOnActor.push(name);
   }
 
-  return { presentOnReloaded, presentOnActor, missingFromActor, extraOnActor };
+  return { presentOnReloaded, presentOnActor, missingFromActor, extraOnActor, duplicates };
 }
 
 // ----- actions ---------------------------------------------------------------
@@ -477,10 +531,16 @@ function compareActions(
   sb: ReloadedStatblock,
 ): AuditActionResult[] {
   const items = actor.items ?? [];
+  // Phase 8: stem-keyed map mirrors compareFeatures so post-Phase-8 builds
+  // (item name = bare stem) audit clean against Reloaded "(1/day)" actions.
   const itemsByLcName = new Map<string, ActorItemSnapshot>();
+  const itemsByLcStem = new Map<string, ActorItemSnapshot>();
   for (const it of items) {
-    const n = String(it.name ?? '').toLowerCase();
-    if (n) itemsByLcName.set(n, it);
+    const fullName = String(it.name ?? '');
+    if (!fullName) continue;
+    itemsByLcName.set(fullName.toLowerCase(), it);
+    const stem = stripUsageSuffix(fullName).stem.toLowerCase();
+    if (stem) itemsByLcStem.set(stem, it);
   }
 
   const allReloadedActions: StatblockFeature[] = [
@@ -491,9 +551,10 @@ function compareActions(
   const results: AuditActionResult[] = [];
   for (const action of allReloadedActions) {
     const lcName = action.name.toLowerCase();
-    if (SKIP_ACTION_NAMES.has(lcName.replace(/\s*\([^)]*\)\s*$/, '').trim())) {
+    const lcStem = stripUsageSuffix(action.name).stem.toLowerCase();
+    if (SKIP_ACTION_NAMES.has(lcStem)) {
       // Multiattack: just check presence; description is freeform.
-      const item = itemsByLcName.get(lcName);
+      const item = itemsByLcName.get(lcName) ?? itemsByLcStem.get(lcStem);
       results.push({
         name: action.name,
         itemId: item?.id ?? item?._id,
@@ -503,7 +564,7 @@ function compareActions(
       continue;
     }
 
-    const item = itemsByLcName.get(lcName);
+    const item = itemsByLcName.get(lcName) ?? itemsByLcStem.get(lcStem);
     if (!item) {
       results.push({
         name: action.name,
