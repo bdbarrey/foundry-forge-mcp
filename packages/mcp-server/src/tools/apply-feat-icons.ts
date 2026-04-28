@@ -24,6 +24,7 @@ import {
   resolveFeatIcon,
   DND5E_DEFAULT_FEAT_ICONS,
   FEATURE_FALLBACK_PATH,
+  validateIconUrl,
 } from './feat-icons.js';
 import { parseActionDescription } from '../parsers/action-description.js';
 
@@ -131,11 +132,19 @@ export class ApplyFeatIconsTools {
           continue;
         }
 
+        // Eligibility: known-default icon, missing img, OR an http(s) URL
+        // that fails HEAD probing. The third clause catches future broken
+        // URLs we haven't enumerated in DND5E_DEFAULT_FEAT_ICONS — when an
+        // item img 404s, replace it.
         const isDefault =
           !currentImg
-          || DND5E_DEFAULT_FEAT_ICONS.has(currentImg)
-          || currentImg === '';
-        if (!force && !idFilter?.has(id) && !isDefault) {
+          || DND5E_DEFAULT_FEAT_ICONS.has(currentImg);
+        let brokenHttp = false;
+        if (!isDefault && /^https?:\/\//.test(currentImg)) {
+          brokenHttp = !(await validateIconUrl(currentImg));
+        }
+        const explicitlyTargeted = idFilter?.has(id) ?? false;
+        if (!force && !explicitlyTargeted && !isDefault && !brokenHttp) {
           skipped.push({ id, name, reason: `custom img preserved (${currentImg})` });
           continue;
         }
@@ -148,7 +157,7 @@ export class ApplyFeatIconsTools {
         const stripped = desc.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
         const parsed = stripped ? parseActionDescription(stripped) : null;
 
-        const newImg = resolveFeatIcon(name, parsed);
+        const newImg = await resolveFeatIcon(name, parsed);
         if (!includeFallback && newImg === FEATURE_FALLBACK_PATH) {
           skipped.push({ id, name, reason: 'no themed match (fallback excluded)' });
           continue;
@@ -158,8 +167,9 @@ export class ApplyFeatIconsTools {
           continue;
         }
 
+        const reason = brokenHttp ? 'broken-http' : (isDefault ? 'default' : 'forced');
         updates.push({ _id: id, img: newImg });
-        considered.push({ id, name, img: newImg, was: currentImg, action: 'update' });
+        considered.push({ id, name, img: newImg, was: currentImg, reason, action: 'update' });
       }
 
       if (updates.length === 0) {

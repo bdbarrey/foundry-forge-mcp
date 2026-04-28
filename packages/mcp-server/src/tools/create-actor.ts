@@ -338,20 +338,24 @@ export class CreateActorTools {
       //    Traits whose names already exist on the actor (e.g. "Sunlight
       //    Sensitivity" inherited from the compendium Wight) are left alone;
       //    updating divergent descriptions ships in Phase 3a-C.
-      const traitsToAdd = sb.traits
-        .filter(t => !existingItemNames.has(t.name.toLowerCase()))
-        .map(t => ({
-          name: t.name,
-          type: 'feat',
-          // Phase 9: pick a themed icon up front so the sheet doesn't show
-          // a generic star next to every Reloaded-only trait.
-          img: resolveFeatIcon(t.name, t.parsed),
-          system: {
-            description: { value: `<p>${escapeHtml(t.description)}</p>` },
-            source: { book: 'CoS Reloaded' },
-            type: { value: 'monster' },
-          },
-        }));
+      const traitsToAdd = await Promise.all(
+        sb.traits
+          .filter(t => !existingItemNames.has(t.name.toLowerCase()))
+          .map(async t => ({
+            name: t.name,
+            type: 'feat',
+            // Phase 9: pick a themed icon up front so the sheet doesn't show
+            // a generic star next to every Reloaded-only trait. Resolver is
+            // async because it HEAD-probes Forge bazaar URLs to weed out
+            // broken paths and roll forward to verified fallbacks.
+            img: await resolveFeatIcon(t.name, t.parsed),
+            system: {
+              description: { value: `<p>${escapeHtml(t.description)}</p>` },
+              source: { book: 'CoS Reloaded' },
+              type: { value: 'monster' },
+            },
+          })),
+      );
       let addedTraitNames: string[] = [];
       let traitAddFailures: Array<{ name: string; error: string }> = [];
       if (traitsToAdd.length > 0) {
@@ -617,7 +621,7 @@ export class CreateActorTools {
           } else {
             // Scratch-build fallback — tiny payload, goes through the normal
             // addActorItems path.
-            const itemPayload = this.buildScratchActionItem(name, action.description, action.parsed);
+            const itemPayload = await this.buildScratchActionItem(name, action.description, action.parsed);
             const addResult = await this.addItemsWithBatchFallback(newActor.id, [itemPayload]);
             if (addResult.added.length > 0) {
               actionsScratchBuilt.push(name);
@@ -1437,11 +1441,11 @@ export class CreateActorTools {
     }
   }
 
-  private buildScratchActionItem(
+  private async buildScratchActionItem(
     name: string,
     description: string,
     parsed?: import('../parsers/action-description.js').ParsedAction,
-  ): Record<string, any> {
+  ): Promise<Record<string, any>> {
     const system: any = {
       description: { value: `<p>${escapeHtml(description)}</p>` },
       source: { book: 'CoS Reloaded' },
@@ -1495,8 +1499,9 @@ export class CreateActorTools {
       type: 'feat',
       // Phase 9: themed icon based on the parsed combat shape (save → save
       // icon, attack → attack icon) and name keywords (Tanglefoot → web,
-      // Firebomb → breath-weapon, etc.).
-      img: resolveFeatIcon(finalName, parsed),
+      // Firebomb → breath-weapon, etc.). Async to allow HEAD-probing
+      // candidate URLs and rolling forward when one 404s.
+      img: await resolveFeatIcon(finalName, parsed),
       system,
       flags: {
         'foundry-forge-mcp': { source: 'reloaded-scratch-action' },
