@@ -6,6 +6,7 @@ import { ErrorHandler } from '../utils/error-handler.js';
 import { parseReloadedStatblock, ReloadedStatblock } from '../parsers/reloaded-statblock.js';
 import { ParsedAction, parseActionDescription } from '../parsers/action-description.js';
 import { parseReloadedProseSpec, ReloadedProseSpec, FeatureOverride } from '../parsers/reloaded-prose.js';
+import { resolveFeatIcon } from './feat-icons.js';
 import { ForgeAssetsClient, ForgeAssetEntry } from '../forge-assets-client.js';
 import {
   CONFIDENCE_FLOOR,
@@ -342,6 +343,9 @@ export class CreateActorTools {
         .map(t => ({
           name: t.name,
           type: 'feat',
+          // Phase 9: pick a themed icon up front so the sheet doesn't show
+          // a generic star next to every Reloaded-only trait.
+          img: resolveFeatIcon(t.name, t.parsed),
           system: {
             description: { value: `<p>${escapeHtml(t.description)}</p>` },
             source: { book: 'CoS Reloaded' },
@@ -1489,6 +1493,10 @@ export class CreateActorTools {
     return {
       name: finalName,
       type: 'feat',
+      // Phase 9: themed icon based on the parsed combat shape (save → save
+      // icon, attack → attack icon) and name keywords (Tanglefoot → web,
+      // Firebomb → breath-weapon, etc.).
+      img: resolveFeatIcon(finalName, parsed),
       system,
       flags: {
         'foundry-forge-mcp': { source: 'reloaded-scratch-action' },
