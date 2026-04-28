@@ -310,24 +310,24 @@ export class LinkActorPhasesTools {
     featName: string,
     description?: string,
   ): Promise<any> {
-    // Resolve both actors by name OR id via getCharacterInfo (accepts either).
-    // We need the target's id (for profiles[0].uuid) and the source's id (for
-    // addActorItems). Names are also captured for the description fallback.
-    const [fromInfo, toInfo] = await Promise.all([
-      this.foundryClient.query('foundry-forge-mcp.getCharacterInfo', { characterName: fromIdent }),
-      this.foundryClient.query('foundry-forge-mcp.getCharacterInfo', { characterName: toIdent }),
+    // Resolve both actors with strict ambiguity detection. Two actors named
+    // "Volenta" in the world (older world entry + freshly-built one from this
+    // session) silently collapsed onto the wrong one previously; the resolver
+    // now refuses and demands an id.
+    const [fromActor, toActor] = await Promise.all([
+      this.resolveActor(fromIdent, 'from'),
+      this.resolveActor(toIdent, 'to'),
     ]);
-    const fromActor = unwrapActor(fromInfo, fromIdent);
-    const toActor = unwrapActor(toInfo, toIdent);
-    if (!fromActor.id) throw new Error(`from actor "${fromIdent}" has no id`);
-    if (!toActor.id) throw new Error(`to actor "${toIdent}" has no id`);
 
     // Pre-flight: warn (don't block) if the source already has a feat with
     // this slot name. addActorItems will create a duplicate; the user can
     // manually clean up, but we surface it in the response.
-    const existingItems: any[] = (fromInfo as any)?.items
-      ?? (fromInfo as any)?.character?.items
-      ?? (fromInfo as any)?.actor?.items
+    const fromInfo: any = await this.foundryClient.query(
+      'foundry-forge-mcp.getCharacterInfo', { characterName: fromActor.id },
+    );
+    const existingItems: any[] = fromInfo?.items
+      ?? fromInfo?.character?.items
+      ?? fromInfo?.actor?.items
       ?? [];
     const duplicateSlot = existingItems.find(
       (i: any) => i?.name?.toLowerCase?.() === featName.toLowerCase(),
@@ -359,16 +359,66 @@ export class LinkActorPhasesTools {
         'dnd5e 4.x native transform activity — no MidiQOL required.',
         'Click the feat in Foundry at HP=0 to trigger the swap; dnd5e creates a merged actor named "<from> (<to>)" on first activation.',
         ...(duplicateSlot ? [`Duplicate slot "${featName}" already on source actor — created a second one. Remove old one manually if not desired.`] : []),
-        'Convention also creates an Active Effect named "Transform: <feat-name>" on the actor; that is NOT created by this tool yet (would need a module release). The transform mechanic works without it.',
       ],
     };
   }
-}
 
-function unwrapActor(info: any, fallbackName: string): { id: string; name: string } {
-  const inner = info?.character ?? info?.actor ?? info ?? {};
-  return {
-    id: inner.id ?? inner._id ?? '',
-    name: inner.name ?? fallbackName,
-  };
+  /**
+   * Resolve a name-or-id identifier to a unique actor. Refuses and throws if
+   * a name matches multiple actors in the world; the caller must then pass an
+   * actor id to disambiguate. Designed to eliminate the silent "first match
+   * wins" footgun that bit during Phase 7 testing (two "Volenta" actors).
+   *
+   * Resolution order:
+   *   1. listActors with nameContains — collect candidates whose name OR id
+   *      EXACTLY matches the identifier (case-insensitive on names, exact on
+   *      ids). If multiple → throw ambiguity error. If one → return it.
+   *   2. If none from step 1, fall back to getCharacterInfo (accepts ids and
+   *      unique names). If that returns an actor, use it.
+   *   3. Otherwise throw not-found.
+   */
+  private async resolveActor(
+    identifier: string,
+    role: string,
+  ): Promise<{ id: string; name: string }> {
+    // listActors with nameContains is a substring search on names; ids never
+    // match by substring (16-char alphanumerics rarely appear inside actor
+    // names), so for the id case this returns 0 hits and we fall through.
+    const listed: any = await this.foundryClient.query(
+      'foundry-forge-mcp.listActors', { nameContains: identifier },
+    );
+    const candidates: any[] = Array.isArray(listed?.actors)
+      ? listed.actors
+      : Array.isArray(listed) ? listed : [];
+
+    const lowered = identifier.toLowerCase();
+    const exact = candidates.filter(a =>
+      (typeof a?.name === 'string' && a.name.toLowerCase() === lowered)
+      || a?.id === identifier,
+    );
+
+    if (exact.length > 1) {
+      const lines = exact.map(a => `  - ${a.name} (id: ${a.id})`).join('\n');
+      throw new Error(
+        `Ambiguous ${role} actor "${identifier}" — ${exact.length} actors match exactly:\n${lines}\nPass an actor id instead of the name to disambiguate.`,
+      );
+    }
+
+    if (exact.length === 1) {
+      return { id: exact[0].id, name: exact[0].name };
+    }
+
+    // Fall back to getCharacterInfo for the id case (and for one-off names
+    // that listActors didn't surface for some reason).
+    const info: any = await this.foundryClient.query(
+      'foundry-forge-mcp.getCharacterInfo', { characterName: identifier },
+    );
+    const inner = info?.character ?? info?.actor ?? info ?? {};
+    const id = inner?.id ?? inner?._id;
+    const name = inner?.name;
+    if (!id) {
+      throw new Error(`${role} actor "${identifier}" not found`);
+    }
+    return { id, name: name ?? identifier };
+  }
 }
