@@ -27,6 +27,21 @@ import { FoundryClient } from '../foundry-client.js';
 import { Logger } from '../logger.js';
 import { ErrorHandler } from '../utils/error-handler.js';
 
+/**
+ * Marker for user-facing errors that should bypass `ErrorHandler.handleToolError`.
+ * The shared handler categorizes errors by keyword sniffing and falls back to a
+ * generic "An unexpected error occurred" wrapper that drops the original message
+ * into `details` (which the formatted output never surfaces). For our
+ * disambiguation / not-found errors we want the verbatim message to reach the
+ * user — throwing this subclass signals "let it through".
+ */
+export class UserFacingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UserFacingError';
+  }
+}
+
 export interface LinkActorPhasesToolsOptions {
   foundryClient: FoundryClient;
   logger: Logger;
@@ -279,6 +294,7 @@ export class LinkActorPhasesTools {
     try {
       return await this.linkOne(input.from, input.to, featName, input.description);
     } catch (error) {
+      if (error instanceof UserFacingError) throw error;
       this.errorHandler.handleToolError(error, 'link-actor-phases', 'phase link');
     }
   }
@@ -300,6 +316,7 @@ export class LinkActorPhasesTools {
       }
       return { success: true, chainLength: chain.length, links };
     } catch (error) {
+      if (error instanceof UserFacingError) throw error;
       this.errorHandler.handleToolError(error, 'link-phase-chain', 'phase chain link');
     }
   }
@@ -399,7 +416,7 @@ export class LinkActorPhasesTools {
 
     if (exact.length > 1) {
       const lines = exact.map(a => `  - ${a.name} (id: ${a.id})`).join('\n');
-      throw new Error(
+      throw new UserFacingError(
         `Ambiguous ${role} actor "${identifier}" — ${exact.length} actors match exactly:\n${lines}\nPass an actor id instead of the name to disambiguate.`,
       );
     }
@@ -417,7 +434,7 @@ export class LinkActorPhasesTools {
     const id = inner?.id ?? inner?._id;
     const name = inner?.name;
     if (!id) {
-      throw new Error(`${role} actor "${identifier}" not found`);
+      throw new UserFacingError(`${role} actor "${identifier}" not found`);
     }
     return { id, name: name ?? identifier };
   }
