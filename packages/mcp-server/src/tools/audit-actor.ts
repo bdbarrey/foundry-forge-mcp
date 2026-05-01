@@ -787,11 +787,10 @@ function compareSingleAction(
       // save fail. Severity medium — table-side workaround is the DM
       // manually applies the status, but it's a real automation gap.
       if (parsed.condition) {
-        const linkedEffectIds: string[] = Array.isArray(saveAct.effects)
-          ? (saveAct.effects as any[])
-              .map(e => (e && typeof e === 'object' ? e._id ?? e.id : null))
-              .filter((id): id is string => typeof id === 'string')
-          : [];
+        const saveActEffects: any[] = Array.isArray(saveAct.effects) ? saveAct.effects : [];
+        const linkedEffectIds: string[] = saveActEffects
+          .map(e => (e && typeof e === 'object' ? e._id ?? e.id : null))
+          .filter((id): id is string => typeof id === 'string');
         const itemEffectsArr: any[] = Array.isArray(item.effects) ? item.effects : [];
         const itemEffectsById = new Map<string, any>();
         for (const eff of itemEffectsArr) {
@@ -806,17 +805,37 @@ function compareSingleAction(
           return statuses.includes(parsed.condition!.type);
         });
         if (!hasMatchingStatus) {
-          // Distinguish "no link at all" from "link present but condition mismatch"
-          // so the divergence note is actionable.
-          const note = linkedEffects.length === 0
-            ? `save activity has no effects[] link; build pipeline should attach an item ActiveEffect with statuses: ['${parsed.condition.type}']`
-            : `linked effect(s) present but none carries statuses: ['${parsed.condition.type}']`;
+          // Three distinct failure modes; pick the most actionable note.
+          // (a) save activity has no effects[] entries at all
+          // (b) entries exist but none carries _id (dnd5e stripped it during
+          //     pre-create — needs hot-patch via post-create updateActorItems)
+          // (c) entries with _id exist but no item effect resolves to that id
+          //     (linked effect was deleted, or never created)
+          // (d) item effects exist + link resolves but wrong status
+          let note: string;
+          let foundry: any;
+          const itemHasMatchingStatusEffect = itemEffectsArr.some(eff =>
+            (Array.isArray(eff?.statuses) ? eff.statuses.map(String) : []).includes(parsed.condition!.type),
+          );
+          if (saveActEffects.length === 0) {
+            note = `save activity effects[] is empty; build pipeline did not attach a condition link`;
+            foundry = 'no-link-entry';
+          } else if (linkedEffectIds.length === 0) {
+            note = itemHasMatchingStatusEffect
+              ? `save activity has effects[] entry but the _id field was stripped (likely pre-create dnd5e schema validation); item-side effect with statuses: ['${parsed.condition.type}'] is present and needs a post-create hot-patch to link`
+              : `save activity has effects[] entry but the _id field was stripped, AND no item-side effect with statuses: ['${parsed.condition.type}'] exists`;
+            foundry = { effectsEntries: saveActEffects.length, missingIds: true, itemHasMatchingStatusEffect };
+          } else if (linkedEffects.length === 0) {
+            note = `save activity links effect ids [${linkedEffectIds.join(', ')}] but no item-side effect with those ids exists`;
+            foundry = { linkedIds: linkedEffectIds, itemEffectIds: [...itemEffectsById.keys()] };
+          } else {
+            note = `linked effect(s) present but none carries statuses: ['${parsed.condition.type}']`;
+            foundry = { linkedEffects: linkedEffects.map(e => ({ _id: e._id ?? e.id, statuses: e.statuses ?? [] })) };
+          }
           out.push({
             field: 'save.condition',
             reloaded: { type: parsed.condition.type },
-            foundry: linkedEffects.length === 0
-              ? 'no-link'
-              : { linkedEffects: linkedEffects.map(e => ({ _id: e._id ?? e.id, statuses: e.statuses ?? [] })) },
+            foundry,
             status: 'divergence',
             severity: 'medium',
             note,

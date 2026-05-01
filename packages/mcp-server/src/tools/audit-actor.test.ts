@@ -567,8 +567,60 @@ describe('compareActor — Phase 10A save.condition link', () => {
     const cond = tf.divergences.find(d => d.field === 'save.condition');
     expect(cond).toBeDefined();
     expect(cond!.severity).toBe('medium');
-    expect(cond!.foundry).toBe('no-link');
-    expect(cond!.note).toContain("statuses: ['restrained']");
+    // Refined diagnostic: empty effects[] vs entries-without-_id vs unresolved
+    // ids vs status-mismatch are now distinguished. Empty effects[] returns
+    // the 'no-link-entry' sentinel so callers can pinpoint which failure mode.
+    expect(cond!.foundry).toBe('no-link-entry');
+    expect(cond!.note).toContain('did not attach a condition link');
+  });
+
+  it('flags entries-without-_id (the "pre-create dnd5e schema strips _id" case) with hot-patch hint', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Tanglefoot',
+        description: 'A sticky bomb',
+        parsed: {
+          damage: [],
+          save: { dc: 14, ability: 'str' },
+          condition: { type: 'restrained' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Tanglefoot', type: 'feat',
+      system: {
+        description: { value: '<p>A sticky bomb</p>' },
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['str'], dc: { calculation: '', formula: '14' } },
+            // entry exists but no _id — mirrors the live failure mode where
+            // dnd5e schema validation strips refs to effects that don't yet
+            // exist at the activity-creation pass.
+            effects: [{ level: { min: null, max: null }, onSave: false }],
+          },
+        },
+      },
+      // Item-side effect WAS persisted — hot-patch needs to add the _id ref.
+      effects: [{
+        _id: 'effrestrained1',
+        name: 'Restrained',
+        statuses: ['restrained'],
+        transfer: false,
+      }],
+    }]);
+    const audit = compareActor(actor, sb);
+    const tf = audit.actions.find(a => a.name === 'Tanglefoot')!;
+    const cond = tf.divergences.find(d => d.field === 'save.condition');
+    expect(cond).toBeDefined();
+    expect(cond!.severity).toBe('medium');
+    expect(cond!.note).toContain('_id field was stripped');
+    expect(cond!.note).toContain('hot-patch');
+    expect(cond!.foundry).toMatchObject({
+      effectsEntries: 1,
+      missingIds: true,
+      itemHasMatchingStatusEffect: true,
+    });
   });
 
   it('flags status-mismatch when link is present but the linked effect carries a different condition', () => {

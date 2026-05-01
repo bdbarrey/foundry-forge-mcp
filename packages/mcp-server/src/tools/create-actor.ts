@@ -625,6 +625,49 @@ export class CreateActorTools {
             const addResult = await this.addItemsWithBatchFallback(newActor.id, [itemPayload]);
             if (addResult.added.length > 0) {
               actionsScratchBuilt.push(name);
+
+              // Phase 10A hot-patch: pre-create activity.effects = [{_id,...}]
+              // gets the entry preserved BUT the _id field is silently stripped
+              // by dnd5e schema validation when the referenced item-side
+              // ActiveEffect doesn't yet exist at activity-creation time
+              // (effects and activities are processed in parallel passes during
+              // createEmbeddedDocuments — the activity validator can't see the
+              // sibling effect yet). Mirrors `feedback_hot_patch_after_build.md`:
+              // post-create updateActorItems with the same payload IS reliable.
+              // Find the activity id we wrote in itemPayload, the effect id we
+              // attached, and the new actor-item id, then re-issue the link.
+              // _id is pre-set on the payload so addActorItems uses it as-is;
+              // we don't have to re-query the actor to find the new item id.
+              const newItemId = (itemPayload as any)._id;
+              const activityIds = Object.keys((itemPayload as any)?.system?.activities ?? {});
+              const effectId = ((itemPayload as any)?.effects ?? [])[0]?._id;
+              if (newItemId && activityIds[0] && effectId && action.parsed?.condition) {
+                try {
+                  const upd: any = await this.foundryClient.query(
+                    'foundry-forge-mcp.updateActorItems',
+                    {
+                      actorId: newActor.id,
+                      updates: [{
+                        _id: newItemId,
+                        [`system.activities.${activityIds[0]}.effects`]: [
+                          { _id: effectId, level: { min: null, max: null }, onSave: false },
+                        ],
+                      }],
+                    },
+                  );
+                  if (upd?.success === false) {
+                    this.logger.warn(
+                      `Phase 10A condition-link hot-patch "${name}" returned success=false`,
+                      { error: upd?.error },
+                    );
+                  }
+                } catch (linkErr: any) {
+                  this.logger.warn(
+                    `Phase 10A condition-link hot-patch "${name}" threw (item still has the effect, just no save link)`,
+                    { error: linkErr?.message },
+                  );
+                }
+              }
             } else {
               actionsBuildFailures.push({
                 name,
@@ -1524,6 +1567,11 @@ export class CreateActorTools {
     }
 
     return {
+      // Pre-set _id so the post-create hot-patch step can target the new item
+      // by id without re-querying the actor by name. Foundry's
+      // createEmbeddedDocuments respects pre-set _ids when valid (16 alphanum)
+      // and uses them as-is.
+      _id: genActivityId(),
       name: finalName,
       type: 'feat',
       // Phase 9: themed icon based on the parsed combat shape (save → save
