@@ -574,7 +574,11 @@ describe('compareActor — Phase 10A save.condition link', () => {
     expect(cond!.note).toContain('did not attach a condition link');
   });
 
-  it('flags entries-without-_id (the "pre-create dnd5e schema strips _id" case) with hot-patch hint', () => {
+  it('inferred-link OK: activity has effects[] entry without _id (dnd5e toJSON quirk) AND item has matching-status effect → no divergence', () => {
+    // dnd5e's Activity.effects toJSON strips _id from the readback. Even when
+    // the link IS persisted at storage time (Foundry's Applied Effects panel
+    // confirms it live), the audit can never see the strict link via this
+    // serialization. Inferred match avoids a false-positive divergence.
     const sb = makeStatblock({
       actions: [{
         name: 'Tanglefoot',
@@ -594,14 +598,12 @@ describe('compareActor — Phase 10A save.condition link', () => {
           sav1: {
             type: 'save',
             save: { ability: ['str'], dc: { calculation: '', formula: '14' } },
-            // entry exists but no _id — mirrors the live failure mode where
-            // dnd5e schema validation strips refs to effects that don't yet
-            // exist at the activity-creation pass.
+            // entry exists but no _id — dnd5e Activity.effects toJSON quirk
             effects: [{ level: { min: null, max: null }, onSave: false }],
           },
         },
       },
-      // Item-side effect WAS persisted — hot-patch needs to add the _id ref.
+      // Item-side effect WAS persisted with the right status.
       effects: [{
         _id: 'effrestrained1',
         name: 'Restrained',
@@ -611,16 +613,8 @@ describe('compareActor — Phase 10A save.condition link', () => {
     }]);
     const audit = compareActor(actor, sb);
     const tf = audit.actions.find(a => a.name === 'Tanglefoot')!;
-    const cond = tf.divergences.find(d => d.field === 'save.condition');
-    expect(cond).toBeDefined();
-    expect(cond!.severity).toBe('medium');
-    expect(cond!.note).toContain('_id field was stripped');
-    expect(cond!.note).toContain('hot-patch');
-    expect(cond!.foundry).toMatchObject({
-      effectsEntries: 1,
-      missingIds: true,
-      itemHasMatchingStatusEffect: true,
-    });
+    // No save.condition divergence — the inference path treats this as a soft match.
+    expect(tf.divergences.find(d => d.field === 'save.condition')).toBeUndefined();
   });
 
   it('flags status-mismatch when link is present but the linked effect carries a different condition', () => {
