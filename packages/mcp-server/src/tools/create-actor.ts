@@ -714,9 +714,17 @@ export class CreateActorTools {
               // _id is pre-set on the payload so addActorItems uses it as-is;
               // we don't have to re-query the actor to find the new item id.
               const newItemId = (itemPayload as any)._id;
-              const activityIds = Object.keys((itemPayload as any)?.system?.activities ?? {});
+              const payloadActivities = (itemPayload as any)?.system?.activities ?? {};
+              // Phase 10A.7: pick the SAVE activity specifically — Bite-style
+              // items have both attack + save and the effect link goes on the
+              // save (the save fail is what triggers the rider effect). Falls
+              // back to the only activity for save-only items (Tanglefoot).
+              const saveActivityEntry = Object.entries(payloadActivities).find(
+                ([, act]: [string, any]) => act?.type === 'save',
+              );
+              const saveActivityId = saveActivityEntry?.[0];
               const effectId = ((itemPayload as any)?.effects ?? [])[0]?._id;
-              if (newItemId && activityIds[0] && effectId && action.parsed?.condition) {
+              if (newItemId && saveActivityId && effectId && action.parsed?.condition) {
                 try {
                   const upd: any = await this.foundryClient.query(
                     'foundry-forge-mcp.updateActorItems',
@@ -724,7 +732,7 @@ export class CreateActorTools {
                       actorId: newActor.id,
                       updates: [{
                         _id: newItemId,
-                        [`system.activities.${activityIds[0]}.effects`]: [
+                        [`system.activities.${saveActivityId}.effects`]: [
                           { _id: effectId, level: { min: null, max: null }, onSave: false },
                         ],
                       }],
@@ -1580,30 +1588,40 @@ export class CreateActorTools {
       system.uses = usesPayload;
     }
 
-    // If the parsed action has a save (Tanglefoot, Thunderstone, etc.) attach
-    // a save activity so the DM can roll it from the sheet. Without this the
-    // feat is description-only — DM has to remember to call for a saving throw
-    // and apply effects manually. Damage rides the save activity when present
-    // (matches the buildItemActivityUpdate damageGoesOnSave path).
+    // Activities. The pipeline now scratch-builds ALL three combos:
+    //   parsed.save only → save activity (Tanglefoot)
+    //   parsed.attackBonus only → attack activity (rare; usually copy-patch)
+    //   parsed.attackBonus + parsed.save → BOTH (Bite-style), chained via
+    //     attack.midiProperties.triggeredActivityId so the save auto-fires
+    //     after the attack hits (Phase 10A.7 attack-build + Midi-QOL chain).
     //
     // Phase 10A: when the action also has a parsed condition (Tanglefoot →
-    // restrained, Thunderstone → prone), build an item active effect carrying
-    // `statuses: [<condition>]` and link it from the save activity's
-    // `effects[]` so Midi auto-applies the Foundry condition on save fail.
-    // Mirrors the DDB-imported Wolf Bite pattern (Bite save → prone effect).
+    // restrained, Thunderstone → prone, Bite → prone), build an item active
+    // effect carrying `statuses: [<condition>]` and link it from the
+    // appropriate activity's `effects[]`. For attack+save items the save
+    // activity carries the link (the save is what fails to trigger the effect).
     const itemEffects: any[] = [];
+    const activities: Record<string, any> = {};
+    let saveActivityId: string | undefined;
+    let attackActivityId: string | undefined;
+
     if (parsed?.save) {
-      const activityId = genActivityId();
+      saveActivityId = genActivityId();
       const saveActivity: any = {
         type: 'save',
-        _id: activityId,
+        _id: saveActivityId,
         name: 'Save',
         save: {
           ability: [parsed.save.ability],
           dc: { calculation: '', formula: String(parsed.save.dc) },
         },
       };
-      if (parsed.damage.length > 0) {
+      // Damage rides the save activity ONLY when there's no attack (save-only
+      // actions like Firebomb where damage IS the save's payload). Bite-style
+      // (attack + save) damage goes on the attack activity instead — the save
+      // is for the rider effect (prone/poisoned), not the primary damage.
+      const damageGoesOnSave = parsed.damage.length > 0 && parsed.attackBonus === undefined;
+      if (damageGoesOnSave) {
         saveActivity.damage = {
           parts: parsed.damage.map(damagePartPayload),
           onSave: parsed.save.onSuccess === 'half' ? 'half' : 'none',
@@ -1616,29 +1634,93 @@ export class CreateActorTools {
           ...(parsed.range.long ? { long: parsed.range.long } : {}),
         };
       }
-      // Phase 10A.7: targeting from parsed.targetShape. Two pieces:
-      // (1) target.template — area shape (circle/cone/line/cube/sphere/cylinder)
-      //     so Midi prompts for a Measured Template and auto-targets tokens.
-      // (2) target.affects — creature type + count, so single-target activities
-      //     don't accidentally accept friendly tokens / multi-creature actions
-      //     respect their cap. Defaults applied when parsed.targetShape didn't
-      //     yield enough info (e.g. save-only with no prose cue defaults to
-      //     "creature, 1" rather than leaving the GUI blank).
-      const targetSpec = buildActivityTarget(parsed);
-      if (targetSpec) {
-        saveActivity.target = targetSpec;
+      // Phase 10A.7 targeting: only attach when no attack activity is also
+      // being built — when both exist the targeting lives on the attack
+      // (you target the bite, the save just resolves against the hit
+      // target). For save-only actions, target lives on the save activity.
+      if (parsed.attackBonus === undefined) {
+        const targetSpec = buildActivityTarget(parsed);
+        if (targetSpec) {
+          saveActivity.target = targetSpec;
+        }
       }
       if (parsed.condition) {
         const effectDoc = buildConditionEffect(parsed.condition);
         itemEffects.push(effectDoc);
-        // Activity-side link: { _id, level: {min,max}, onSave }. onSave: false
-        // means "do NOT apply on a successful save" — the effect lands only
-        // when the target fails. Matches Wolf Bite's prone-on-fail pattern.
         saveActivity.effects = [
           { _id: effectDoc._id, level: { min: null, max: null }, onSave: false },
         ];
       }
-      system.activities = { [activityId]: saveActivity };
+      activities[saveActivityId] = saveActivity;
+    }
+
+    // Phase 10A.7 attack-build: when parsed has an attack bonus AND there's
+    // no compendium item to copy-patch from, scratch-build an attack
+    // activity. Common case for novel Reloaded actions that don't match
+    // any SRD weapon (homebrew bites, claws, slams with custom names).
+    if (parsed?.attackBonus !== undefined) {
+      attackActivityId = genActivityId();
+      const attackActivity: any = {
+        type: 'attack',
+        _id: attackActivityId,
+        name: parsed.save ? 'Attack' : 'Midi Attack',
+        attack: {
+          // Sign-prefixed string for dnd5e's attack-bonus parser.
+          bonus: (parsed.attackBonus >= 0 ? '+' : '') + parsed.attackBonus,
+          // flat:true makes the bonus the FULL to-hit modifier — without it
+          // dnd5e adds ability + prof on top, doubling Reloaded's printed value.
+          flat: true,
+          ...(parsed.attackType
+            ? { type: { value: parsed.attackType, classification: 'weapon' } }
+            : {}),
+          critical: {},
+        },
+      };
+      // Damage on the attack activity (Hit:-style): primary damage parts +
+      // includeBase=false so dnd5e doesn't add a weapon base die on top.
+      if (parsed.damage.length > 0) {
+        attackActivity.damage = {
+          parts: parsed.damage.map(damagePartPayload),
+          includeBase: false,
+          critical: {},
+        };
+      }
+      if (parsed.reach !== undefined) {
+        attackActivity.range = {
+          reach: parsed.reach,
+          units: 'ft',
+          override: true,
+        };
+      } else if (parsed.range) {
+        attackActivity.range = {
+          value: parsed.range.normal,
+          units: 'ft',
+          override: true,
+          ...(parsed.range.long ? { long: parsed.range.long } : {}),
+        };
+      }
+      // Phase 10A.7 targeting on the attack activity (covers Bite-style
+      // where targeting is "one creature" via parsed.targetShape).
+      const targetSpec = buildActivityTarget(parsed);
+      if (targetSpec) {
+        attackActivity.target = targetSpec;
+      }
+      // Chain: when a save activity also exists, set the attack's
+      // triggeredActivityId so Midi auto-fires the save after a hit.
+      // triggeredActivityTargets='hit' restricts the trigger to creatures
+      // the attack actually hit (vs all targets). Per Midi-QOL README
+      // "Triggered Activities" pattern.
+      if (saveActivityId) {
+        attackActivity.midiProperties = {
+          triggeredActivityId: saveActivityId,
+          triggeredActivityTargets: 'hit',
+        };
+      }
+      activities[attackActivityId] = attackActivity;
+    }
+
+    if (Object.keys(activities).length > 0) {
+      system.activities = activities;
     }
 
     // Phase 10A.3: item-level Midi flag for save-or-half items. CPR's pattern
