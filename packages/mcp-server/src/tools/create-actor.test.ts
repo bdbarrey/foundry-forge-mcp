@@ -440,8 +440,11 @@ describe('buildConditionEffect (Phase 10A)', () => {
     expect(eff.type).toBe('base');
     // 16-char activity-style id
     expect(eff._id).toMatch(/^[A-Za-z0-9]{16}$/);
-    // DAE config: stackable noneNameOnly, transfer mirrored, no specialDuration
-    expect(eff.flags.dae.stackable).toBe('noneNameOnly');
+    // DAE config: stackable 'noneName' dedupes by effect NAME across any
+    // source — required because Tanglefoot fires saves on multiple targets
+    // and 'noneNameOnly' (same source) wasn't catching duplicate Restrained
+    // applications on the same token (live-verified on Volenta build 2026-04-29).
+    expect(eff.flags.dae.stackable).toBe('noneName');
     expect(eff.flags.dae.transfer).toBe(false);
     expect(eff.flags.dae.specialDuration).toEqual([]);
     // Midi: forceCEOff so CE doesn't shadow the native Foundry status
@@ -495,6 +498,50 @@ describe('buildConditionEffect (Phase 10A)', () => {
     const a = buildConditionEffect({ type: 'restrained' });
     const b = buildConditionEffect({ type: 'restrained' });
     expect(a._id).not.toBe(b._id);
+  });
+
+  it('writes Midi OverTime flag when condition.repeatSave is set', () => {
+    const eff = buildConditionEffect({
+      type: 'restrained',
+      repeatSave: { period: 'turnEnd', ability: 'str', dc: 14 },
+    });
+    // Effect carries an OverTime change with the right format
+    const overTimeChange = eff.changes.find((c: any) => c.key === 'flags.midi-qol.OverTime');
+    expect(overTimeChange).toBeDefined();
+    expect(overTimeChange.mode).toBe(0);
+    expect(overTimeChange.priority).toBe(20);
+    expect(overTimeChange.value).toContain('turn=end');
+    expect(overTimeChange.value).toContain('saveDC=14');
+    expect(overTimeChange.value).toContain('saveAbility=str');
+    expect(overTimeChange.value).toContain('saveRemove=true');
+    expect(overTimeChange.value).toContain('label=Restrained');
+    // No fixed duration — the save IS the expiry
+    expect(eff.duration).toBeUndefined();
+  });
+
+  it('writes turn=start variant when repeatSave.period is turnStart', () => {
+    const eff = buildConditionEffect({
+      type: 'paralyzed',
+      repeatSave: { period: 'turnStart', ability: 'wis', dc: 17 },
+    });
+    const overTimeChange = eff.changes.find((c: any) => c.key === 'flags.midi-qol.OverTime');
+    expect(overTimeChange.value).toContain('turn=start');
+    expect(overTimeChange.value).toContain('saveDC=17');
+    expect(overTimeChange.value).toContain('saveAbility=wis');
+  });
+
+  it('preserves duration when both duration AND repeatSave are set (whichever fires first)', () => {
+    // Edge case: prose like "for 1 minute. A target can repeat the save..."
+    // — both expiry mechanisms exist; effect carries both. Foundry/Midi
+    // expires whichever fires first.
+    const eff = buildConditionEffect({
+      type: 'frightened',
+      duration: { rounds: 10, seconds: 60 },
+      repeatSave: { period: 'turnEnd', ability: 'wis', dc: 15 },
+    });
+    expect(eff.duration?.rounds).toBe(10);
+    const overTimeChange = eff.changes.find((c: any) => c.key === 'flags.midi-qol.OverTime');
+    expect(overTimeChange).toBeDefined();
   });
 });
 

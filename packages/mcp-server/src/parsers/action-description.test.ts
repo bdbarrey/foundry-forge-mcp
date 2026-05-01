@@ -349,6 +349,39 @@ describe('parseActionDescription — Phase 10A condition + duration parsing', ()
     expect(r.condition).toBeUndefined();
   });
 
+  it('Tanglefoot prose: detects repeatSave with parent save DC + ability', () => {
+    const r = parseActionDescription(
+      "Each target must succeed on a DC 14 Strength saving throw or be restrained. " +
+      "A target can repeat the saving throw at the end of each of its turns, ending the effect on a success.",
+    )!;
+    expect(r.condition).toEqual({
+      type: 'restrained',
+      repeatSave: { period: 'turnEnd', ability: 'str', dc: 14 },
+    });
+    // No duration — repeatSave is the expiry mechanism.
+    expect(r.condition?.duration).toBeUndefined();
+  });
+
+  it('repeatSave variants: "repeats the save at the start of each of its turns"', () => {
+    const r = parseActionDescription(
+      'On a failed DC 17 Wisdom saving throw, the target must succeed or be paralyzed. ' +
+      'The target repeats the save at the start of each of its turns, ending the effect on a success.',
+    )!;
+    expect(r.condition).toEqual({
+      type: 'paralyzed',
+      repeatSave: { period: 'turnStart', ability: 'wis', dc: 17 },
+    });
+  });
+
+  it('does NOT trigger repeatSave on bare "at the end of its turn" (singular, one-shot)', () => {
+    // "saving throw" required to trigger save detection (DC X ABILITY saving throw)
+    const r = parseActionDescription(
+      "On a hit, target must succeed on a DC 13 Constitution saving throw or be poisoned until the end of its next turn.",
+    )!;
+    expect(r.condition?.duration?.specialDuration).toBe('turnEnd');
+    expect(r.condition?.repeatSave).toBeUndefined();
+  });
+
   it('grappled with no duration falls back to no duration field', () => {
     const r = parseActionDescription(
       'On a failed DC 13 Strength saving throw the target is grappled.',

@@ -52,9 +52,35 @@ export interface ParsedConditionDuration {
   specialDuration?: 'turnEnd' | 'turnStart' | 'turnEndSource' | 'turnStartSource';
 }
 
+/**
+ * "A target can repeat the saving throw at the end of each of its turns,
+ * ending the effect on a success." pattern. When set, the build pipeline
+ * writes a Midi-QOL OverTime flag on the condition effect so Midi prompts
+ * the target for a save at the end of their turn each round and removes
+ * the effect on success — matching Reloaded's "until break free" mechanic.
+ */
+export interface ParsedRepeatSave {
+  /** When the save fires. "turnEnd" = end of target's turn (5e default). */
+  period: 'turnEnd' | 'turnStart';
+  /**
+   * Save ability + DC for the repeat check. Default: same as the parent
+   * action's primary save (Tanglefoot's repeat-save is also DC 14 STR).
+   */
+  ability: AbilityKey;
+  dc: number;
+}
+
 export interface ParsedCondition {
   type: ConditionType;
   duration?: ParsedConditionDuration;
+  /**
+   * Repeat-save mechanism (Reloaded "ending the effect on a success" prose).
+   * When set, the effect is INDEFINITE (no fixed duration); Midi removes it
+   * automatically on a successful repeat save. Mutually exclusive with
+   * `duration` for canonical-pattern-correctness — if duration is also set,
+   * the effect would expire either way (whichever fires first).
+   */
+  repeatSave?: ParsedRepeatSave;
 }
 
 /**
@@ -276,7 +302,7 @@ export function parseActionDescription(desc: string): ParsedAction | null {
   // first match wins (longest/most-specific synonyms first, e.g. "knocked
   // prone" before "prone").
   if (out.save) {
-    const condition = parseCondition(text);
+    const condition = parseCondition(text, out.save);
     if (condition) out.condition = condition;
   }
 
@@ -459,8 +485,13 @@ const CONDITION_PATTERNS: Array<{ regex: RegExp; type: ConditionType }> = [
  *   "DC 13 Strength save or fall prone"
  *   "or be poisoned until the end of its next turn"
  *   "or be charmed for 24 hours"
+ *   "or be restrained. A target can repeat the saving throw at the end of
+ *    each of its turns, ending the effect on a success." (Tanglefoot)
  */
-function parseCondition(text: string): ParsedCondition | null {
+function parseCondition(
+  text: string,
+  parentSave: { dc: number; ability: AbilityKey },
+): ParsedCondition | null {
   for (const { regex, type } of CONDITION_PATTERNS) {
     const m = text.match(regex);
     if (!m) continue;
@@ -468,9 +499,39 @@ function parseCondition(text: string): ParsedCondition | null {
     // doesn't pick up unrelated durations elsewhere in the description.
     const tail = text.slice((m.index ?? 0) + m[0].length);
     const duration = parseConditionDuration(tail);
-    return duration ? { type, duration } : { type };
+    const repeatSave = parseRepeatSave(tail, parentSave);
+    const out: ParsedCondition = { type };
+    if (duration) out.duration = duration;
+    if (repeatSave) out.repeatSave = repeatSave;
+    return out;
   }
   return null;
+}
+
+/**
+ * Detect Reloaded's "A target can repeat the saving throw at the end of each
+ * of its turns, ending the effect on a success" pattern. Returns the repeat-
+ * save spec when matched (uses parent action's save DC + ability — the repeat
+ * check is the same DC as the original).
+ */
+function parseRepeatSave(
+  tail: string,
+  parentSave: { dc: number; ability: AbilityKey },
+): ParsedRepeatSave | undefined {
+  // Common phrasings:
+  //   "A target can repeat the saving throw at the end of each of its turns"
+  //   "The target can repeat the save at the end of each of its turns"
+  //   "Repeat the saving throw at the start of each of its turns"
+  // Anchored to "at (the )?(end|start) of each of its turns" — the loose
+  // wording ("can repeat the saving throw" vs "repeats", "save" vs "saving
+  // throw") covers Reloaded's variants without false-positives on unrelated
+  // prose like "at the end of its turn" (singular, one-shot).
+  const m = tail.match(
+    /repeats?\s+(?:the\s+)?sav(?:ing\s+throw|e)\s+at\s+(?:the\s+)?(end|start)\s+of\s+each\s+of\s+its\s+turns/i,
+  );
+  if (!m) return undefined;
+  const period = m[1].toLowerCase() === 'start' ? 'turnStart' : 'turnEnd';
+  return { period, ability: parentSave.ability, dc: parentSave.dc };
 }
 
 /**

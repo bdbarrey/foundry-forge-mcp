@@ -2866,7 +2866,7 @@ export const TRAIT_TEMPLATES: TraitTemplate[] = [
             priority: 20,
           }],
           flags: {
-            dae: { transfer: true, stackable: 'noneNameOnly', specialDuration: [] },
+            dae: { transfer: true, stackable: 'noneName', specialDuration: [] },
             'midi-qol': { forceCEOff: true },
             core: {},
           },
@@ -2913,7 +2913,7 @@ export const TRAIT_TEMPLATES: TraitTemplate[] = [
             },
           ],
           flags: {
-            dae: { transfer: true, stackable: 'noneNameOnly', specialDuration: [] },
+            dae: { transfer: true, stackable: 'noneName', specialDuration: [] },
             'midi-qol': { forceCEOff: true },
             core: {},
           },
@@ -2976,7 +2976,7 @@ export function buildConditionEffect(
     flags: {
       dae: {
         transfer: false,
-        stackable: 'noneNameOnly',
+        stackable: 'noneName',
         // specialDuration mirrors DAE's tag list. "turnEnd" / "turnStart" tell
         // Times-Up to expire the effect at the end/start of the source's next
         // turn. Empty array (the default) means rely on `duration.seconds` /
@@ -3000,6 +3000,28 @@ export function buildConditionEffect(
       startTurn: null,
       combat: null,
     };
+  }
+
+  // Phase 10C: when condition.repeatSave is set, write a Midi-QOL OverTime
+  // change. Midi prompts the target for a save at the configured turn point
+  // (end/start of their turn) every round and removes the effect on success.
+  // Mirrors Reloaded's "ending the effect on a success" mechanic — the
+  // effect is INDEFINITE (no fixed expiry); only a successful save clears
+  // it. Per Midi-QOL README "Optional Rules → Over Time Effects" pattern.
+  if (condition.repeatSave) {
+    const turn = condition.repeatSave.period === 'turnStart' ? 'start' : 'end';
+    const overTimeValue =
+      `turn=${turn}, saveDC=${condition.repeatSave.dc}, ` +
+      `saveAbility=${condition.repeatSave.ability}, saveRemove=true, ` +
+      `label=${titleCase}`;
+    effect.changes.push({
+      key: 'flags.midi-qol.OverTime',
+      mode: 0,
+      value: overTimeValue,
+      priority: 20,
+    });
+    // Don't set duration when repeatSave is set — the save IS the expiry.
+    // Foundry/dnd5e/Midi will treat the effect as indefinite.
   }
 
   return effect;
