@@ -597,6 +597,81 @@ export class CreateActorTools {
                     diag.updatedCount = Array.isArray(upd?.updated) ? upd.updated.length : 0;
                     diag.step = 'done';
                   }
+
+                  // Phase 10A.2b — condition link injection on copy-patch.
+                  // Same pattern as scratch-build (Phase 10A.2 + 10A.5
+                  // hot-patch): when parsed.condition is set, create the
+                  // item-side ActiveEffect with statuses[<cond>] and link it
+                  // from the save activity's effects[]. Different from
+                  // scratch-build because the item already exists, so we have
+                  // to merge the new effect into the existing effects array
+                  // (otherwise updateActorItems would clobber any base-side
+                  // effects). Fetch-then-merge via getCharacterInfo. Save
+                  // activity id is found in sourceActivities (the compendium
+                  // base may have multiple activities; we pick the save one).
+                  if (action.parsed.condition) {
+                    const saveActId = sourceActivityIds.find(
+                      (id) => sourceActivities[id]?.type === 'save',
+                    );
+                    if (saveActId) {
+                      try {
+                        const effectDoc = buildConditionEffect(action.parsed.condition);
+                        // Read existing item.effects so we don't clobber any
+                        // base-side effects (rare for monster items but real
+                        // for some — Wolf Bite's prone effect is item-side).
+                        // Requires v0.1.13+ module visibility patch.
+                        const fullActor: any = await this.foundryClient.query(
+                          'foundry-forge-mcp.getCharacterInfo',
+                          { characterName: newActor.id },
+                        );
+                        const existingItem = (fullActor?.items ?? []).find(
+                          (i: any) => i.id === r.added._id,
+                        );
+                        const existingEffects: any[] = Array.isArray(existingItem?.effects)
+                          ? existingItem.effects
+                          : [];
+                        // Idempotency: skip if an effect with the same
+                        // status already exists (covers re-running the build
+                        // on an already-patched actor).
+                        const alreadyHasMatchingStatus = existingEffects.some(
+                          (eff: any) =>
+                            (Array.isArray(eff?.statuses) ? eff.statuses : [])
+                              .includes(action.parsed.condition!.type),
+                        );
+                        if (!alreadyHasMatchingStatus) {
+                          const mergedEffects = [...existingEffects, effectDoc];
+                          const linkUpd: any = await this.foundryClient.query(
+                            'foundry-forge-mcp.updateActorItems',
+                            {
+                              actorId: newActor.id,
+                              updates: [
+                                {
+                                  _id: r.added._id,
+                                  effects: mergedEffects,
+                                  [`system.activities.${saveActId}.effects`]: [
+                                    {
+                                      _id: effectDoc._id,
+                                      level: { min: null, max: null },
+                                      onSave: false,
+                                    },
+                                  ],
+                                },
+                              ],
+                            },
+                          );
+                          diag.conditionLinkPatch = !!linkUpd?.success;
+                        } else {
+                          diag.conditionLinkPatch = 'skipped:already-present';
+                        }
+                      } catch (linkErr: any) {
+                        diag.conditionLinkError = linkErr?.message ?? String(linkErr);
+                        this.logger.warn(
+                          `Phase 10A.2b condition-link patch "${name}" failed`,
+                          { error: linkErr?.message },
+                        );
+                      }
+                    }
+                  }
                 }
               } catch (patchErr: any) {
                 diag.error = patchErr?.message ?? String(patchErr);
