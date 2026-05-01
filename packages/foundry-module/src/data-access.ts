@@ -1185,11 +1185,23 @@ export class FoundryDataAccess {
       system: this.sanitizeData((actor as any).system),
       items: actor.items.map(item => {
         const itemAny = item as any;
-        // Phase 10A visibility patch: expose item-level effects + flags so
-        // audit-actor can self-verify save→effect linkage and pipeline tools
-        // can read CPR / DDB / Midi flags. Without this, every Phase 10A
-        // verification needs a screenshot of the item sheet — and downstream
-        // CPR identifier lookups (planned Phase 10D) would be impossible.
+        // Phase 10A visibility patch (v0.1.12): expose item-level effects +
+        // flags so audit-actor can self-verify save→effect linkage and
+        // pipeline tools can read CPR / DDB / Midi flags.
+        //
+        // v0.1.13 fix: Foundry stores `eff.statuses` as a Set (not an Array).
+        // The original v0.1.12 used `Array.isArray(eff.statuses)` which
+        // returns false for Sets, leaving statuses empty in the serialized
+        // response. Live audit on SmokeTest-10A-v4 surfaced this:
+        // itemEffects[0].statuses was `[]` even though the Restrained effect
+        // was present on the item. Spread `[...iter]` works on any iterable
+        // (Set, Array, Map), so guard with `eff.statuses != null` instead.
+        const toArr = (v: any): any[] => {
+          if (v == null) return [];
+          if (Array.isArray(v)) return [...v];
+          if (typeof v[Symbol.iterator] === 'function') return [...v];
+          return [];
+        };
         const effects = ((item as any).effects?.contents ?? []).map((eff: any) => ({
           _id: eff._id ?? eff.id,
           name: eff.name ?? eff.label ?? 'Unknown Effect',
@@ -1197,9 +1209,9 @@ export class FoundryDataAccess {
           ...(eff.icon ? { icon: eff.icon } : {}),
           disabled: !!eff.disabled,
           transfer: !!eff.transfer,
-          statuses: Array.isArray(eff.statuses) ? [...eff.statuses] : [],
+          statuses: toArr(eff.statuses),
           ...(eff.duration ? { duration: { ...eff.duration } } : {}),
-          ...(Array.isArray(eff.changes) ? { changes: eff.changes.map((c: any) => ({ ...c })) } : {}),
+          ...(toArr(eff.changes).length > 0 ? { changes: toArr(eff.changes).map((c: any) => ({ ...c })) } : {}),
           ...(eff.origin ? { origin: eff.origin } : {}),
           ...(eff.flags ? { flags: this.sanitizeData(eff.flags) } : {}),
         }));
