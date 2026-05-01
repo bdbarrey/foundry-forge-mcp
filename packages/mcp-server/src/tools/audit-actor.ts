@@ -609,6 +609,11 @@ function compareActions(
  * instead of weaving more if-blocks into a 200-line function.
  */
 export interface ActivityRuleContext {
+  /**
+   * Full source action (action.parsed is what most rules read; action.name +
+   * action.description are needed for the description-prefix rule).
+   */
+  action: StatblockFeature;
   parsed: import('../parsers/action-description.js').ParsedAction;
   item: ActorItemSnapshot;
   activities: any[];
@@ -663,13 +668,325 @@ export function runActivityRules(
  * completeness, attack→save chain detection, multiattack presence, etc.).
  */
 export const ACTIVITY_RULES: ActivityRule[] = [
+  // ----- attack activity -----------------------------------------------
+  {
+    id: 'attack.activity-present',
+    label: 'parsed attack bonus requires an attack activity',
+    appliesWhen: ctx => ctx.parsed.attackBonus !== undefined && !ctx.attackAct,
+    check: ctx => ({
+      field: 'attack.activity',
+      reloaded: { bonus: ctx.parsed.attackBonus },
+      foundry: 'no-attack-activity',
+      status: 'missing',
+      severity: 'critical',
+    }),
+  },
+  {
+    id: 'attack.bonus',
+    label: 'attack bonus matches Reloaded printed value',
+    appliesWhen: ctx => ctx.parsed.attackBonus !== undefined && !!ctx.attackAct,
+    check: ctx => {
+      const actual = parseAttackBonus(ctx.attackAct.attack?.bonus);
+      if (actual === ctx.parsed.attackBonus) return null;
+      return {
+        field: 'attack.bonus',
+        reloaded: ctx.parsed.attackBonus,
+        foundry: actual,
+        status: 'divergence',
+        severity: 'critical',
+      };
+    },
+  },
+  {
+    id: 'attack.flat',
+    label: 'attack.flat must be true so Reloaded bonus is the FULL to-hit (else dnd5e adds ability+prof on top)',
+    appliesWhen: ctx => ctx.parsed.attackBonus !== undefined && !!ctx.attackAct,
+    check: ctx => {
+      const flat = ctx.attackAct.attack?.flat;
+      if (flat === true) return null;
+      return {
+        field: 'attack.flat',
+        reloaded: true,
+        foundry: !!flat,
+        status: 'divergence',
+        severity: 'critical',
+        note: 'attack.flat=false will double-count ability+prof on top of Reloaded bonus',
+      };
+    },
+  },
+  {
+    id: 'attack.type',
+    label: 'attack type (melee/ranged) matches Reloaded',
+    appliesWhen: ctx => ctx.parsed.attackBonus !== undefined && !!ctx.attackAct && !!ctx.parsed.attackType,
+    check: ctx => {
+      const actual = strOrNull(ctx.attackAct.attack?.type?.value);
+      if (actual === ctx.parsed.attackType) return null;
+      return {
+        field: 'attack.type',
+        reloaded: ctx.parsed.attackType,
+        foundry: actual,
+        status: 'divergence',
+        severity: 'medium',
+      };
+    },
+  },
+  {
+    id: 'attack.range.reach',
+    label: 'melee reach matches Reloaded (with item-level fallback)',
+    appliesWhen: ctx => ctx.parsed.attackBonus !== undefined && !!ctx.attackAct && ctx.parsed.reach !== undefined,
+    check: ctx => {
+      // dnd5e 5.x AttackActivity doesn't always persist a `reach` field on
+      // the activity range — reach lives at item-level (system.range.reach).
+      // Try activity first, fall back to item-level so a melee weapon whose
+      // item.range.reach is correct isn't flagged as divergent just because
+      // the activity didn't echo the value.
+      const actual = numOrNull(ctx.attackAct.range?.reach) ?? numOrNull(ctx.item.system?.range?.reach);
+      if (actual === ctx.parsed.reach) return null;
+      return {
+        field: 'attack.range.reach',
+        reloaded: ctx.parsed.reach,
+        foundry: actual,
+        status: 'divergence',
+        severity: 'medium',
+      };
+    },
+  },
+  {
+    id: 'attack.range.value',
+    label: 'ranged distance matches Reloaded (with item-level fallback)',
+    appliesWhen: ctx => ctx.parsed.attackBonus !== undefined && !!ctx.attackAct && !!ctx.parsed.range,
+    check: ctx => {
+      const actual = numOrNull(ctx.attackAct.range?.value) ?? numOrNull(ctx.item.system?.range?.value);
+      if (actual === ctx.parsed.range!.normal) return null;
+      return {
+        field: 'attack.range.value',
+        reloaded: ctx.parsed.range!.normal,
+        foundry: actual,
+        status: 'divergence',
+        severity: 'medium',
+      };
+    },
+  },
+  {
+    id: 'attack.range.long',
+    label: 'ranged long-range matches Reloaded',
+    appliesWhen: ctx =>
+      ctx.parsed.attackBonus !== undefined && !!ctx.attackAct
+      && !!ctx.parsed.range && ctx.parsed.range.long !== undefined,
+    check: ctx => {
+      const actual = numOrNull(ctx.attackAct.range?.long) ?? numOrNull(ctx.item.system?.range?.long);
+      if (actual === ctx.parsed.range!.long) return null;
+      return {
+        field: 'attack.range.long',
+        reloaded: ctx.parsed.range!.long,
+        foundry: actual,
+        status: 'divergence',
+        severity: 'medium',
+      };
+    },
+  },
+
+  // ----- versatile damage (item-level) ---------------------------------
+  {
+    id: 'damage.versatile',
+    label: 'parsed versatile damage written to system.damage.versatile.custom',
+    appliesWhen: ctx => !!ctx.parsed.versatile,
+    check: ctx => checkVersatile(ctx),
+  },
+
+  // ----- save activity -------------------------------------------------
+  {
+    id: 'save.activity-present',
+    label: 'parsed save requires a save activity',
+    appliesWhen: ctx => !!ctx.parsed.save && !ctx.saveAct,
+    check: ctx => ({
+      field: 'save.activity',
+      reloaded: { dc: ctx.parsed.save!.dc, ability: ctx.parsed.save!.ability },
+      foundry: 'no-save-activity',
+      status: 'missing',
+      severity: 'critical',
+    }),
+  },
+  {
+    id: 'save.dc',
+    label: 'save DC matches Reloaded printed value',
+    appliesWhen: ctx => !!ctx.parsed.save && !!ctx.saveAct,
+    check: ctx => {
+      const actual = parseDc(ctx.saveAct.save?.dc?.formula);
+      if (actual === ctx.parsed.save!.dc) return null;
+      return {
+        field: 'save.dc',
+        reloaded: ctx.parsed.save!.dc,
+        foundry: actual,
+        status: 'divergence',
+        severity: 'critical',
+      };
+    },
+  },
+  {
+    id: 'save.ability',
+    label: 'save ability matches Reloaded',
+    appliesWhen: ctx => !!ctx.parsed.save && !!ctx.saveAct,
+    check: ctx => {
+      const abilityArr = Array.isArray(ctx.saveAct.save?.ability)
+        ? ctx.saveAct.save.ability
+        : (ctx.saveAct.save?.ability ? [ctx.saveAct.save.ability] : []);
+      const actual = abilityArr.length > 0 ? String(abilityArr[0]).toLowerCase() : null;
+      if (actual === ctx.parsed.save!.ability) return null;
+      return {
+        field: 'save.ability',
+        reloaded: ctx.parsed.save!.ability,
+        foundry: actual,
+        status: 'divergence',
+        severity: 'critical',
+      };
+    },
+  },
   {
     id: 'save.condition',
     label: 'save → effect link applies the parsed condition on save fail',
     appliesWhen: ctx => !!ctx.parsed.save && !!ctx.parsed.condition && !!ctx.saveAct,
     check: ctx => checkSaveCondition(ctx),
   },
+
+  // ----- damage parts (target activity depends on parsed shape) -----
+  {
+    id: 'damage.activity-present',
+    label: 'parsed damage requires a target activity (attack/save/damage)',
+    appliesWhen: ctx => ctx.parsed.damage.length > 0 && !damageTargetActivity(ctx),
+    check: ctx => ({
+      field: 'damage.activity',
+      reloaded: ctx.parsed.damage,
+      foundry: 'no-target-activity',
+      status: 'missing',
+      severity: 'critical',
+    }),
+  },
+  {
+    id: 'damage.parts',
+    label: 'damage parts (formula + type) match Reloaded',
+    appliesWhen: ctx => ctx.parsed.damage.length > 0 && !!damageTargetActivity(ctx),
+    check: ctx => {
+      const target = damageTargetActivity(ctx)!;
+      const actualParts = (target.damage?.parts ?? []) as any[];
+      const reloadedSet = new Set(ctx.parsed.damage.map(d => normDamageKey(d.formula, d.type)));
+      const foundrySet = new Set<string>();
+      for (const p of actualParts) {
+        const formula = p?.custom?.enabled && p?.custom?.formula
+          ? String(p.custom.formula)
+          : reconstructFormula(p);
+        const types = Array.isArray(p?.types) ? p.types : (p?.types ? Object.keys(p.types) : []);
+        const type = types.length > 0 ? String(types[0]).toLowerCase() : '';
+        if (formula) foundrySet.add(normDamageKey(formula, type));
+      }
+      const missing = [...reloadedSet].filter(k => !foundrySet.has(k));
+      const extra = [...foundrySet].filter(k => !reloadedSet.has(k));
+      if (missing.length === 0 && extra.length === 0) return null;
+      return {
+        field: 'damage.parts',
+        reloaded: [...reloadedSet],
+        foundry: [...foundrySet],
+        status: 'divergence',
+        severity: 'critical',
+        note: `missing=${missing.join('|')} extra=${extra.join('|')}`,
+      };
+    },
+  },
+  {
+    id: 'damage.includeBase',
+    label: 'attack-activity damage.includeBase must be false (else dnd5e adds weapon base die on top)',
+    appliesWhen: ctx =>
+      ctx.parsed.damage.length > 0
+      && ctx.parsed.attackBonus !== undefined
+      && !!ctx.attackAct,
+    check: ctx => {
+      const includeBase = ctx.attackAct.damage?.includeBase;
+      if (includeBase === false) return null;
+      return {
+        field: 'damage.includeBase',
+        reloaded: false,
+        foundry: includeBase === undefined ? null : !!includeBase,
+        status: 'divergence',
+        severity: 'critical',
+        note: 'damage.includeBase!=false will add weapon base die on top of Reloaded damage',
+      };
+    },
+  },
+
+  // ----- description prefix (low-severity sync check) ------------------
+  {
+    id: 'description',
+    label: 'item description prefix matches Reloaded prose',
+    appliesWhen: ctx => !!ctx.action.description,
+    check: ctx => {
+      const actorText = stripHtml(String(ctx.item.system?.description?.value ?? ''));
+      const reloadedText = ctx.action.description.trim();
+      const actorPrefix = actorText.slice(0, 80).trim().toLowerCase();
+      const reloadedPrefix = reloadedText.slice(0, 80).trim().toLowerCase();
+      if (actorPrefix === reloadedPrefix) return null;
+      return {
+        field: 'description',
+        reloaded: reloadedPrefix,
+        foundry: actorPrefix,
+        status: 'divergence',
+        severity: 'low',
+        note: 'description prefix differs (likely SRD text not synced)',
+      };
+    },
+  },
 ];
+
+/**
+ * Where do parsed damage parts live? attack-bonus → attack activity (Hit:);
+ * save-only prose → save activity ("must succeed... or take 2d6"); else
+ * the dedicated damage activity (rare: AoE-only effects).
+ */
+function damageTargetActivity(ctx: ActivityRuleContext): any | undefined {
+  const damageGoesOnAttack = ctx.parsed.attackBonus !== undefined;
+  const damageGoesOnSave = !damageGoesOnAttack && !!ctx.parsed.save;
+  return damageGoesOnAttack ? ctx.attackAct : (damageGoesOnSave ? ctx.saveAct : ctx.damageAct);
+}
+
+function checkVersatile(ctx: ActivityRuleContext): AuditDivergence | null {
+  const { parsed, item } = ctx;
+  const versatile = item.system?.damage?.versatile;
+  const customEnabled = versatile?.custom?.enabled === true;
+  const customFormula = versatile?.custom?.formula;
+  if (!customEnabled || !customFormula) {
+    return {
+      field: 'damage.versatile',
+      reloaded: parsed.versatile,
+      foundry: customEnabled ? { formula: customFormula ?? null } : 'not-set',
+      status: 'divergence',
+      severity: 'medium',
+      note: 'Reloaded prose has a versatile alternative (e.g. "or 2d10+4 if two-handed") but item.system.damage.versatile.custom is not set; sheet won\'t expose the alternate damage roll.',
+    };
+  }
+  const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
+  const formulaMatch = norm(String(customFormula)) === norm(parsed.versatile!.formula);
+  if (!formulaMatch) {
+    return {
+      field: 'damage.versatile.formula',
+      reloaded: parsed.versatile!.formula,
+      foundry: customFormula,
+      status: 'divergence',
+      severity: 'medium',
+    };
+  }
+  const versatileTypes = Array.isArray(versatile?.types) ? versatile.types : [];
+  const typeMatch = versatileTypes.length > 0
+    && String(versatileTypes[0]).toLowerCase() === parsed.versatile!.type.toLowerCase();
+  if (!typeMatch) {
+    return {
+      field: 'damage.versatile.type',
+      reloaded: parsed.versatile!.type,
+      foundry: versatileTypes,
+      status: 'divergence',
+      severity: 'medium',
+    };
+  }
+  return null;
+}
 
 function checkSaveCondition(ctx: ActivityRuleContext): AuditDivergence | null {
   const { parsed, item, saveAct } = ctx;
@@ -763,265 +1080,16 @@ function compareSingleAction(
   const saveAct = activities.find(a => a?.type === 'save');
   const damageAct = activities.find(a => a?.type === 'damage');
 
-  // ----- attack bonus / type / range/reach (attack activity) -----
-  if (parsed.attackBonus !== undefined) {
-    if (!attackAct) {
-      out.push({
-        field: 'attack.activity',
-        reloaded: { bonus: parsed.attackBonus },
-        foundry: 'no-attack-activity',
-        status: 'missing',
-        severity: 'critical',
-      });
-    } else {
-      const actualBonus = parseAttackBonus(attackAct.attack?.bonus);
-      out.push({
-        field: 'attack.bonus',
-        reloaded: parsed.attackBonus,
-        foundry: actualBonus,
-        status: actualBonus === parsed.attackBonus ? 'match' : 'divergence',
-        severity: 'critical',
-      });
+  // Phase 11: ALL per-activity checks now live in ACTIVITY_RULES (attack
+  // bonus/flat/type/range, save dc/ability/condition, damage parts/
+  // includeBase, versatile, description). Rule pass at the end of this
+  // function fires them via runActivityRules. compareSingleAction's body
+  // is now just ctx-build + rule-pass + filter.
 
-      // attack.flat must be true for Reloaded's printed bonus to be the FULL
-      // to-hit (otherwise dnd5e adds ability + prof on top, doubling the bonus).
-      const flat = attackAct.attack?.flat;
-      out.push({
-        field: 'attack.flat',
-        reloaded: true,
-        foundry: !!flat,
-        status: flat === true ? 'match' : 'divergence',
-        severity: 'critical',
-        note: !flat ? 'attack.flat=false will double-count ability+prof on top of Reloaded bonus' : undefined,
-      });
-
-      if (parsed.attackType) {
-        const actualType = strOrNull(attackAct.attack?.type?.value);
-        out.push({
-          field: 'attack.type',
-          reloaded: parsed.attackType,
-          foundry: actualType,
-          status: actualType === parsed.attackType ? 'match' : 'divergence',
-          severity: 'medium',
-        });
-      }
-
-      if (parsed.reach !== undefined) {
-        // dnd5e 5.x AttackActivity doesn't persist a `reach` field on the
-        // activity range — reach lives at item-level (system.range.reach).
-        // We try activity first (in case dnd5e schema gains it back later),
-        // then fall back to item-level so a melee weapon whose item.range.reach
-        // is correctly set isn't flagged as divergent just because the activity
-        // didn't echo the value.
-        const actualReach =
-          numOrNull(attackAct.range?.reach) ??
-          numOrNull(item.system?.range?.reach);
-        out.push({
-          field: 'attack.range.reach',
-          reloaded: parsed.reach,
-          foundry: actualReach,
-          status: actualReach === parsed.reach ? 'match' : 'divergence',
-          severity: 'medium',
-        });
-      }
-      if (parsed.range) {
-        // Activity-level range.value is the post-Phase 3a-polish source of
-        // truth (override=true ensures it beats item-level). If the activity
-        // doesn't expose a value (rare — older copy-patched items pre-Phase
-        // 3a-polish), fall back to item-level so the audit isn't a
-        // false-positive on a creature that plays correctly at the table.
-        const actualValue =
-          numOrNull(attackAct.range?.value) ??
-          numOrNull(item.system?.range?.value);
-        out.push({
-          field: 'attack.range.value',
-          reloaded: parsed.range.normal,
-          foundry: actualValue,
-          status: actualValue === parsed.range.normal ? 'match' : 'divergence',
-          severity: 'medium',
-        });
-        if (parsed.range.long !== undefined) {
-          const actualLong =
-            numOrNull(attackAct.range?.long) ??
-            numOrNull(item.system?.range?.long);
-          out.push({
-            field: 'attack.range.long',
-            reloaded: parsed.range.long,
-            foundry: actualLong,
-            status: actualLong === parsed.range.long ? 'match' : 'divergence',
-            severity: 'medium',
-          });
-        }
-      }
-    }
-  }
-
-  // ----- versatile damage (item-level system.damage.versatile) -----
-  // Reloaded prose like "13 (2d8+4) slashing damage, or 15 (2d10+4) slashing
-  // damage if used with two hands" parses to parsed.versatile. Phase 3a-polish
-  // writes it to item-level system.damage.versatile.custom.{enabled,formula}.
-  // Audit checks the formula matches; missing means the second damage roll
-  // isn't on the sheet even though the parser saw it.
-  if (parsed.versatile) {
-    const versatile = item.system?.damage?.versatile;
-    const customEnabled = versatile?.custom?.enabled === true;
-    const customFormula = versatile?.custom?.formula;
-    if (!customEnabled || !customFormula) {
-      out.push({
-        field: 'damage.versatile',
-        reloaded: parsed.versatile,
-        foundry: customEnabled ? { formula: customFormula ?? null } : 'not-set',
-        status: 'divergence',
-        severity: 'medium',
-        note: 'Reloaded prose has a versatile alternative (e.g. "or 2d10+4 if two-handed") but item.system.damage.versatile.custom is not set; sheet won\'t expose the alternate damage roll.',
-      });
-    } else {
-      const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
-      const formulaMatch = norm(String(customFormula)) === norm(parsed.versatile.formula);
-      out.push({
-        field: 'damage.versatile.formula',
-        reloaded: parsed.versatile.formula,
-        foundry: customFormula,
-        status: formulaMatch ? 'match' : 'divergence',
-        severity: 'medium',
-      });
-      const versatileTypes = Array.isArray(versatile?.types) ? versatile.types : [];
-      const typeMatch = versatileTypes.length > 0
-        && String(versatileTypes[0]).toLowerCase() === parsed.versatile.type.toLowerCase();
-      out.push({
-        field: 'damage.versatile.type',
-        reloaded: parsed.versatile.type,
-        foundry: versatileTypes,
-        status: typeMatch ? 'match' : 'divergence',
-        severity: 'medium',
-      });
-    }
-  }
-
-  // ----- save (save activity) -----
-  if (parsed.save) {
-    if (!saveAct) {
-      out.push({
-        field: 'save.activity',
-        reloaded: { dc: parsed.save.dc, ability: parsed.save.ability },
-        foundry: 'no-save-activity',
-        status: 'missing',
-        severity: 'critical',
-      });
-    } else {
-      const dcFormula = saveAct.save?.dc?.formula;
-      const dcNum = parseDc(dcFormula);
-      out.push({
-        field: 'save.dc',
-        reloaded: parsed.save.dc,
-        foundry: dcNum,
-        status: dcNum === parsed.save.dc ? 'match' : 'divergence',
-        severity: 'critical',
-      });
-
-      const abilityArr = Array.isArray(saveAct.save?.ability)
-        ? saveAct.save.ability
-        : (saveAct.save?.ability ? [saveAct.save.ability] : []);
-      const ability = abilityArr.length > 0 ? String(abilityArr[0]).toLowerCase() : null;
-      out.push({
-        field: 'save.ability',
-        reloaded: parsed.save.ability,
-        foundry: ability,
-        status: ability === parsed.save.ability ? 'match' : 'divergence',
-        severity: 'critical',
-      });
-
-      // Phase 10A condition-link check has moved to ACTIVITY_RULES (see
-      // checkSaveCondition below). Rule fires via runActivityRules() at the
-      // end of this function. Keeping the empty branch comment to make the
-      // dropped concern obvious in future diffs.
-    }
-  }
-
-  // ----- damage parts -----
-  // Damage rides whichever activity matches the parsed shape. attack-bonus →
-  // attack activity; save-only → save activity; otherwise damage activity.
-  if (parsed.damage.length > 0) {
-    const damageGoesOnAttack = parsed.attackBonus !== undefined;
-    const damageGoesOnSave = !damageGoesOnAttack && !!parsed.save;
-    const target = damageGoesOnAttack ? attackAct : (damageGoesOnSave ? saveAct : damageAct);
-    if (!target) {
-      out.push({
-        field: 'damage.activity',
-        reloaded: parsed.damage,
-        foundry: 'no-target-activity',
-        status: 'missing',
-        severity: 'critical',
-      });
-    } else {
-      const actualParts = (target.damage?.parts ?? []) as any[];
-      const reloadedSet = new Set(parsed.damage.map(d => normDamageKey(d.formula, d.type)));
-      const foundrySet = new Set<string>();
-      for (const p of actualParts) {
-        const formula = p?.custom?.enabled && p?.custom?.formula
-          ? String(p.custom.formula)
-          : reconstructFormula(p);
-        const types = Array.isArray(p?.types) ? p.types : (p?.types ? Object.keys(p.types) : []);
-        const type = types.length > 0 ? String(types[0]).toLowerCase() : '';
-        if (formula) foundrySet.add(normDamageKey(formula, type));
-      }
-      const missing = [...reloadedSet].filter(k => !foundrySet.has(k));
-      const extra = [...foundrySet].filter(k => !reloadedSet.has(k));
-      out.push({
-        field: 'damage.parts',
-        reloaded: [...reloadedSet],
-        foundry: [...foundrySet],
-        status: missing.length === 0 && extra.length === 0 ? 'match' : 'divergence',
-        severity: 'critical',
-        note: missing.length > 0 || extra.length > 0
-          ? `missing=${missing.join('|')} extra=${extra.join('|')}`
-          : undefined,
-      });
-
-      // Suppress base damage check (Phase 1A invariant for attack activities
-      // with overridden damage). Without includeBase=false dnd5e adds the
-      // weapon's base die on top — Hail of Daggers becomes 4d4+8 instead of
-      // 2d4+4.
-      if (damageGoesOnAttack) {
-        const includeBase = target.damage?.includeBase;
-        out.push({
-          field: 'damage.includeBase',
-          reloaded: false,
-          foundry: includeBase === undefined ? null : !!includeBase,
-          status: includeBase === false ? 'match' : 'divergence',
-          severity: 'critical',
-          note: includeBase !== false
-            ? 'damage.includeBase!=false will add weapon base die on top of Reloaded damage'
-            : undefined,
-        });
-      }
-    }
-  }
-
-  // ----- description sync (Phase 3A) — low severity -----
-  // Compare first 100 chars of the actor item's description text against the
-  // Reloaded prose. Tolerant comparison: HTML stripped, whitespace normalized.
-  if (action.description) {
-    const actorText = stripHtml(String(item.system?.description?.value ?? ''));
-    const reloadedText = action.description.trim();
-    const actorPrefix = actorText.slice(0, 80).trim().toLowerCase();
-    const reloadedPrefix = reloadedText.slice(0, 80).trim().toLowerCase();
-    out.push({
-      field: 'description',
-      reloaded: reloadedPrefix,
-      foundry: actorPrefix,
-      status: actorPrefix === reloadedPrefix ? 'match' : 'divergence',
-      severity: 'low',
-      note: actorPrefix !== reloadedPrefix ? 'description prefix differs (likely SRD text not synced)' : undefined,
-    });
-  }
-
-  // Phase 11: declarative rule pass. Each rule in ACTIVITY_RULES decides
-  // whether it applies and what divergence to surface. As more inline checks
-  // get ported into rules, this pass grows and the inline blocks above
-  // shrink — eventually the entire compareSingleAction body becomes the
-  // ctx-build + runActivityRules call.
+  // Phase 11: declarative rule pass. Every per-activity check is now a rule
+  // in ACTIVITY_RULES; the body below is just ctx-build + rule-pass.
   const ctx: ActivityRuleContext = {
+    action,
     parsed,
     item,
     activities,
