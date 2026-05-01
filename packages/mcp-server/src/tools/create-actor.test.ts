@@ -533,11 +533,11 @@ describe('buildActivityTarget (Phase 10A.7)', () => {
     });
   });
 
-  it('writes template + affects-without-count when both are parsed (Tanglefoot pattern)', () => {
-    // Phase 10A.7 fix: when template is present, drop affects.count + choice.
-    // dnd5e/Midi treat template as target set; setting count breaks the
-    // template-prompt flow with a manual N-target picker. Parsed count
-    // becomes descriptive prose only — GM enforces the cap if it matters.
+  it('writes template + affects with count+choice (Tanglefoot pattern)', () => {
+    // Reloaded's "up to two creatures within 5 feet of one another" is a real
+    // mechanical cap — keep affects.count even when a template is present.
+    // The post-template target picker lets the player choose WHICH two
+    // creatures inside the placed circle are actually affected.
     const t = buildActivityTarget({
       damage: [],
       targetShape: {
@@ -548,7 +548,7 @@ describe('buildActivityTarget (Phase 10A.7)', () => {
     expect(t).toEqual({
       prompt: true,
       template: { type: 'circle', size: 10, units: 'ft' },
-      affects: { type: 'creature' },
+      affects: { type: 'creature', count: 2, choice: true },
     });
   });
 

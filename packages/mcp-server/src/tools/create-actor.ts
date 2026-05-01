@@ -2698,22 +2698,25 @@ export function buildActivityTarget(
   }
 
   if (shape.affects) {
-    // When a template is present, suppress affects.count and affects.choice.
-    // dnd5e + Midi treat template-targeted activities as "everyone in the area"
-    // — setting count makes the GUI prompt for a count-many manual target
-    // selection, which conflicts with the template's auto-target flow. The
-    // parsed count (e.g. Reloaded's "up to two creatures within 5 feet of one
-    // another") is descriptive prose, not a mechanic dnd5e activities model;
-    // GM enforces the cap manually if it matters at the table.
+    // Keep count + choice on the activity even when a template is present.
+    // Reloaded's "up to two creatures within 5 feet of one another" is a real
+    // mechanical cap — the player should select WHICH two creatures inside
+    // the placed template are affected. dnd5e activity GUI exposes this as
+    // "select N targets" in the post-template confirm flow.
     //
-    // UX expected (per Ben's live test of v4): click the feat → Foundry
-    // prompts to place the template → Midi auto-targets every creature inside
-    // → each rolls the save. Setting count breaks that flow.
-    const hasTemplate = !!shape.template;
+    // UX prompt order (template-place first, then target-pick) is controlled
+    // by Midi-QOL global settings, NOT activity-level fields:
+    //   Settings → Module Settings → Midi-QOL → Workflow Settings:
+    //     "Auto Target on Template" = "Always" (auto-fills targets from area)
+    //     "Place Measured Templates First" / equivalent ordering setting
+    //
+    // If the GM gets a manual-target picker BEFORE the template prompt, that
+    // flow is from Midi defaulting to manual targeting; flipping the global
+    // setting fixes it for every AOE activity, not just ours.
     target.affects = {
       type: shape.affects.type,
-      ...(!hasTemplate && shape.affects.count !== undefined ? { count: shape.affects.count } : {}),
-      ...(!hasTemplate && shape.affects.choice !== undefined ? { choice: shape.affects.choice } : {}),
+      ...(shape.affects.count !== undefined ? { count: shape.affects.count } : {}),
+      ...(shape.affects.choice !== undefined ? { choice: shape.affects.choice } : {}),
     };
   }
 
