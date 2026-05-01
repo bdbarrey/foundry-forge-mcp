@@ -260,6 +260,9 @@ describe('parseActionDescription — save-only with no damage (Tanglefoot / Thun
     const r = parseActionDescription(desc)!;
     expect(r.save).toEqual({ dc: 14, ability: 'str' });
     expect(r.damage).toEqual([]);
+    // Phase 10A: condition is parsed off the post-save prose. No duration in
+    // the snippet → only the type field is populated.
+    expect(r.condition).toEqual({ type: 'restrained' });
   });
 
   it('Thunderstone: save without damage is parsed cleanly (no false positive on "deafened")', () => {
@@ -271,5 +274,93 @@ describe('parseActionDescription — save-only with no damage (Tanglefoot / Thun
     const r = parseActionDescription(desc)!;
     expect(r.save).toEqual({ dc: 14, ability: 'con' });
     expect(r.damage).toEqual([]);
+    // "knocked prone" matches the prone pattern — and crucially "deafened" does
+    // NOT match (no "be deafened" wording), so this remains pure prone.
+    expect(r.condition).toEqual({ type: 'prone' });
+  });
+});
+
+describe('parseActionDescription — Phase 10A condition + duration parsing', () => {
+  it('"restrained for 1 minute" → 10 rounds / 60 seconds', () => {
+    const r = parseActionDescription(
+      'Each target must succeed on a DC 14 Strength saving throw or be restrained for 1 minute.',
+    )!;
+    expect(r.condition).toEqual({
+      type: 'restrained',
+      duration: { rounds: 10, seconds: 60 },
+    });
+  });
+
+  it('"poisoned until the end of its next turn" → 1 round + turnEnd specialDuration', () => {
+    const r = parseActionDescription(
+      'On a hit, the target must make a DC 13 Constitution saving throw or be poisoned until the end of its next turn.',
+    )!;
+    expect(r.condition).toEqual({
+      type: 'poisoned',
+      duration: { rounds: 1, seconds: 6, specialDuration: 'turnEnd' },
+    });
+  });
+
+  it('"frightened for 1 hour" → 600 rounds / 3600 seconds', () => {
+    const r = parseActionDescription(
+      'Each creature must succeed on a DC 17 Wisdom saving throw or be frightened for 1 hour.',
+    )!;
+    expect(r.condition).toEqual({
+      type: 'frightened',
+      duration: { rounds: 600, seconds: 3600 },
+    });
+  });
+
+  it('"paralyzed for 3 rounds" → 3 rounds / 18 seconds', () => {
+    const r = parseActionDescription(
+      'The target must succeed on a DC 15 Constitution saving throw or be paralyzed for 3 rounds.',
+    )!;
+    expect(r.condition).toEqual({
+      type: 'paralyzed',
+      duration: { rounds: 3, seconds: 18 },
+    });
+  });
+
+  it('"start of its next turn" → turnStart specialDuration variant', () => {
+    const r = parseActionDescription(
+      'The target must succeed on a DC 14 Constitution saving throw or be stunned ' +
+      'until the start of its next turn.',
+    )!;
+    expect(r.condition).toEqual({
+      type: 'stunned',
+      duration: { rounds: 1, seconds: 6, specialDuration: 'turnStart' },
+    });
+  });
+
+  it('no condition is attached when there is no save (descriptive prose only)', () => {
+    // Without a save context the parser should NOT attach a condition — would
+    // be automation noise on a save-less narrative line.
+    const r = parseActionDescription(
+      'A creature inside the web is restrained while it remains in the area.',
+    )!;
+    expect(r.condition).toBeUndefined();
+  });
+
+  it('condition is omitted when prose has only a save, no condition wording', () => {
+    const r = parseActionDescription(
+      'Each creature within 30 feet must succeed on a DC 14 Dexterity saving throw or take 2d6 fire damage.',
+    )!;
+    expect(r.save).toEqual({ dc: 14, ability: 'dex' });
+    expect(r.condition).toBeUndefined();
+  });
+
+  it('grappled with no duration falls back to no duration field', () => {
+    const r = parseActionDescription(
+      'On a failed DC 13 Strength saving throw the target is grappled.',
+    )!;
+    // "is grappled" doesn't match "be grappled" — but the grapple pattern
+    // accepts the standard "or be grappled" form. Test the common form too:
+    const r2 = parseActionDescription(
+      'On a hit, target must succeed on a DC 13 Strength saving throw or be grappled.',
+    )!;
+    expect(r2.condition).toEqual({ type: 'grappled' });
+    // The "is grappled" prose without "be" doesn't match (intentional — the
+    // parser anchors to "be <condition>" for condition application clauses).
+    expect(r.condition).toBeUndefined();
   });
 });

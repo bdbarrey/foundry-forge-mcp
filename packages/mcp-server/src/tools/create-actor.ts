@@ -1467,6 +1467,13 @@ export class CreateActorTools {
     // feat is description-only — DM has to remember to call for a saving throw
     // and apply effects manually. Damage rides the save activity when present
     // (matches the buildItemActivityUpdate damageGoesOnSave path).
+    //
+    // Phase 10A: when the action also has a parsed condition (Tanglefoot →
+    // restrained, Thunderstone → prone), build an item active effect carrying
+    // `statuses: [<condition>]` and link it from the save activity's
+    // `effects[]` so Midi auto-applies the Foundry condition on save fail.
+    // Mirrors the DDB-imported Wolf Bite pattern (Bite save → prone effect).
+    const itemEffects: any[] = [];
     if (parsed?.save) {
       const activityId = genActivityId();
       const saveActivity: any = {
@@ -1491,7 +1498,29 @@ export class CreateActorTools {
           ...(parsed.range.long ? { long: parsed.range.long } : {}),
         };
       }
+      if (parsed.condition) {
+        const effectDoc = buildConditionEffect(parsed.condition);
+        itemEffects.push(effectDoc);
+        // Activity-side link: { _id, level: {min,max}, onSave }. onSave: false
+        // means "do NOT apply on a successful save" — the effect lands only
+        // when the target fails. Matches Wolf Bite's prone-on-fail pattern.
+        saveActivity.effects = [
+          { _id: effectDoc._id, level: { min: null, max: null }, onSave: false },
+        ];
+      }
       system.activities = { [activityId]: saveActivity };
+    }
+
+    // Phase 10A.3: item-level Midi flag for save-or-half items. CPR's pattern
+    // for save-only items (Vampire Weakness's Sunlight damage etc.) carries
+    // `flags.midiProperties.saveDamage: "halfdam"`. Without this, Midi's GUI
+    // for the save defaults to "no damage on save" even when damage.onSave is
+    // "half" at the activity level. One-line write keeps the GUI honest.
+    const itemFlags: Record<string, any> = {
+      'foundry-forge-mcp': { source: 'reloaded-scratch-action' },
+    };
+    if (parsed?.save?.onSuccess === 'half' && parsed.damage.length > 0) {
+      itemFlags.midiProperties = { saveDamage: 'halfdam' };
     }
 
     return {
@@ -1503,9 +1532,8 @@ export class CreateActorTools {
       // candidate URLs and rolling forward when one 404s.
       img: await resolveFeatIcon(finalName, parsed),
       system,
-      flags: {
-        'foundry-forge-mcp': { source: 'reloaded-scratch-action' },
-      },
+      ...(itemEffects.length > 0 ? { effects: itemEffects } : {}),
+      flags: itemFlags,
     };
   }
 
@@ -2466,6 +2494,91 @@ function genActivityId(): string {
   let id = '';
   for (let i = 0; i < 16; i++) id += chars[Math.floor(Math.random() * chars.length)];
   return id;
+}
+
+// Same shape as activity IDs — Foundry uses one 16-char alphanumeric format
+// across documents and embedded docs. Separate helper just for call-site clarity.
+function genEffectId(): string {
+  return genActivityId();
+}
+
+/**
+ * Foundry's bundled SVG icons for the status conditions we apply on save-fail.
+ * These ship with core Foundry under `icons/svg/`, so they render even when
+ * the user's icon-pack modules aren't installed. Keys mirror the
+ * ConditionType union from action-description.ts.
+ */
+const CONDITION_ICONS: Record<string, string> = {
+  blinded: 'icons/svg/blind.svg',
+  charmed: 'icons/svg/heart.svg',
+  deafened: 'icons/svg/sound.svg',
+  frightened: 'icons/svg/terror.svg',
+  grappled: 'icons/svg/net.svg',
+  incapacitated: 'icons/svg/silenced.svg',
+  paralyzed: 'icons/svg/paralysis.svg',
+  petrified: 'icons/svg/statue.svg',
+  poisoned: 'icons/svg/poison.svg',
+  prone: 'icons/svg/falling.svg',
+  restrained: 'icons/svg/net.svg',
+  stunned: 'icons/svg/daze.svg',
+  unconscious: 'icons/svg/unconscious.svg',
+};
+
+/**
+ * Build a Foundry ActiveEffect document for a save-fail condition application.
+ * Mirrors the DDB-imported Wolf Bite "Status: Prone" effect shape: transfer
+ * disabled (so the effect only fires when the activity uses it, not passively
+ * on item add), DAE stackable=noneNameOnly (one instance per condition),
+ * Midi forceCEOff (use Foundry's native condition system, not Convenient
+ * Effects which can shadow the status).
+ *
+ * Caller links this effect from the save activity via `effects: [{_id, ...}]`
+ * so Midi's save-resolution flow finds it on a failed save.
+ */
+export function buildConditionEffect(
+  condition: import('../parsers/action-description.js').ParsedCondition,
+): Record<string, any> {
+  const id = genEffectId();
+  const titleCase = condition.type[0].toUpperCase() + condition.type.slice(1);
+  const effect: Record<string, any> = {
+    _id: id,
+    name: titleCase,
+    statuses: [condition.type],
+    img: CONDITION_ICONS[condition.type] ?? 'icons/svg/aura.svg',
+    type: 'base',
+    system: {},
+    changes: [],
+    disabled: false,
+    transfer: false,
+    flags: {
+      dae: {
+        transfer: false,
+        stackable: 'noneNameOnly',
+        // specialDuration mirrors DAE's tag list. "turnEnd" / "turnStart" tell
+        // Times-Up to expire the effect at the end/start of the source's next
+        // turn. Empty array (the default) means rely on `duration.seconds` /
+        // `duration.rounds` for expiry.
+        specialDuration: condition.duration?.specialDuration
+          ? [condition.duration.specialDuration]
+          : [],
+      },
+      'midi-qol': { forceCEOff: true },
+    },
+  };
+
+  if (condition.duration && (condition.duration.rounds || condition.duration.seconds)) {
+    effect.duration = {
+      startTime: null,
+      seconds: condition.duration.seconds ?? null,
+      rounds: condition.duration.rounds ?? null,
+      turns: null,
+      startRound: null,
+      startTurn: null,
+      combat: null,
+    };
+  }
+
+  return effect;
 }
 
 function damagePartPayload(d: { formula: string; type: string }) {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload } from './create-actor.js';
-import type { ParsedAction } from '../parsers/action-description.js';
+import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload, buildConditionEffect } from './create-actor.js';
+import type { ParsedAction, ParsedCondition } from '../parsers/action-description.js';
 
 describe('buildItemActivityUpdate', () => {
   it('writes save+damage+onSave for a save-only activity (Firebomb shape)', () => {
@@ -427,5 +427,65 @@ describe('buildUsesPayload (Phase 8 dnd5e system.uses shape)', () => {
       spent: 0,
       recovery: [{ period: 'recharge', type: 'recoverAll', formula: '5' }],
     });
+  });
+});
+
+describe('buildConditionEffect (Phase 10A)', () => {
+  it('builds a Foundry ActiveEffect doc with statuses + transfer:false + DAE flags', () => {
+    const eff = buildConditionEffect({ type: 'restrained' });
+    expect(eff.name).toBe('Restrained');
+    expect(eff.statuses).toEqual(['restrained']);
+    expect(eff.transfer).toBe(false);
+    expect(eff.disabled).toBe(false);
+    expect(eff.type).toBe('base');
+    // 16-char activity-style id
+    expect(eff._id).toMatch(/^[A-Za-z0-9]{16}$/);
+    // DAE config: stackable noneNameOnly, transfer mirrored, no specialDuration
+    expect(eff.flags.dae.stackable).toBe('noneNameOnly');
+    expect(eff.flags.dae.transfer).toBe(false);
+    expect(eff.flags.dae.specialDuration).toEqual([]);
+    // Midi: forceCEOff so CE doesn't shadow the native Foundry status
+    expect(eff.flags['midi-qol'].forceCEOff).toBe(true);
+    // No duration field when condition has no duration
+    expect(eff.duration).toBeUndefined();
+  });
+
+  it('writes a duration block when condition has rounds + seconds', () => {
+    const eff = buildConditionEffect({
+      type: 'poisoned',
+      duration: { rounds: 10, seconds: 60 },
+    });
+    expect(eff.duration).toEqual({
+      startTime: null,
+      seconds: 60,
+      rounds: 10,
+      turns: null,
+      startRound: null,
+      startTurn: null,
+      combat: null,
+    });
+  });
+
+  it('writes specialDuration tag for end-of-next-turn conditions', () => {
+    const eff = buildConditionEffect({
+      type: 'stunned',
+      duration: { rounds: 1, seconds: 6, specialDuration: 'turnEnd' },
+    });
+    expect(eff.flags.dae.specialDuration).toEqual(['turnEnd']);
+    // duration.rounds still set so Times-Up has a fallback expiry signal even
+    // if specialDuration handling differs across module versions.
+    expect(eff.duration?.rounds).toBe(1);
+  });
+
+  it('uses a Foundry SVG icon for known conditions', () => {
+    expect(buildConditionEffect({ type: 'prone' }).img).toBe('icons/svg/falling.svg');
+    expect(buildConditionEffect({ type: 'blinded' }).img).toBe('icons/svg/blind.svg');
+    expect(buildConditionEffect({ type: 'restrained' }).img).toBe('icons/svg/net.svg');
+  });
+
+  it('two effects for the same condition get distinct ids (random 16-char)', () => {
+    const a = buildConditionEffect({ type: 'restrained' });
+    const b = buildConditionEffect({ type: 'restrained' });
+    expect(a._id).not.toBe(b._id);
   });
 });

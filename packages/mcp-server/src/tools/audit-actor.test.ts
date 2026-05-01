@@ -498,3 +498,147 @@ describe('compareActor — summary aggregation', () => {
     expect(audit.summary.lowDivergences).toBeGreaterThanOrEqual(1); // alignment
   });
 });
+
+describe('compareActor — Phase 10A save.condition link', () => {
+  it('clean match: save.effects[] points at item.effects[] with the right status', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Tanglefoot',
+        description: 'A sticky bomb',
+        parsed: {
+          damage: [],
+          save: { dc: 14, ability: 'str' },
+          condition: { type: 'restrained' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Tanglefoot', type: 'feat',
+      system: {
+        description: { value: '<p>A sticky bomb</p>' },
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['str'], dc: { calculation: '', formula: '14' } },
+            effects: [{ _id: 'effrestrained1', level: { min: null, max: null }, onSave: false }],
+          },
+        },
+      },
+      effects: [{
+        _id: 'effrestrained1',
+        name: 'Restrained',
+        statuses: ['restrained'],
+        transfer: false,
+      }],
+    }]);
+    const audit = compareActor(actor, sb);
+    const tf = audit.actions.find(a => a.name === 'Tanglefoot')!;
+    expect(tf.divergences.find(d => d.field === 'save.condition')).toBeUndefined();
+  });
+
+  it('flags missing link as medium with no-link foundry value', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Tanglefoot',
+        description: 'A sticky bomb',
+        parsed: {
+          damage: [],
+          save: { dc: 14, ability: 'str' },
+          condition: { type: 'restrained' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Tanglefoot', type: 'feat',
+      system: {
+        description: { value: '<p>A sticky bomb</p>' },
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['str'], dc: { calculation: '', formula: '14' } },
+            // no effects[] link — older builds before Phase 10A
+          },
+        },
+      },
+      // no item-side effects either
+    }]);
+    const audit = compareActor(actor, sb);
+    const tf = audit.actions.find(a => a.name === 'Tanglefoot')!;
+    const cond = tf.divergences.find(d => d.field === 'save.condition');
+    expect(cond).toBeDefined();
+    expect(cond!.severity).toBe('medium');
+    expect(cond!.foundry).toBe('no-link');
+    expect(cond!.note).toContain("statuses: ['restrained']");
+  });
+
+  it('flags status-mismatch when link is present but the linked effect carries a different condition', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Tanglefoot',
+        description: 'A sticky bomb',
+        parsed: {
+          damage: [],
+          save: { dc: 14, ability: 'str' },
+          condition: { type: 'restrained' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Tanglefoot', type: 'feat',
+      system: {
+        description: { value: '<p>A sticky bomb</p>' },
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['str'], dc: { calculation: '', formula: '14' } },
+            effects: [{ _id: 'effwrong1', level: { min: null, max: null }, onSave: false }],
+          },
+        },
+      },
+      effects: [{
+        _id: 'effwrong1',
+        name: 'Prone',
+        statuses: ['prone'], // wrong condition
+        transfer: false,
+      }],
+    }]);
+    const audit = compareActor(actor, sb);
+    const tf = audit.actions.find(a => a.name === 'Tanglefoot')!;
+    const cond = tf.divergences.find(d => d.field === 'save.condition');
+    expect(cond).toBeDefined();
+    expect(cond!.severity).toBe('medium');
+    // Note distinguishes "no link" from "link present, wrong status".
+    expect(cond!.note).toContain('linked effect(s) present');
+    expect(cond!.note).toContain("statuses: ['restrained']");
+    expect(cond!.foundry).toMatchObject({
+      linkedEffects: [{ _id: 'effwrong1', statuses: ['prone'] }],
+    });
+  });
+
+  it('does NOT add a save.condition divergence when parsed.condition is undefined', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Firebomb',
+        description: 'pure damage save',
+        parsed: {
+          damage: [{ formula: '2d6', type: 'fire' }],
+          save: { dc: 14, ability: 'dex', onSuccess: 'half' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Firebomb', type: 'consumable', system: {
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['dex'], dc: { calculation: '', formula: '14' } },
+            damage: { parts: [{ custom: { enabled: true, formula: '2d6' }, types: ['fire'] }], onSave: 'half' },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const fb = audit.actions.find(a => a.name === 'Firebomb')!;
+    expect(fb.divergences.find(d => d.field === 'save.condition')).toBeUndefined();
+  });
+});

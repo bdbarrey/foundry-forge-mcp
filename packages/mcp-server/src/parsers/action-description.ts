@@ -11,6 +11,52 @@
 export type AttackType = 'melee' | 'ranged';
 export type AbilityKey = 'str' | 'dex' | 'con' | 'int' | 'wis' | 'cha';
 
+/**
+ * dnd5e 2024 / Foundry condition statuses recognized by the parser. When a
+ * Reloaded action prose says "or be restrained until ...", the parser emits a
+ * ParsedAction.condition that the build pipeline wires into a Midi save-link
+ * (activity.effects[] + item active effect with statuses[]). Mirrors Foundry's
+ * native condition system so the Foundry status icon lights up on save fail.
+ */
+export type ConditionType =
+  | 'blinded'
+  | 'charmed'
+  | 'deafened'
+  | 'frightened'
+  | 'grappled'
+  | 'incapacitated'
+  | 'paralyzed'
+  | 'petrified'
+  | 'poisoned'
+  | 'prone'
+  | 'restrained'
+  | 'stunned'
+  | 'unconscious';
+
+/**
+ * Parsed duration for a condition application. `rounds` is the combat-rounds
+ * count (10 rounds = 1 minute in 5e). `specialDuration` (DAE-style) handles
+ * "until end/start of next turn" patterns precisely — mapped to Foundry's
+ * Times-Up specialDuration tags at build time.
+ */
+export interface ParsedConditionDuration {
+  /** Combat rounds. 1 = "until end of next turn", 10 = "1 minute". */
+  rounds?: number;
+  /** Wall-clock seconds. 60 = "1 minute", 3600 = "1 hour". Mirrors rounds. */
+  seconds?: number;
+  /**
+   * DAE / Times-Up specialDuration tag. "turnEnd" = end of source's next turn,
+   * "turnStart" = start of source's next turn, "turnEndSource" / "turnStartSource"
+   * = ends at the end/start of the source creature's turn.
+   */
+  specialDuration?: 'turnEnd' | 'turnStart' | 'turnEndSource' | 'turnStartSource';
+}
+
+export interface ParsedCondition {
+  type: ConditionType;
+  duration?: ParsedConditionDuration;
+}
+
 export interface DamagePart {
   /** Dice formula as printed, e.g. "2d8 + 4" or "4d6". */
   formula: string;
@@ -34,6 +80,14 @@ export interface ParsedAction {
   versatile?: DamagePart;
   /** Primary save the target makes (if any). */
   save?: { dc: number; ability: AbilityKey; onSuccess?: 'half' };
+  /**
+   * Condition applied on save fail (Tanglefoot → restrained, Smokestick →
+   * blinded inside the area, Crushing Blow → prone). When set, the build
+   * pipeline emits an active effect on the item with `statuses: [type]` and
+   * links it from the save activity's `effects[]` so Midi auto-applies the
+   * Foundry condition on a failed save.
+   */
+  condition?: ParsedCondition;
   /** Usage limit like "(1/Day)", "(Recharge 5-6)". */
   usage?:
     | { count: number; period: 'day' | 'long-rest' | 'short-rest' | 'turn' }
@@ -163,6 +217,16 @@ export function parseActionDescription(desc: string): ParsedAction | null {
     }
   }
 
+  // Condition applied on save-fail. Only attached when the action also has a
+  // save — a bare "X is restrained" without a save is descriptive prose, not
+  // an automatable application. Order matches the ConditionType union; the
+  // first match wins (longest/most-specific synonyms first, e.g. "knocked
+  // prone" before "prone").
+  if (out.save) {
+    const condition = parseCondition(text);
+    if (condition) out.condition = condition;
+  }
+
   // Usage — printed in parens on the feature NAME or at the start of the
   // description. Reloaded puts them in the name (e.g. "Virulent Miasma
   // (1/Day)") — the caller can pass that name-parenthetical text in.
@@ -223,4 +287,90 @@ function* matchDamageParts(scope: string): Generator<DamagePart> {
 
 function normalizeFormula(raw: string): string {
   return raw.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Patterns that resolve to a Foundry condition status. Ordered: longest /
+ * most-specific synonyms first so "knocked prone" matches before bare "prone",
+ * and "frightened of" before "frightened". Each pattern is evaluated against
+ * the post-save scope of the description (the prose introducing the save's
+ * consequences), not the whole text.
+ */
+const CONDITION_PATTERNS: Array<{ regex: RegExp; type: ConditionType }> = [
+  { regex: /knocked\s+prone|fall(?:s)?\s+prone|falls?\s+prone\b/i, type: 'prone' },
+  { regex: /\bbe\s+(?:left\s+)?paralyzed\b/i, type: 'paralyzed' },
+  { regex: /\bbe\s+(?:left\s+)?petrified\b/i, type: 'petrified' },
+  { regex: /\bbe\s+(?:left\s+)?stunned\b/i, type: 'stunned' },
+  { regex: /\bbe\s+(?:left\s+)?incapacitated\b/i, type: 'incapacitated' },
+  { regex: /\bbe\s+(?:left\s+)?unconscious\b/i, type: 'unconscious' },
+  { regex: /\bbe\s+(?:left\s+)?(?:magically\s+)?frightened\b/i, type: 'frightened' },
+  { regex: /\bbe\s+(?:left\s+)?(?:magically\s+)?charmed\b/i, type: 'charmed' },
+  { regex: /\bbe\s+(?:left\s+)?(?:magically\s+)?restrained\b/i, type: 'restrained' },
+  { regex: /\bbe\s+(?:left\s+)?(?:magically\s+)?grappled\b/i, type: 'grappled' },
+  { regex: /\bbe\s+(?:left\s+)?blinded\b/i, type: 'blinded' },
+  { regex: /\bbe\s+(?:left\s+)?deafened\b/i, type: 'deafened' },
+  { regex: /\bbe\s+poisoned\b/i, type: 'poisoned' },
+];
+
+/**
+ * Detect "or be <condition> [until/for ...]" clauses in action prose.
+ * Anchors to the save context — caller has already verified `out.save` exists.
+ *
+ * Examples handled:
+ *   "must succeed on a DC 14 Dex save or be restrained for 1 minute"
+ *   "DC 13 Strength save or fall prone"
+ *   "or be poisoned until the end of its next turn"
+ *   "or be charmed for 24 hours"
+ */
+function parseCondition(text: string): ParsedCondition | null {
+  for (const { regex, type } of CONDITION_PATTERNS) {
+    const m = text.match(regex);
+    if (!m) continue;
+    // Slice the prose AFTER the matched condition word so duration parsing
+    // doesn't pick up unrelated durations elsewhere in the description.
+    const tail = text.slice((m.index ?? 0) + m[0].length);
+    const duration = parseConditionDuration(tail);
+    return duration ? { type, duration } : { type };
+  }
+  return null;
+}
+
+/**
+ * Parse the duration tail after a condition word. Recognized:
+ *   "until the end of <its | the target's | the creature's> next turn"  → 1 round + turnEnd
+ *   "until the start of <its | ...> next turn"                           → 1 round + turnStart
+ *   "for 1 minute"  → 10 rounds / 60 seconds
+ *   "for 1 hour"    → 600 rounds / 3600 seconds
+ *   "for N rounds"  → N rounds
+ *   anything else   → undefined (caller leaves duration off the effect, lets
+ *                     Times-Up rely on its defaults)
+ */
+function parseConditionDuration(tail: string): ParsedConditionDuration | undefined {
+  // "until the end of its next turn" — most-common 5e cadence.
+  if (/until\s+(?:the\s+)?end\s+of\s+(?:its|the\s+(?:target|creature|target's|creature's)|[a-z]+(?:'s)?)\s+next\s+turn/i.test(tail)) {
+    return { rounds: 1, seconds: 6, specialDuration: 'turnEnd' };
+  }
+  if (/until\s+(?:the\s+)?start\s+of\s+(?:its|the\s+(?:target|creature|target's|creature's)|[a-z]+(?:'s)?)\s+next\s+turn/i.test(tail)) {
+    return { rounds: 1, seconds: 6, specialDuration: 'turnStart' };
+  }
+
+  const minutes = tail.match(/for\s+(\d+)\s+minute/i);
+  if (minutes) {
+    const n = parseInt(minutes[1], 10);
+    return { rounds: n * 10, seconds: n * 60 };
+  }
+
+  const hours = tail.match(/for\s+(\d+)\s+hour/i);
+  if (hours) {
+    const n = parseInt(hours[1], 10);
+    return { rounds: n * 600, seconds: n * 3600 };
+  }
+
+  const rounds = tail.match(/for\s+(\d+)\s+rounds?/i);
+  if (rounds) {
+    const n = parseInt(rounds[1], 10);
+    return { rounds: n, seconds: n * 6 };
+  }
+
+  return undefined;
 }

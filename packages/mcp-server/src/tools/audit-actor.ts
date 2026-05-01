@@ -87,6 +87,12 @@ export interface ActorItemSnapshot {
   type?: string;
   system?: any;
   flags?: any;
+  /**
+   * Item-side ActiveEffect documents. Used by Phase 10A to verify that a save
+   * activity's `effects[]` link points at a real item effect carrying the
+   * expected condition status. Module's getCharacterInfo passes these through.
+   */
+  effects?: any[];
 }
 
 const SKILL_NAME_TO_ABBR: Record<string, string> = {
@@ -772,6 +778,51 @@ function compareSingleAction(
         status: ability === parsed.save.ability ? 'match' : 'divergence',
         severity: 'critical',
       });
+
+      // ----- Phase 10A: condition link on save fail ---------------------
+      // When the parsed action says "or be restrained/prone/etc.", the build
+      // pipeline writes an item-side ActiveEffect with statuses=[<cond>] and
+      // links it from the save activity's effects[]. Audit verifies both
+      // halves are present so Midi auto-applies the Foundry condition on
+      // save fail. Severity medium — table-side workaround is the DM
+      // manually applies the status, but it's a real automation gap.
+      if (parsed.condition) {
+        const linkedEffectIds: string[] = Array.isArray(saveAct.effects)
+          ? (saveAct.effects as any[])
+              .map(e => (e && typeof e === 'object' ? e._id ?? e.id : null))
+              .filter((id): id is string => typeof id === 'string')
+          : [];
+        const itemEffectsArr: any[] = Array.isArray(item.effects) ? item.effects : [];
+        const itemEffectsById = new Map<string, any>();
+        for (const eff of itemEffectsArr) {
+          const id = eff?._id ?? eff?.id;
+          if (typeof id === 'string') itemEffectsById.set(id, eff);
+        }
+        const linkedEffects = linkedEffectIds
+          .map(id => itemEffectsById.get(id))
+          .filter(Boolean);
+        const hasMatchingStatus = linkedEffects.some(eff => {
+          const statuses = Array.isArray(eff?.statuses) ? eff.statuses.map(String) : [];
+          return statuses.includes(parsed.condition!.type);
+        });
+        if (!hasMatchingStatus) {
+          // Distinguish "no link at all" from "link present but condition mismatch"
+          // so the divergence note is actionable.
+          const note = linkedEffects.length === 0
+            ? `save activity has no effects[] link; build pipeline should attach an item ActiveEffect with statuses: ['${parsed.condition.type}']`
+            : `linked effect(s) present but none carries statuses: ['${parsed.condition.type}']`;
+          out.push({
+            field: 'save.condition',
+            reloaded: { type: parsed.condition.type },
+            foundry: linkedEffects.length === 0
+              ? 'no-link'
+              : { linkedEffects: linkedEffects.map(e => ({ _id: e._id ?? e.id, statuses: e.statuses ?? [] })) },
+            status: 'divergence',
+            severity: 'medium',
+            note,
+          });
+        }
+      }
     }
   }
 
