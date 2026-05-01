@@ -2598,6 +2598,16 @@ export function buildConditionEffect(
     changes: [],
     disabled: false,
     transfer: false,
+    // The DDB-imported Wolf Bite's Status: Prone effect carries these. Live
+    // verification against SmokeTest-10A-v2 (e0c1399) showed that omitting
+    // them causes Foundry's createEmbeddedDocuments to silently strip the
+    // entire effects array on the new item — even when name/statuses/_id
+    // are valid. Mirror the DDB shape exactly: origin null (effect isn't
+    // sourced from another doc), sort 0, blank tint + description.
+    origin: null,
+    sort: 0,
+    tint: '#ffffff',
+    description: '',
     flags: {
       dae: {
         transfer: false,
@@ -2611,6 +2621,7 @@ export function buildConditionEffect(
           : [],
       },
       'midi-qol': { forceCEOff: true },
+      core: {},
     },
   };
 

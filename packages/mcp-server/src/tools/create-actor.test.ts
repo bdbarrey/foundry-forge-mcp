@@ -448,6 +448,14 @@ describe('buildConditionEffect (Phase 10A)', () => {
     expect(eff.flags['midi-qol'].forceCEOff).toBe(true);
     // No duration field when condition has no duration
     expect(eff.duration).toBeUndefined();
+    // 10A.5 fix: scaffold fields the DDB Wolf Bite carries. Without these,
+    // Foundry's createEmbeddedDocuments silently strips the effect during
+    // item creation (verified live against SmokeTest-10A-v2 build).
+    expect(eff.origin).toBeNull();
+    expect(eff.sort).toBe(0);
+    expect(eff.tint).toBe('#ffffff');
+    expect(eff.description).toBe('');
+    expect(eff.flags.core).toEqual({});
   });
 
   it('writes a duration block when condition has rounds + seconds', () => {
