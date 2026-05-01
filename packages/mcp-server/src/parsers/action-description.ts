@@ -415,6 +415,12 @@ function parseTargetShape(text: string, parsed: ParsedAction): ParsedTargetShape
     }
   }
 
+  // (Reverted Phase 10C.2 attempt at implicit-circle parsing — "within X
+  // feet of point/impact/etc." prose. Decision 2026-04-29: regex-extending
+  // the parser per Reloaded prose variant doesn't scale. Pivoting to LLM-
+  // driven build interpretation; see reference_create_actor_option3_handoff.md
+  // for the design.)
+
   // Affects count — "up to N creatures", "up to N targets", "one creature",
   // "each creature in (the area|that area)". Word-form (one/two/three) and
   // digit-form both supported.
