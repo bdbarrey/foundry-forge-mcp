@@ -57,6 +57,52 @@ export interface ParsedCondition {
   duration?: ParsedConditionDuration;
 }
 
+/**
+ * Area template shapes recognized by dnd5e activity targeting. Maps directly to
+ * `target.template.type` on dnd5e activities. "circle" = 5e radius, "sphere" =
+ * 3D radius (rare, mostly clouds/fog), "cylinder" = vertical column.
+ */
+export type TemplateShape = 'circle' | 'cone' | 'line' | 'cube' | 'sphere' | 'cylinder';
+
+export interface ParsedTargetTemplate {
+  shape: TemplateShape;
+  /** Size in feet — radius for circle/sphere, length for cone/line/cube. */
+  size: number;
+  /** Optional width in feet (lines only; dnd5e default is 5). */
+  width?: number;
+}
+
+export interface ParsedTargetAffects {
+  /**
+   * Target category. "creature" matches any creature; "enemy"/"ally" used
+   * when the prose explicitly limits ("each enemy creature within...").
+   */
+  type: 'creature' | 'enemy' | 'ally' | 'object' | 'self' | 'space';
+  /**
+   * Specific target count when prose enumerates ("up to two creatures",
+   * "one target"). Omit for "each creature in the area" patterns where the
+   * template defines the count.
+   */
+  count?: number;
+  /**
+   * True when the caster picks WHICH targets are affected (e.g. "up to two
+   * creatures of your choice"). False/undefined for "each creature in area".
+   */
+  choice?: boolean;
+}
+
+/**
+ * Parsed targeting shape from action prose. Drives Phase 10A.7 activity-side
+ * `target.template` + `target.affects` writes so Midi prompts for the right
+ * template (circle/cone/etc.) and auto-targets tokens inside it. Without this,
+ * Tanglefoot's "10-foot radius" prose gets lost — the activity ends up as a
+ * single-creature target and the GM has to manually draw a template.
+ */
+export interface ParsedTargetShape {
+  template?: ParsedTargetTemplate;
+  affects?: ParsedTargetAffects;
+}
+
 export interface DamagePart {
   /** Dice formula as printed, e.g. "2d8 + 4" or "4d6". */
   formula: string;
@@ -88,6 +134,13 @@ export interface ParsedAction {
    * Foundry condition on a failed save.
    */
   condition?: ParsedCondition;
+  /**
+   * Targeting shape: area template (radius/cone/line/etc.) and/or affected
+   * target type/count. When set, Phase 10A.7 build path writes
+   * `target.template` + `target.affects` so Midi prompts for the right
+   * template and auto-targets the tokens inside.
+   */
+  targetShape?: ParsedTargetShape;
   /** Usage limit like "(1/Day)", "(Recharge 5-6)". */
   usage?:
     | { count: number; period: 'day' | 'long-rest' | 'short-rest' | 'turn' }
@@ -227,6 +280,16 @@ export function parseActionDescription(desc: string): ParsedAction | null {
     if (condition) out.condition = condition;
   }
 
+  // Targeting shape — area template + affects count. Detected from prose like
+  // "10-foot radius", "60-foot cone", "each creature in the area", "up to two
+  // creatures". Independent of `range` (which is the throw distance to the
+  // target POINT). Tanglefoot has BOTH: range=30 (throw distance) +
+  // template.circle/10 (radius around the impact point).
+  const targetShape = parseTargetShape(text, out);
+  if (targetShape.template || targetShape.affects) {
+    out.targetShape = targetShape;
+  }
+
   // Usage — printed in parens on the feature NAME or at the start of the
   // description. Reloaded puts them in the name (e.g. "Virulent Miasma
   // (1/Day)") — the caller can pass that name-parenthetical text in.
@@ -287,6 +350,81 @@ function* matchDamageParts(scope: string): Generator<DamagePart> {
 
 function normalizeFormula(raw: string): string {
   return raw.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Word-form numbers used in prose like "up to two creatures". Limited to small
+ * integers — anything past five tends to be written as digits ("up to 6").
+ */
+const WORD_NUMBERS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8,
+  nine: 9, ten: 10,
+};
+
+/**
+ * Parse area template + affects count from action prose. Caller passes the
+ * already-parsed action so we can disambiguate (e.g. melee attacks default to
+ * single-creature target without needing prose to say so explicitly).
+ */
+function parseTargetShape(text: string, parsed: ParsedAction): ParsedTargetShape {
+  const out: ParsedTargetShape = {};
+
+  // Template shape — "X-foot radius/sphere/cone/line/cube/cylinder". A circle
+  // shape covers both "radius" (5e default 2D) and "sphere" (3D) — dnd5e
+  // distinguishes them at the template-renderer level. We map "radius" to
+  // circle (most common at-the-table) and "sphere" to sphere when explicit.
+  const templateMatch =
+    text.match(/(\d+)-foot\s+(radius|sphere|cone|line|cube|cylinder)/i) ??
+    text.match(/(\d+)\s*ft\.?\s+(radius|sphere|cone|line|cube|cylinder)/i);
+  if (templateMatch) {
+    const size = parseInt(templateMatch[1], 10);
+    const word = templateMatch[2].toLowerCase();
+    const shape: TemplateShape = word === 'radius' ? 'circle' : (word as TemplateShape);
+    out.template = { shape, size };
+    // Lines have an implicit width — "60-foot line" is 5ft wide by default.
+    // Reloaded sometimes specifies "X feet wide" explicitly; pick that up.
+    if (shape === 'line') {
+      const widthMatch = text.match(/(\d+)\s*(?:feet|ft\.?)\s+wide/i);
+      out.template.width = widthMatch ? parseInt(widthMatch[1], 10) : 5;
+    }
+  }
+
+  // Affects count — "up to N creatures", "up to N targets", "one creature",
+  // "each creature in (the area|that area)". Word-form (one/two/three) and
+  // digit-form both supported.
+  const upToWord = text.match(/up\s+to\s+(one|two|three|four|five|six|seven|eight|nine|ten)\s+(creatures?|targets?|enem(?:y|ies))/i);
+  const upToDigit = text.match(/up\s+to\s+(\d+)\s+(creatures?|targets?|enem(?:y|ies))/i);
+  if (upToWord) {
+    out.affects = {
+      type: /enem/i.test(upToWord[2]) ? 'enemy' : 'creature',
+      count: WORD_NUMBERS[upToWord[1].toLowerCase()],
+      choice: true,
+    };
+  } else if (upToDigit) {
+    out.affects = {
+      type: /enem/i.test(upToDigit[2]) ? 'enemy' : 'creature',
+      count: parseInt(upToDigit[1], 10),
+      choice: true,
+    };
+  } else if (/each\s+(?:creature|enemy|ally|target)\s+(?:in\s+(?:the|that)\s+area|within)/i.test(text)) {
+    // "each creature in the area" — all targets inside template, no count cap.
+    const enemyOnly = /each\s+enemy/i.test(text);
+    const allyOnly = /each\s+ally/i.test(text);
+    out.affects = {
+      type: enemyOnly ? 'enemy' : (allyOnly ? 'ally' : 'creature'),
+    };
+  } else if (/\bone\s+(?:creature|target|enemy)\b/i.test(text) && !out.template) {
+    // Single-target action ("one creature"). Skip when a template was found —
+    // template-shaped actions describe their targets via "each creature in area".
+    out.affects = { type: 'creature', count: 1 };
+  } else if (parsed.attackBonus !== undefined && !out.template) {
+    // Attack rolls without explicit prose default to single creature (Bite,
+    // Longsword, etc.). Save-only actions without prose stay null — the parser
+    // can't infer single-vs-area without a template or wording cue.
+    out.affects = { type: 'creature', count: 1 };
+  }
+
+  return out;
 }
 
 /**

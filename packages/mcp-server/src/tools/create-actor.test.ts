@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload, buildConditionEffect } from './create-actor.js';
+import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload, buildConditionEffect, buildActivityTarget } from './create-actor.js';
 import type { ParsedAction, ParsedCondition } from '../parsers/action-description.js';
 
 describe('buildItemActivityUpdate', () => {
@@ -495,5 +495,81 @@ describe('buildConditionEffect (Phase 10A)', () => {
     const a = buildConditionEffect({ type: 'restrained' });
     const b = buildConditionEffect({ type: 'restrained' });
     expect(a._id).not.toBe(b._id);
+  });
+});
+
+describe('buildActivityTarget (Phase 10A.7)', () => {
+  it('returns null for parsed action with no targetShape', () => {
+    expect(buildActivityTarget({ damage: [] })).toBeNull();
+  });
+
+  it('writes target.template for circle radius', () => {
+    const t = buildActivityTarget({
+      damage: [],
+      targetShape: { template: { shape: 'circle', size: 10 } },
+    });
+    expect(t).toEqual({
+      prompt: true,
+      template: { type: 'circle', size: 10, units: 'ft' },
+    });
+  });
+
+  it('writes target.template for line with width', () => {
+    const t = buildActivityTarget({
+      damage: [],
+      targetShape: { template: { shape: 'line', size: 100, width: 5 } },
+    });
+    expect(t!.template).toEqual({ type: 'line', size: 100, units: 'ft', width: 5 });
+  });
+
+  it('writes target.affects with count + choice for "up to two creatures"', () => {
+    const t = buildActivityTarget({
+      damage: [],
+      targetShape: { affects: { type: 'creature', count: 2, choice: true } },
+    });
+    expect(t).toEqual({
+      prompt: true,
+      affects: { type: 'creature', count: 2, choice: true },
+    });
+  });
+
+  it('writes both template + affects when both are parsed (Tanglefoot pattern)', () => {
+    const t = buildActivityTarget({
+      damage: [],
+      targetShape: {
+        template: { shape: 'circle', size: 10 },
+        affects: { type: 'creature', count: 2, choice: true },
+      },
+    });
+    expect(t).toEqual({
+      prompt: true,
+      template: { type: 'circle', size: 10, units: 'ft' },
+      affects: { type: 'creature', count: 2, choice: true },
+    });
+  });
+
+  it('writes affects with no count for "each creature in area" pattern', () => {
+    const t = buildActivityTarget({
+      damage: [],
+      targetShape: {
+        template: { shape: 'cone', size: 60 },
+        affects: { type: 'creature' },
+      },
+    });
+    expect(t!.affects).toEqual({ type: 'creature' });
+  });
+
+  it('attack-style single-target writes affects only (no template)', () => {
+    const t = buildActivityTarget({
+      damage: [],
+      attackBonus: 7,
+      attackType: 'melee',
+      targetShape: { affects: { type: 'creature', count: 1 } },
+    });
+    expect(t).toEqual({
+      prompt: true,
+      affects: { type: 'creature', count: 1 },
+    });
+    expect(t!.template).toBeUndefined();
   });
 });

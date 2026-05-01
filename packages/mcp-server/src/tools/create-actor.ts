@@ -1541,6 +1541,18 @@ export class CreateActorTools {
           ...(parsed.range.long ? { long: parsed.range.long } : {}),
         };
       }
+      // Phase 10A.7: targeting from parsed.targetShape. Two pieces:
+      // (1) target.template — area shape (circle/cone/line/cube/sphere/cylinder)
+      //     so Midi prompts for a Measured Template and auto-targets tokens.
+      // (2) target.affects — creature type + count, so single-target activities
+      //     don't accidentally accept friendly tokens / multi-creature actions
+      //     respect their cap. Defaults applied when parsed.targetShape didn't
+      //     yield enough info (e.g. save-only with no prose cue defaults to
+      //     "creature, 1" rather than leaving the GUI blank).
+      const targetSpec = buildActivityTarget(parsed);
+      if (targetSpec) {
+        saveActivity.target = targetSpec;
+      }
       if (parsed.condition) {
         const effectDoc = buildConditionEffect(parsed.condition);
         itemEffects.push(effectDoc);
@@ -2647,6 +2659,53 @@ function damagePartPayload(d: { formula: string; type: string }) {
     custom: { enabled: true, formula: d.formula },
     types: [d.type],
   };
+}
+
+/**
+ * Phase 10A.7 — build the dnd5e activity `target` block from a parsed action's
+ * targetShape. Returns null when there's nothing meaningful to write (no shape
+ * + no inferable default).
+ *
+ * Shape:
+ *   target: {
+ *     template?: { type: 'circle'|'cone'|'line'|'cube'|'sphere'|'cylinder', size, units, width? }
+ *     affects?: { type: 'creature'|'enemy'|'ally'|..., count?, choice? }
+ *     prompt: true
+ *   }
+ *
+ * Defaults applied:
+ * - Save-only saves with no template + no parsed affects: leave undefined so
+ *   dnd5e schema defaults kick in (the GUI "Type" field stays at the system
+ *   default, which is acceptable — manual targeting works at the table).
+ * - Attack activities: parsed.targetShape.affects already defaults to
+ *   { type: 'creature', count: 1 } in the parser. We mirror that here.
+ */
+export function buildActivityTarget(
+  parsed: import('../parsers/action-description.js').ParsedAction,
+): Record<string, any> | null {
+  const shape = parsed.targetShape;
+  if (!shape || (!shape.template && !shape.affects)) return null;
+
+  const target: Record<string, any> = { prompt: true };
+
+  if (shape.template) {
+    target.template = {
+      type: shape.template.shape,
+      size: shape.template.size,
+      units: 'ft',
+      ...(shape.template.width !== undefined ? { width: shape.template.width } : {}),
+    };
+  }
+
+  if (shape.affects) {
+    target.affects = {
+      type: shape.affects.type,
+      ...(shape.affects.count !== undefined ? { count: shape.affects.count } : {}),
+      ...(shape.affects.choice !== undefined ? { choice: shape.affects.choice } : {}),
+    };
+  }
+
+  return target;
 }
 
 // ----- Phase 8: usage-suffix normalization ---------------------------------

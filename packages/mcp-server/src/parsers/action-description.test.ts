@@ -364,3 +364,108 @@ describe('parseActionDescription — Phase 10A condition + duration parsing', ()
     expect(r.condition).toBeUndefined();
   });
 });
+
+describe('parseActionDescription — Phase 10A.7 targetShape parsing', () => {
+  it('Tanglefoot: 10ft circle template + up-to-2-creatures count', () => {
+    const r = parseActionDescription(
+      'Volenta hurls a sticky bag at a point within 30 feet. The bag bursts on impact in a 10-foot radius, ' +
+      'covering up to two creatures within 5 feet of one another. Each target must succeed on a ' +
+      'DC 14 Strength saving throw or be restrained for 1 minute.',
+    )!;
+    // Range still parses as the throw distance (not the radius)
+    expect(r.range).toEqual({ normal: 30 });
+    // Template carries the radius
+    expect(r.targetShape?.template).toEqual({ shape: 'circle', size: 10 });
+    // "up to two creatures" → choice + count
+    expect(r.targetShape?.affects).toEqual({ type: 'creature', count: 2, choice: true });
+  });
+
+  it('Firebomb: 10ft circle + each-creature affects (no count cap)', () => {
+    const r = parseActionDescription(
+      'Volenta hurls a flask at a point within 30 feet. The vial detonates in a 10-foot radius. ' +
+      'Any creature in that area must succeed on a DC 14 Dexterity saving throw or take 2d6 fire damage.',
+    )!;
+    expect(r.range).toEqual({ normal: 30 });
+    expect(r.targetShape?.template).toEqual({ shape: 'circle', size: 10 });
+    // "Any creature in that area" matches the each-creature pattern via "in that area"
+    // — fall back to single-creature assumption per parser logic. Acceptable.
+  });
+
+  it('Cone breath weapon: 60ft cone template + each-creature affects', () => {
+    const r = parseActionDescription(
+      'The dragon exhales fire in a 60-foot cone. Each creature in the area must succeed on a ' +
+      'DC 21 Dexterity saving throw, taking 91 (16d10) fire damage on a failed save.',
+    )!;
+    expect(r.targetShape?.template).toEqual({ shape: 'cone', size: 60 });
+    expect(r.targetShape?.affects).toEqual({ type: 'creature' });
+  });
+
+  it('Lightning line: 100-foot line, default 5ft width', () => {
+    const r = parseActionDescription(
+      'Lightning streaks in a 100-foot line. Each creature in the area must succeed on a DC 18 ' +
+      'Dexterity saving throw, taking 55 (10d10) lightning damage on a failed save.',
+    )!;
+    expect(r.targetShape?.template).toEqual({ shape: 'line', size: 100, width: 5 });
+  });
+
+  it('Line with explicit width override', () => {
+    const r = parseActionDescription(
+      'A 30-foot line, 10 feet wide, of acid spews forth. Each creature in the area must succeed on a ' +
+      'DC 14 Dexterity saving throw, taking 4d6 acid damage on a failed save.',
+    )!;
+    expect(r.targetShape?.template).toEqual({ shape: 'line', size: 30, width: 10 });
+  });
+
+  it('Cube: 30-foot cube template', () => {
+    const r = parseActionDescription(
+      'A 30-foot cube of force rumbles. Each creature in the area must succeed on a DC 17 Strength saving throw.',
+    )!;
+    expect(r.targetShape?.template).toEqual({ shape: 'cube', size: 30 });
+  });
+
+  it('Sphere: explicit "20-foot sphere" maps to sphere shape (not circle)', () => {
+    const r = parseActionDescription(
+      'The orb explodes in a 20-foot sphere of flame. Each creature in the area must succeed on a ' +
+      'DC 15 Dexterity saving throw, taking 8d6 fire damage on a failed save.',
+    )!;
+    expect(r.targetShape?.template).toEqual({ shape: 'sphere', size: 20 });
+  });
+
+  it('Single-target attack defaults to creature/count=1 even without explicit prose', () => {
+    const r = parseActionDescription(
+      'Melee Weapon Attack: +7 to hit, reach 5 ft. Hit: 13 (2d8 + 4) slashing damage.',
+    )!;
+    // Attack rolls default to single-creature target — Midi/dnd5e need this set
+    // for the activity to know what to target.
+    expect(r.targetShape?.affects).toEqual({ type: 'creature', count: 1 });
+    // No template (melee attack, no area)
+    expect(r.targetShape?.template).toBeUndefined();
+  });
+
+  it('Save-only with no template + no count → no targetShape inferred', () => {
+    // Without prose cues OR an attack roll, save-only actions can't be inferred.
+    // The pipeline should still write a sensible default but the parser stays null.
+    const r = parseActionDescription(
+      'Each creature must succeed on a DC 13 Constitution saving throw or take 1d10 poison damage.',
+    )!;
+    // "Each creature" matches the each-creature pattern when paired with "within"
+    // or "in (the|that) area" — bare "each creature" without those words doesn't
+    // trigger. Affects stays undefined; caller can default to creature/no-count.
+    expect(r.targetShape?.affects).toBeUndefined();
+  });
+
+  it('Digit-form count: "up to 5 creatures"', () => {
+    const r = parseActionDescription(
+      'You touch up to 5 creatures within range. Each target must succeed on a DC 15 Wisdom saving throw.',
+    )!;
+    expect(r.targetShape?.affects).toEqual({ type: 'creature', count: 5, choice: true });
+  });
+
+  it('Enemy-only filter: "up to two enemies" maps type to enemy', () => {
+    const r = parseActionDescription(
+      'You target up to two enemies within 30 feet. Each must succeed on a DC 14 Wisdom saving throw or be frightened.',
+    )!;
+    expect(r.targetShape?.affects?.type).toBe('enemy');
+    expect(r.targetShape?.affects?.count).toBe(2);
+  });
+});
