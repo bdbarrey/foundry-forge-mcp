@@ -447,6 +447,10 @@ describe('buildConditionEffect (Phase 10A)', () => {
     expect(eff.flags.dae.stackable).toBe('noneName');
     expect(eff.flags.dae.transfer).toBe(false);
     expect(eff.flags.dae.specialDuration).toEqual([]);
+    // showIcon=false suppresses the effect's own icon so Foundry only
+    // renders the status condition icon (toggled by statuses[]). Otherwise
+    // both render → double icon on token.
+    expect(eff.flags.dae.showIcon).toBe(false);
     // Midi: forceCEOff so CE doesn't shadow the native Foundry status
     expect(eff.flags['midi-qol'].forceCEOff).toBe(true);
     // No duration field when condition has no duration

@@ -2984,6 +2984,14 @@ export function buildConditionEffect(
         specialDuration: condition.duration?.specialDuration
           ? [condition.duration.specialDuration]
           : [],
+        // showIcon=false suppresses the ActiveEffect's icon on the token.
+        // We carry `statuses: [<condition>]` which toggles the dnd5e status
+        // condition — Foundry already renders the condition icon. Without
+        // showIcon=false, BOTH the effect icon AND the condition icon
+        // render → double icon on the token (live-verified on Volenta
+        // 2026-04-29). DDB-imported Wolf Bite's "Status: Prone" effect uses
+        // this same flag for the same reason.
+        showIcon: false,
       },
       'midi-qol': { forceCEOff: true },
       core: {},
