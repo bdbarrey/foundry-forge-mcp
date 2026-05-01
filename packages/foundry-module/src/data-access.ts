@@ -1184,12 +1184,33 @@ export class FoundryDataAccess {
       folder: (actor as any).folder?.name || null,
       system: this.sanitizeData((actor as any).system),
       items: actor.items.map(item => {
+        const itemAny = item as any;
+        // Phase 10A visibility patch: expose item-level effects + flags so
+        // audit-actor can self-verify save→effect linkage and pipeline tools
+        // can read CPR / DDB / Midi flags. Without this, every Phase 10A
+        // verification needs a screenshot of the item sheet — and downstream
+        // CPR identifier lookups (planned Phase 10D) would be impossible.
+        const effects = ((item as any).effects?.contents ?? []).map((eff: any) => ({
+          _id: eff._id ?? eff.id,
+          name: eff.name ?? eff.label ?? 'Unknown Effect',
+          ...(eff.img ? { img: eff.img } : {}),
+          ...(eff.icon ? { icon: eff.icon } : {}),
+          disabled: !!eff.disabled,
+          transfer: !!eff.transfer,
+          statuses: Array.isArray(eff.statuses) ? [...eff.statuses] : [],
+          ...(eff.duration ? { duration: { ...eff.duration } } : {}),
+          ...(Array.isArray(eff.changes) ? { changes: eff.changes.map((c: any) => ({ ...c })) } : {}),
+          ...(eff.origin ? { origin: eff.origin } : {}),
+          ...(eff.flags ? { flags: this.sanitizeData(eff.flags) } : {}),
+        }));
         return {
           id: item.id,
           name: item.name,
           type: item.type,
           ...(item.img ? { img: item.img } : {}),
           system: this.sanitizeData(item.system),
+          ...(effects.length > 0 ? { effects } : {}),
+          ...(itemAny.flags ? { flags: this.sanitizeData(itemAny.flags) } : {}),
         };
       }),
       effects: actor.effects.map(effect => ({
