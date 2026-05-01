@@ -597,6 +597,158 @@ function compareActions(
   return results;
 }
 
+/**
+ * Phase 11 — declarative activity-completeness rule. Each rule decides whether
+ * it applies (`appliesWhen`) and what divergence to surface if the live data
+ * doesn't match Reloaded (`check`). The framework runs them in order; rules
+ * are independent so adding a new check just appends to ACTIVITY_RULES.
+ *
+ * Why this shape: the per-activity audit kept growing inline conditionals as
+ * each Phase shipped (10A condition link, 10A.7 targeting, future chain
+ * detection). Declarative rules let us add a check by appending one entry
+ * instead of weaving more if-blocks into a 200-line function.
+ */
+export interface ActivityRuleContext {
+  parsed: import('../parsers/action-description.js').ParsedAction;
+  item: ActorItemSnapshot;
+  activities: any[];
+  /** First activity matching the type, or undefined. */
+  attackAct?: any;
+  saveAct?: any;
+  damageAct?: any;
+}
+
+export interface ActivityRule {
+  /** Stable identifier for diagnostics + test references. */
+  id: string;
+  /** Human-readable label for the rule. */
+  label: string;
+  /**
+   * Gate: does this rule apply to the given action? Returns false to skip.
+   * Examples: "rule applies when parsed has a save and a condition" or
+   * "rule applies when parsed has an attack bonus and the item has an
+   * attack activity".
+   */
+  appliesWhen: (ctx: ActivityRuleContext) => boolean;
+  /**
+   * Run the check. Returns null when the check passes (no divergence) or
+   * an AuditDivergence describing the mismatch. The framework appends
+   * non-null returns to the action's divergence list.
+   */
+  check: (ctx: ActivityRuleContext) => AuditDivergence | null;
+}
+
+/**
+ * Run all rules whose appliesWhen gate passes, returning the divergences
+ * surfaced by their checks. Order is preserved so deterministic output.
+ */
+export function runActivityRules(
+  rules: ActivityRule[],
+  ctx: ActivityRuleContext,
+): AuditDivergence[] {
+  const out: AuditDivergence[] = [];
+  for (const rule of rules) {
+    if (!rule.appliesWhen(ctx)) continue;
+    const div = rule.check(ctx);
+    if (div) out.push(div);
+  }
+  return out;
+}
+
+/**
+ * Phase 11 rule table. Starts with the Phase 10A condition-link rule ported
+ * from compareSingleAction's inline check. Subsequent commits will port the
+ * remaining inline checks (attack bonus/flat/type, save dc/ability, damage
+ * parts, versatile, range, etc.) and add new rules (10A.7 targeting
+ * completeness, attack→save chain detection, multiattack presence, etc.).
+ */
+export const ACTIVITY_RULES: ActivityRule[] = [
+  {
+    id: 'save.condition',
+    label: 'save → effect link applies the parsed condition on save fail',
+    appliesWhen: ctx => !!ctx.parsed.save && !!ctx.parsed.condition && !!ctx.saveAct,
+    check: ctx => checkSaveCondition(ctx),
+  },
+];
+
+function checkSaveCondition(ctx: ActivityRuleContext): AuditDivergence | null {
+  const { parsed, item, saveAct } = ctx;
+  const condition = parsed.condition!;
+
+  const saveActEffects: any[] = Array.isArray(saveAct.effects) ? saveAct.effects : [];
+  const linkedEffectIds: string[] = saveActEffects
+    .map(e => (e && typeof e === 'object' ? e._id ?? e.id : null))
+    .filter((id): id is string => typeof id === 'string');
+  const inferStrictLinkMissingButData =
+    linkedEffectIds.length === 0 && saveActEffects.length > 0;
+
+  const effectsFieldType =
+    item.effects === undefined ? 'undefined'
+    : item.effects === null ? 'null'
+    : Array.isArray(item.effects) ? `array[${(item.effects as any[]).length}]`
+    : `not-array(${typeof item.effects})`;
+  const itemEffectsArr: any[] = Array.isArray(item.effects) ? item.effects : [];
+  const itemEffectsById = new Map<string, any>();
+  for (const eff of itemEffectsArr) {
+    const id = eff?._id ?? eff?.id;
+    if (typeof id === 'string') itemEffectsById.set(id, eff);
+  }
+  const itemEffectsSummary = itemEffectsArr.map(e => ({
+    _id: e?._id ?? e?.id,
+    name: e?.name,
+    statuses: Array.isArray(e?.statuses) ? e.statuses : (e?.statuses ? `not-array(${typeof e.statuses})` : []),
+    transfer: e?.transfer,
+  }));
+  const linkedEffects = linkedEffectIds
+    .map(id => itemEffectsById.get(id))
+    .filter(Boolean);
+  const hasMatchingStatus = linkedEffects.some(eff => {
+    const statuses = Array.isArray(eff?.statuses) ? eff.statuses.map(String) : [];
+    return statuses.includes(condition.type);
+  });
+  const itemHasMatchingStatusEffect = itemEffectsArr.some(eff =>
+    (Array.isArray(eff?.statuses) ? eff.statuses.map(String) : []).includes(condition.type),
+  );
+  const inferredLinkOK = inferStrictLinkMissingButData && itemHasMatchingStatusEffect;
+
+  if (hasMatchingStatus || inferredLinkOK) return null;
+
+  let note: string;
+  let foundry: any;
+  if (saveActEffects.length === 0) {
+    note = `save activity effects[] is empty; build pipeline did not attach a condition link`;
+    foundry = { kind: 'no-link-entry', itemEffectsField: effectsFieldType, itemEffects: itemEffectsSummary };
+  } else if (linkedEffectIds.length === 0) {
+    note = `save activity has effects[] entry but no item-side effect with statuses: ['${condition.type}'] exists; build pipeline didn't create the linked effect`;
+    foundry = {
+      effectsEntries: saveActEffects.length,
+      missingIds: true,
+      itemHasMatchingStatusEffect: false,
+      itemEffectsField: effectsFieldType,
+      itemEffects: itemEffectsSummary,
+    };
+  } else if (linkedEffects.length === 0) {
+    note = `save activity links effect ids [${linkedEffectIds.join(', ')}] but no item-side effect with those ids exists`;
+    foundry = {
+      linkedIds: linkedEffectIds,
+      itemEffectIds: [...itemEffectsById.keys()],
+      itemEffectsField: effectsFieldType,
+    };
+  } else {
+    note = `linked effect(s) present but none carries statuses: ['${condition.type}']`;
+    foundry = { linkedEffects: linkedEffects.map(e => ({ _id: e._id ?? e.id, statuses: e.statuses ?? [] })) };
+  }
+
+  return {
+    field: 'save.condition',
+    reloaded: { type: condition.type },
+    foundry,
+    status: 'divergence',
+    severity: 'medium',
+    note,
+  };
+}
+
 function compareSingleAction(
   action: StatblockFeature,
   item: ActorItemSnapshot,
@@ -779,111 +931,10 @@ function compareSingleAction(
         severity: 'critical',
       });
 
-      // ----- Phase 10A: condition link on save fail ---------------------
-      // When the parsed action says "or be restrained/prone/etc.", the build
-      // pipeline writes an item-side ActiveEffect with statuses=[<cond>] and
-      // links it from the save activity's effects[]. Audit verifies both
-      // halves are present so Midi auto-applies the Foundry condition on
-      // save fail. Severity medium — table-side workaround is the DM
-      // manually applies the status, but it's a real automation gap.
-      if (parsed.condition) {
-        const saveActEffects: any[] = Array.isArray(saveAct.effects) ? saveAct.effects : [];
-        const linkedEffectIds: string[] = saveActEffects
-          .map(e => (e && typeof e === 'object' ? e._id ?? e.id : null))
-          .filter((id): id is string => typeof id === 'string');
-        // Pragmatic fallback: dnd5e's Activity.effects toJSON strips the _id
-        // field when serializing — so the readback shows
-        // [{level, onSave}] even when the link IS persisted at storage time
-        // (Foundry's UI Applied Effects panel reads it correctly via the
-        // direct collection accessor). When the strict _id link is missing
-        // BUT (a) saveAct.effects has at least one entry AND (b) the item
-        // has exactly one effect with the parsed condition's status, it's
-        // overwhelmingly likely to be the inferred link. Treat as match
-        // with a 'low' note instead of a false-positive 'medium' divergence.
-        const inferStrictLinkMissingButData =
-          linkedEffectIds.length === 0
-          && saveActEffects.length > 0;
-        // Diagnostic: surface item.effects visibility so the audit can tell us
-        // whether the v0.1.12 module-side patch is exposing item-side
-        // ActiveEffects through getCharacterInfo. If `effectsField` is
-        // 'undefined', the patch isn't landing — module is on pre-v0.1.12 OR
-        // the patch's `effects` field name differs from what audit reads.
-        const effectsFieldType =
-          item.effects === undefined ? 'undefined'
-          : item.effects === null ? 'null'
-          : Array.isArray(item.effects) ? `array[${(item.effects as any[]).length}]`
-          : `not-array(${typeof item.effects})`;
-        const itemEffectsArr: any[] = Array.isArray(item.effects) ? item.effects : [];
-        const itemEffectsById = new Map<string, any>();
-        for (const eff of itemEffectsArr) {
-          const id = eff?._id ?? eff?.id;
-          if (typeof id === 'string') itemEffectsById.set(id, eff);
-        }
-        const itemEffectsSummary = itemEffectsArr.map(e => ({
-          _id: e?._id ?? e?.id,
-          name: e?.name,
-          statuses: Array.isArray(e?.statuses) ? e.statuses : (e?.statuses ? `not-array(${typeof e.statuses})` : []),
-          transfer: e?.transfer,
-        }));
-        const linkedEffects = linkedEffectIds
-          .map(id => itemEffectsById.get(id))
-          .filter(Boolean);
-        const hasMatchingStatus = linkedEffects.some(eff => {
-          const statuses = Array.isArray(eff?.statuses) ? eff.statuses.map(String) : [];
-          return statuses.includes(parsed.condition!.type);
-        });
-        // dnd5e's Activity.effects toJSON strips _id from the readback path.
-        // When the strict link is missing BUT the item has an effect with
-        // the parsed condition's status AND the activity has an effects[]
-        // entry, the link IS persisted (Foundry's UI Applied Effects panel
-        // confirms it live). Treat as inferred match — no divergence.
-        const itemHasMatchingStatusEffect = itemEffectsArr.some(eff =>
-          (Array.isArray(eff?.statuses) ? eff.statuses.map(String) : []).includes(parsed.condition!.type),
-        );
-        const inferredLinkOK = inferStrictLinkMissingButData && itemHasMatchingStatusEffect;
-        if (!hasMatchingStatus && !inferredLinkOK) {
-          // Three distinct failure modes; pick the most actionable note.
-          // (a) save activity has no effects[] entries at all
-          // (b) entries exist but no item effect with the right status (build
-          //     pipeline didn't create the linked effect)
-          // (c) entries with _id exist but no item effect resolves to that id
-          //     (linked effect was deleted, or never created)
-          // (d) item effects exist + link resolves but wrong status
-          let note: string;
-          let foundry: any;
-          if (saveActEffects.length === 0) {
-            note = `save activity effects[] is empty; build pipeline did not attach a condition link`;
-            foundry = { kind: 'no-link-entry', itemEffectsField: effectsFieldType, itemEffects: itemEffectsSummary };
-          } else if (linkedEffectIds.length === 0) {
-            note = `save activity has effects[] entry but no item-side effect with statuses: ['${parsed.condition.type}'] exists; build pipeline didn't create the linked effect`;
-            foundry = {
-              effectsEntries: saveActEffects.length,
-              missingIds: true,
-              itemHasMatchingStatusEffect: false,
-              itemEffectsField: effectsFieldType,
-              itemEffects: itemEffectsSummary,
-            };
-          } else if (linkedEffects.length === 0) {
-            note = `save activity links effect ids [${linkedEffectIds.join(', ')}] but no item-side effect with those ids exists`;
-            foundry = {
-              linkedIds: linkedEffectIds,
-              itemEffectIds: [...itemEffectsById.keys()],
-              itemEffectsField: effectsFieldType,
-            };
-          } else {
-            note = `linked effect(s) present but none carries statuses: ['${parsed.condition.type}']`;
-            foundry = { linkedEffects: linkedEffects.map(e => ({ _id: e._id ?? e.id, statuses: e.statuses ?? [] })) };
-          }
-          out.push({
-            field: 'save.condition',
-            reloaded: { type: parsed.condition.type },
-            foundry,
-            status: 'divergence',
-            severity: 'medium',
-            note,
-          });
-        }
-      }
+      // Phase 10A condition-link check has moved to ACTIVITY_RULES (see
+      // checkSaveCondition below). Rule fires via runActivityRules() at the
+      // end of this function. Keeping the empty branch comment to make the
+      // dropped concern obvious in future diffs.
     }
   }
 
@@ -964,6 +1015,21 @@ function compareSingleAction(
       note: actorPrefix !== reloadedPrefix ? 'description prefix differs (likely SRD text not synced)' : undefined,
     });
   }
+
+  // Phase 11: declarative rule pass. Each rule in ACTIVITY_RULES decides
+  // whether it applies and what divergence to surface. As more inline checks
+  // get ported into rules, this pass grows and the inline blocks above
+  // shrink — eventually the entire compareSingleAction body becomes the
+  // ctx-build + runActivityRules call.
+  const ctx: ActivityRuleContext = {
+    parsed,
+    item,
+    activities,
+    attackAct,
+    saveAct,
+    damageAct,
+  };
+  out.push(...runActivityRules(ACTIVITY_RULES, ctx));
 
   // Filter out the matches — caller's status field indicates overall.
   return out.filter(d => d.status !== 'match');
