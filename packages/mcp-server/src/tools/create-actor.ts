@@ -7,6 +7,14 @@ import { parseReloadedStatblock, ReloadedStatblock } from '../parsers/reloaded-s
 import { ParsedAction, parseActionDescription } from '../parsers/action-description.js';
 import { parseReloadedProseSpec, ReloadedProseSpec, FeatureOverride } from '../parsers/reloaded-prose.js';
 import { resolveFeatIcon } from './feat-icons.js';
+import {
+  writeScratchItem,
+  writeActivityUpdate,
+  writeConditionEffect,
+  writeTrait,
+} from '../intent/intent-writer.js';
+import { parsedActionToIntent } from '../intent/parsed-to-intent.js';
+import type { ConditionIntent } from '../intent/activity-intent.js';
 import { ForgeAssetsClient, ForgeAssetEntry } from '../forge-assets-client.js';
 import {
   CONFIDENCE_FLOOR,
@@ -1592,186 +1600,24 @@ export class CreateActorTools {
     description: string,
     parsed?: import('../parsers/action-description.js').ParsedAction,
   ): Promise<Record<string, any>> {
-    const system: any = {
-      description: { value: `<p>${escapeHtml(description)}</p>` },
-      source: { book: 'CoS Reloaded' },
-      type: { value: 'monster' },
-    };
-
-    // Phase 8: store usage on the item (system.uses.max + recovery) and use
-    // the bare stem as the item name so the sheet renders a recharge counter
-    // next to "Tanglefoot" instead of repeating "(1/day)" in the name.
+    // Phase 12.0: route through the intent writer. Today's regex parser is
+    // still the intent source via parsedActionToIntent; Phase 12.1 swaps in
+    // an LLM call here without changing the writer.
+    //
+    // Reloaded encodes per-day / recharge limits in the action NAME
+    // ("Tanglefoot (1/day)"). Strip the suffix and use the bare stem as the
+    // item name so the sheet renders a recharge counter next to "Tanglefoot"
+    // — and pass the marker as usage so dnd5e's `system.uses` carries it.
+    // Marker (from name) wins over parsed.usage (from description).
     const { stem, marker } = stripUsageSuffix(name);
     const finalName = stem || name;
-    const usesPayload = buildUsesPayload(marker ?? parsed?.usage);
-    if (usesPayload) {
-      system.uses = usesPayload;
-    }
-
-    // Activities. The pipeline now scratch-builds ALL three combos:
-    //   parsed.save only → save activity (Tanglefoot)
-    //   parsed.attackBonus only → attack activity (rare; usually copy-patch)
-    //   parsed.attackBonus + parsed.save → BOTH (Bite-style), chained via
-    //     attack.midiProperties.triggeredActivityId so the save auto-fires
-    //     after the attack hits (Phase 10A.7 attack-build + Midi-QOL chain).
-    //
-    // Phase 10A: when the action also has a parsed condition (Tanglefoot →
-    // restrained, Thunderstone → prone, Bite → prone), build an item active
-    // effect carrying `statuses: [<condition>]` and link it from the
-    // appropriate activity's `effects[]`. For attack+save items the save
-    // activity carries the link (the save is what fails to trigger the effect).
-    const itemEffects: any[] = [];
-    const activities: Record<string, any> = {};
-    let saveActivityId: string | undefined;
-    let attackActivityId: string | undefined;
-
-    if (parsed?.save) {
-      saveActivityId = genActivityId();
-      const saveActivity: any = {
-        type: 'save',
-        _id: saveActivityId,
-        name: 'Save',
-        save: {
-          ability: [parsed.save.ability],
-          dc: { calculation: '', formula: String(parsed.save.dc) },
-        },
-      };
-      // Damage rides the save activity ONLY when there's no attack (save-only
-      // actions like Firebomb where damage IS the save's payload). Bite-style
-      // (attack + save) damage goes on the attack activity instead — the save
-      // is for the rider effect (prone/poisoned), not the primary damage.
-      const damageGoesOnSave = parsed.damage.length > 0 && parsed.attackBonus === undefined;
-      if (damageGoesOnSave) {
-        saveActivity.damage = {
-          parts: parsed.damage.map(damagePartPayload),
-          onSave: parsed.save.onSuccess === 'half' ? 'half' : 'none',
-        };
-      }
-      if (parsed.range) {
-        saveActivity.range = {
-          value: parsed.range.normal,
-          units: 'ft',
-          ...(parsed.range.long ? { long: parsed.range.long } : {}),
-        };
-      }
-      // Phase 10A.7 targeting: only attach when no attack activity is also
-      // being built — when both exist the targeting lives on the attack
-      // (you target the bite, the save just resolves against the hit
-      // target). For save-only actions, target lives on the save activity.
-      if (parsed.attackBonus === undefined) {
-        const targetSpec = buildActivityTarget(parsed);
-        if (targetSpec) {
-          saveActivity.target = targetSpec;
-        }
-      }
-      if (parsed.condition) {
-        const effectDoc = buildConditionEffect(parsed.condition);
-        itemEffects.push(effectDoc);
-        saveActivity.effects = [
-          { _id: effectDoc._id, level: { min: null, max: null }, onSave: false },
-        ];
-      }
-      activities[saveActivityId] = saveActivity;
-    }
-
-    // Phase 10A.7 attack-build: when parsed has an attack bonus AND there's
-    // no compendium item to copy-patch from, scratch-build an attack
-    // activity. Common case for novel Reloaded actions that don't match
-    // any SRD weapon (homebrew bites, claws, slams with custom names).
-    if (parsed?.attackBonus !== undefined) {
-      attackActivityId = genActivityId();
-      const attackActivity: any = {
-        type: 'attack',
-        _id: attackActivityId,
-        name: parsed.save ? 'Attack' : 'Midi Attack',
-        attack: {
-          // Sign-prefixed string for dnd5e's attack-bonus parser.
-          bonus: (parsed.attackBonus >= 0 ? '+' : '') + parsed.attackBonus,
-          // flat:true makes the bonus the FULL to-hit modifier — without it
-          // dnd5e adds ability + prof on top, doubling Reloaded's printed value.
-          flat: true,
-          ...(parsed.attackType
-            ? { type: { value: parsed.attackType, classification: 'weapon' } }
-            : {}),
-          critical: {},
-        },
-      };
-      // Damage on the attack activity (Hit:-style): primary damage parts +
-      // includeBase=false so dnd5e doesn't add a weapon base die on top.
-      if (parsed.damage.length > 0) {
-        attackActivity.damage = {
-          parts: parsed.damage.map(damagePartPayload),
-          includeBase: false,
-          critical: {},
-        };
-      }
-      if (parsed.reach !== undefined) {
-        attackActivity.range = {
-          reach: parsed.reach,
-          units: 'ft',
-          override: true,
-        };
-      } else if (parsed.range) {
-        attackActivity.range = {
-          value: parsed.range.normal,
-          units: 'ft',
-          override: true,
-          ...(parsed.range.long ? { long: parsed.range.long } : {}),
-        };
-      }
-      // Phase 10A.7 targeting on the attack activity (covers Bite-style
-      // where targeting is "one creature" via parsed.targetShape).
-      const targetSpec = buildActivityTarget(parsed);
-      if (targetSpec) {
-        attackActivity.target = targetSpec;
-      }
-      // Chain: when a save activity also exists, set the attack's
-      // triggeredActivityId so Midi auto-fires the save after a hit.
-      // triggeredActivityTargets='hit' restricts the trigger to creatures
-      // the attack actually hit (vs all targets). Per Midi-QOL README
-      // "Triggered Activities" pattern.
-      if (saveActivityId) {
-        attackActivity.midiProperties = {
-          triggeredActivityId: saveActivityId,
-          triggeredActivityTargets: 'hit',
-        };
-      }
-      activities[attackActivityId] = attackActivity;
-    }
-
-    if (Object.keys(activities).length > 0) {
-      system.activities = activities;
-    }
-
-    // Phase 10A.3: item-level Midi flag for save-or-half items. CPR's pattern
-    // for save-only items (Vampire Weakness's Sunlight damage etc.) carries
-    // `flags.midiProperties.saveDamage: "halfdam"`. Without this, Midi's GUI
-    // for the save defaults to "no damage on save" even when damage.onSave is
-    // "half" at the activity level. One-line write keeps the GUI honest.
-    const itemFlags: Record<string, any> = {
-      'foundry-forge-mcp': { source: 'reloaded-scratch-action' },
-    };
-    if (parsed?.save?.onSuccess === 'half' && parsed.damage.length > 0) {
-      itemFlags.midiProperties = { saveDamage: 'halfdam' };
-    }
-
-    return {
-      // Pre-set _id so the post-create hot-patch step can target the new item
-      // by id without re-querying the actor by name. Foundry's
-      // createEmbeddedDocuments respects pre-set _ids when valid (16 alphanum)
-      // and uses them as-is.
-      _id: genActivityId(),
-      name: finalName,
-      type: 'feat',
-      // Phase 9: themed icon based on the parsed combat shape (save → save
-      // icon, attack → attack icon) and name keywords (Tanglefoot → web,
-      // Firebomb → breath-weapon, etc.). Async to allow HEAD-probing
-      // candidate URLs and rolling forward when one 404s.
-      img: await resolveFeatIcon(finalName, parsed),
-      system,
-      ...(itemEffects.length > 0 ? { effects: itemEffects } : {}),
-      flags: itemFlags,
-    };
+    const usage = marker ?? parsed?.usage;
+    const intent = parsedActionToIntent({ name: finalName, description, usage, parsed });
+    // Phase 9: icon resolution stays async on the call-site side — writer
+    // is sync. Call resolveFeatIcon with parsed (combat-shape + name
+    // keyword chain) and pass the resolved URL into the writer.
+    const img = await resolveFeatIcon(finalName, parsed);
+    return writeScratchItem(intent, { img });
   }
 
   /**
@@ -2618,187 +2464,12 @@ export function buildItemActivityUpdate(
   activities: Record<string, any>,
   parsed: import('../parsers/action-description.js').ParsedAction,
 ): Record<string, any> {
-  const u: Record<string, any> = { _id: itemId };
-
-  // Where does parsed damage belong? attack-bonus implies a Hit:-style attack,
-  // so damage rides the attack activity. Otherwise (save-only prose like "must
-  // succeed... or take 2d6 fire damage") it rides the save activity, even when
-  // the BASE compendium item happens to also expose an attack activity (some
-  // dnd5e 5.x bases like Alchemist's Fire ship both Midi Attack + Midi Save).
-  // The discriminator is the parsed shape, not the base item's activity set.
-  const damageGoesOnAttack = parsed.attackBonus !== undefined;
-  const damageGoesOnSave = !damageGoesOnAttack && !!parsed.save;
-
-  for (const [activityId, activity] of Object.entries(activities)) {
-    const base = `system.activities.${activityId}`;
-    const type = activity?.type;
-
-    if (type === 'attack' && parsed.attackBonus !== undefined) {
-      // dnd5e stores attack bonus as a string with leading sign. flat=true
-      // makes the bonus the FULL attack roll modifier — without it, dnd5e
-      // adds ability + prof on top, so Reloaded's "+7" displays as +14
-      // (bonus +7 + Dex +4 + prof +3) on Hail of Daggers.
-      u[`${base}.attack.bonus`] = (parsed.attackBonus >= 0 ? '+' : '') + parsed.attackBonus;
-      u[`${base}.attack.flat`] = true;
-      if (parsed.attackType) {
-        u[`${base}.attack.type.value`] = parsed.attackType;
-      }
-
-      if (damageGoesOnAttack && parsed.damage.length > 0) {
-        u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
-        // Reloaded prints the FULL damage formula (e.g. "2d4 + 4" already
-        // includes ability mod). dnd5e's default `includeBase=true` adds the
-        // weapon's base die on top, so Hail of Daggers becomes 4d4+8 instead
-        // of 2d4+4. Suppress base contribution whenever we override damage.
-        u[`${base}.damage.includeBase`] = false;
-      }
-
-      // Reach / range live on the attack activity. dnd5e 4.x normalizes these
-      // to numbers in the document model — writing strings here used to silently
-      // not stick (the compendium dump shows `range.value: 5` etc, never a string).
-      // override=true is REQUIRED — without it, dnd5e treats the activity range
-      // as derived-from-item and the compendium base's value (e.g. 30 ft on a
-      // thrown-daggers SRD weapon) bleeds through to the activity readback even
-      // though we wrote 15. Phase 3a-polish item.
-      if (parsed.reach !== undefined) {
-        u[`${base}.range.reach`] = parsed.reach;
-        u[`${base}.range.units`] = 'ft';
-        u[`${base}.range.override`] = true;
-      }
-      if (parsed.range) {
-        u[`${base}.range.value`] = parsed.range.normal;
-        if (parsed.range.long) u[`${base}.range.long`] = parsed.range.long;
-        u[`${base}.range.units`] = 'ft';
-        u[`${base}.range.override`] = true;
-      }
-    }
-
-    if (type === 'save' && parsed.save) {
-      // dnd5e 5.x SaveActivity schema: { ability: SetField, dc: { calculation, formula } }.
-      // calculation="" + formula="<N>" = custom DC (skip derivation).
-      // Writing the full save object (not dot-path fragments) is required when the
-      // activity's save is absent at defaults — partial-merge leaves the SetField
-      // uninitialized and silently no-ops.
-      u[`${base}.save`] = {
-        ability: [parsed.save.ability],
-        dc: { calculation: '', formula: String(parsed.save.dc) },
-      };
-
-      if (damageGoesOnSave && parsed.damage.length > 0) {
-        u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
-        if (parsed.save.onSuccess === 'half') {
-          u[`${base}.damage.onSave`] = 'half';
-        }
-        // Range belongs on whichever activity carries the action (the one
-        // getting damage). For save-only AoE actions like Volenta's Firebomb
-        // ("within 30 feet") the range goes on the save activity since the
-        // attack branch never fires. override=true matches the attack branch.
-        if (parsed.range) {
-          u[`${base}.range.value`] = parsed.range.normal;
-          if (parsed.range.long) u[`${base}.range.long`] = parsed.range.long;
-          u[`${base}.range.units`] = 'ft';
-          u[`${base}.range.override`] = true;
-        }
-      }
-    }
-
-    if (type === 'damage' && parsed.damage.length > 0) {
-      u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
-    }
-
-    // Phase 10A.7b — targeting on copy-patched activities. Mirrors the
-    // scratch-build path: when parsed.targetShape is set, write template
-    // (radius/cone/line/cube/sphere) and affects (creature type + count)
-    // so Midi prompts for Measured Templates and auto-targets correctly.
-    // Catches Volenta's Hail of Daggers / Dagger (single-creature affects)
-    // and Firebomb (10ft circle template) — all DDB-imported items came
-    // through with target.affects=null/null and target.template=null/null.
-    //
-    // Same target-routing logic as scratch-build:
-    //   - attack-with-save (Bite-style): targeting on attack activity
-    //   - save-only / damage-only: targeting on the carrying activity
-    //   - attack-only: targeting on attack activity
-    // For copy-patch we apply per-type since the base item dictates which
-    // activity exists (we don't pick which activity; we patch what's there).
-    const writeTargetOnAttack = type === 'attack' && parsed.attackBonus !== undefined;
-    const writeTargetOnSave = type === 'save' && parsed.save && parsed.attackBonus === undefined;
-    const writeTargetOnDamage = type === 'damage' && parsed.damage.length > 0;
-    if (parsed.targetShape && (writeTargetOnAttack || writeTargetOnSave || writeTargetOnDamage)) {
-      const tgt = parsed.targetShape;
-      if (tgt.template) {
-        u[`${base}.target.template.type`] = tgt.template.shape;
-        u[`${base}.target.template.size`] = tgt.template.size;
-        u[`${base}.target.template.units`] = 'ft';
-        if (tgt.template.width !== undefined) {
-          u[`${base}.target.template.width`] = tgt.template.width;
-        }
-      }
-      if (tgt.affects) {
-        u[`${base}.target.affects.type`] = tgt.affects.type;
-        if (tgt.affects.count !== undefined) {
-          u[`${base}.target.affects.count`] = tgt.affects.count;
-        }
-        if (tgt.affects.choice !== undefined) {
-          u[`${base}.target.affects.choice`] = tgt.affects.choice;
-        }
-      }
-      u[`${base}.target.prompt`] = true;
-    }
-  }
-
-  // Versatile alternative damage (Longsword: "9 (1d8+4) slashing or 13 (2d10+4)
-  // slashing if used with two hands"). dnd5e represents this as item-level
-  // `system.damage.versatile` — when the parent weapon item has a versatile
-  // damage block, the sheet exposes it as an alternate damage roll alongside
-  // the primary. Custom-enabled with our literal formula sidesteps the
-  // number/denomination dice bookkeeping and matches what Reloaded prints.
-  if (parsed.versatile) {
-    u['system.damage.versatile.custom.enabled'] = true;
-    u['system.damage.versatile.custom.formula'] = parsed.versatile.formula;
-    u['system.damage.versatile.types'] = [parsed.versatile.type];
-    u['system.damage.versatile.bonus'] = '';
-  }
-
-  return u;
+  // Phase 12.0: route through the intent writer. Copy-patch path doesn't
+  // care about item name / description (those don't change), so the
+  // adapter is fed empty placeholders.
+  const intent = parsedActionToIntent({ name: '', description: '', parsed });
+  return writeActivityUpdate(itemId, activities, intent);
 }
-
-function genActivityId(): string {
-  // dnd5e activity IDs are 16 alphanumeric chars (matches Foundry's standard
-  // doc id length). Random-only — collisions across activities on the same
-  // item are vanishingly unlikely at 16 chars from 62 alphabet.
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let id = '';
-  for (let i = 0; i < 16; i++) id += chars[Math.floor(Math.random() * chars.length)];
-  return id;
-}
-
-// Same shape as activity IDs — Foundry uses one 16-char alphanumeric format
-// across documents and embedded docs. Separate helper just for call-site clarity.
-function genEffectId(): string {
-  return genActivityId();
-}
-
-/**
- * Foundry's bundled SVG icons for the status conditions we apply on save-fail.
- * These ship with core Foundry under `icons/svg/`, so they render even when
- * the user's icon-pack modules aren't installed. Keys mirror the
- * ConditionType union from action-description.ts.
- */
-const CONDITION_ICONS: Record<string, string> = {
-  blinded: 'icons/svg/blind.svg',
-  charmed: 'icons/svg/heart.svg',
-  deafened: 'icons/svg/sound.svg',
-  frightened: 'icons/svg/terror.svg',
-  grappled: 'icons/svg/net.svg',
-  incapacitated: 'icons/svg/silenced.svg',
-  paralyzed: 'icons/svg/paralysis.svg',
-  petrified: 'icons/svg/statue.svg',
-  poisoned: 'icons/svg/poison.svg',
-  prone: 'icons/svg/falling.svg',
-  restrained: 'icons/svg/net.svg',
-  stunned: 'icons/svg/daze.svg',
-  unconscious: 'icons/svg/unconscious.svg',
-};
 
 // ----- Phase 10B: trait template registry ----------------------------------
 
@@ -2831,95 +2502,20 @@ export interface TraitTemplate {
   build(name: string, description: string): Record<string, any>;
 }
 
+// Phase 12.0: each entry's build() routes through writeTrait. The effect
+// shape (changes, flags, statuses, transfer mode, img) is now owned by the
+// intent writer's TraitIntentKind branches — keep this registry as the
+// name/alias resolver only.
 export const TRAIT_TEMPLATES: TraitTemplate[] = [
   {
     name: 'Pack Tactics',
     aliases: ['pack tactics'],
-    build: () => {
-      const effId = genEffectId();
-      return {
-        effects: [{
-          _id: effId,
-          name: 'Pack Tactics',
-          statuses: [],
-          transfer: true,
-          disabled: false,
-          img: 'icons/environment/wilderness/statue-hound-horned.webp',
-          type: 'base',
-          system: {},
-          origin: null,
-          sort: 0,
-          tint: '#ffffff',
-          description: '',
-          // Midi custom-mode (mode=0) evaluates value as JS at attack-roll
-          // time. Pack Tactics fires when at least 2 hostile-to-target
-          // tokens are within 5ft of the target — the attacker plus at
-          // least one ally. `targetUuid` is bound by Midi's workflow.
-          // Critical: the `key` field IS required — DDB-importer omits it,
-          // which makes the effect apply indiscriminately ("always
-          // advantage on attacks") instead of conditional. That's the bug
-          // Ben surfaced when he said his Pack Tactics fires too broadly.
-          changes: [{
-            key: 'flags.midi-qol.advantage.attack.all',
-            value: 'findNearby(-1, targetUuid, 5, 0).length > 1',
-            mode: 0,
-            priority: 20,
-          }],
-          flags: {
-            dae: { transfer: true, stackable: 'noneName', specialDuration: [] },
-            'midi-qol': { forceCEOff: true },
-            core: {},
-          },
-        }],
-      };
-    },
+    build: (name, description) => writeTrait({ kind: 'pack-tactics', name, description }),
   },
   {
     name: 'Sunlight Sensitivity',
     aliases: ['sunlight sensitivity', 'sunlight hypersensitivity'],
-    build: () => {
-      const effId = genEffectId();
-      // Disabled by default because Foundry doesn't have an out-of-the-box
-      // "this token is in sunlight" check. GM toggles the effect on/off
-      // when the creature enters/exits sunlight (matches the World Scripter
-      // pattern Ben uses for similar manual-toggle automations). Future
-      // refinement: a module-side helper that exposes scene-light state.
-      return {
-        effects: [{
-          _id: effId,
-          name: 'Sunlight Sensitivity',
-          statuses: [],
-          transfer: true,
-          disabled: true,
-          img: 'icons/magic/light/explosion-star-glow-yellow.webp',
-          type: 'base',
-          system: {},
-          origin: null,
-          sort: 0,
-          tint: '#ffffff',
-          description: 'Disabled by default — GM enables when the creature is in sunlight',
-          changes: [
-            {
-              key: 'flags.midi-qol.disadvantage.attack.all',
-              value: '1',
-              mode: 0,
-              priority: 20,
-            },
-            {
-              key: 'flags.midi-qol.disadvantage.ability.check.all',
-              value: '1',
-              mode: 0,
-              priority: 20,
-            },
-          ],
-          flags: {
-            dae: { transfer: true, stackable: 'noneName', specialDuration: [] },
-            'midi-qol': { forceCEOff: true },
-            core: {},
-          },
-        }],
-      };
-    },
+    build: (name, description) => writeTrait({ kind: 'sunlight-sensitivity', name, description }),
   },
 ];
 
@@ -2951,97 +2547,13 @@ export function resolveTraitTemplate(traitName: string): TraitTemplate | null {
 export function buildConditionEffect(
   condition: import('../parsers/action-description.js').ParsedCondition,
 ): Record<string, any> {
-  const id = genEffectId();
-  const titleCase = condition.type[0].toUpperCase() + condition.type.slice(1);
-  const effect: Record<string, any> = {
-    _id: id,
-    name: titleCase,
-    statuses: [condition.type],
-    img: CONDITION_ICONS[condition.type] ?? 'icons/svg/aura.svg',
-    type: 'base',
-    system: {},
-    changes: [],
-    disabled: false,
-    transfer: false,
-    // The DDB-imported Wolf Bite's Status: Prone effect carries these. Live
-    // verification against SmokeTest-10A-v2 (e0c1399) showed that omitting
-    // them causes Foundry's createEmbeddedDocuments to silently strip the
-    // entire effects array on the new item — even when name/statuses/_id
-    // are valid. Mirror the DDB shape exactly: origin null (effect isn't
-    // sourced from another doc), sort 0, blank tint + description.
-    origin: null,
-    sort: 0,
-    tint: '#ffffff',
-    description: '',
-    flags: {
-      dae: {
-        transfer: false,
-        stackable: 'noneName',
-        // specialDuration mirrors DAE's tag list. "turnEnd" / "turnStart" tell
-        // Times-Up to expire the effect at the end/start of the source's next
-        // turn. Empty array (the default) means rely on `duration.seconds` /
-        // `duration.rounds` for expiry.
-        specialDuration: condition.duration?.specialDuration
-          ? [condition.duration.specialDuration]
-          : [],
-        // showIcon=false suppresses the ActiveEffect's icon on the token.
-        // We carry `statuses: [<condition>]` which toggles the dnd5e status
-        // condition — Foundry already renders the condition icon. Without
-        // showIcon=false, BOTH the effect icon AND the condition icon
-        // render → double icon on the token (live-verified on Volenta
-        // 2026-04-29). DDB-imported Wolf Bite's "Status: Prone" effect uses
-        // this same flag for the same reason.
-        showIcon: false,
-      },
-      'midi-qol': { forceCEOff: true },
-      core: {},
-    },
-  };
-
-  if (condition.duration && (condition.duration.rounds || condition.duration.seconds)) {
-    effect.duration = {
-      startTime: null,
-      seconds: condition.duration.seconds ?? null,
-      rounds: condition.duration.rounds ?? null,
-      turns: null,
-      startRound: null,
-      startTurn: null,
-      combat: null,
-    };
-  }
-
-  // Phase 10C: when condition.repeatSave is set, write a Midi-QOL OverTime
-  // change. Midi prompts the target for a save at the configured turn point
-  // (end/start of their turn) every round and removes the effect on success.
-  // Mirrors Reloaded's "ending the effect on a success" mechanic — the
-  // effect is INDEFINITE (no fixed expiry); only a successful save clears
-  // it. Per Midi-QOL README "Optional Rules → Over Time Effects" pattern.
-  if (condition.repeatSave) {
-    const turn = condition.repeatSave.period === 'turnStart' ? 'start' : 'end';
-    const overTimeValue =
-      `turn=${turn}, saveDC=${condition.repeatSave.dc}, ` +
-      `saveAbility=${condition.repeatSave.ability}, saveRemove=true, ` +
-      `label=${titleCase}`;
-    effect.changes.push({
-      key: 'flags.midi-qol.OverTime',
-      mode: 0,
-      value: overTimeValue,
-      priority: 20,
-    });
-    // Don't set duration when repeatSave is set — the save IS the expiry.
-    // Foundry/dnd5e/Midi will treat the effect as indefinite.
-  }
-
-  return effect;
-}
-
-function damagePartPayload(d: { formula: string; type: string }) {
-  // dnd5e 4.x damage-part shape: { custom: { enabled: true, formula }, types: [type] }.
-  // Using a custom formula sidesteps dice-denomination bookkeeping.
-  return {
-    custom: { enabled: true, formula: d.formula },
-    types: [d.type],
-  };
+  // Phase 12.0: route through the intent writer. ParsedCondition is
+  // structurally identical to ConditionIntent (type + optional duration +
+  // optional repeatSave) — all fields pass through unchanged.
+  const intent: ConditionIntent = { type: condition.type };
+  if (condition.duration) intent.duration = condition.duration;
+  if (condition.repeatSave) intent.repeatSave = condition.repeatSave;
+  return writeConditionEffect(intent);
 }
 
 /**
