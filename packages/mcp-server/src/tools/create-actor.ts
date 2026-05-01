@@ -341,20 +341,40 @@ export class CreateActorTools {
       const traitsToAdd = await Promise.all(
         sb.traits
           .filter(t => !existingItemNames.has(t.name.toLowerCase()))
-          .map(async t => ({
-            name: t.name,
-            type: 'feat',
-            // Phase 9: pick a themed icon up front so the sheet doesn't show
-            // a generic star next to every Reloaded-only trait. Resolver is
-            // async because it HEAD-probes Forge bazaar URLs to weed out
-            // broken paths and roll forward to verified fallbacks.
-            img: await resolveFeatIcon(t.name, t.parsed),
-            system: {
-              description: { value: `<p>${escapeHtml(t.description)}</p>` },
-              source: { book: 'CoS Reloaded' },
-              type: { value: 'monster' },
-            },
-          })),
+          .map(async t => {
+            const baseDoc: Record<string, any> = {
+              name: t.name,
+              type: 'feat',
+              // Phase 9: pick a themed icon up front so the sheet doesn't show
+              // a generic star next to every Reloaded-only trait. Resolver is
+              // async because it HEAD-probes Forge bazaar URLs to weed out
+              // broken paths and roll forward to verified fallbacks.
+              img: await resolveFeatIcon(t.name, t.parsed),
+              system: {
+                description: { value: `<p>${escapeHtml(t.description)}</p>` },
+                source: { book: 'CoS Reloaded' },
+                type: { value: 'monster' },
+              },
+            };
+            // Phase 10B: when the trait name matches a registered template
+            // (Pack Tactics, Sunlight Sensitivity, etc.), merge the template's
+            // effect/flag/system additions on top of the base doc. The trait
+            // lands with the full Midi/DAE shape instead of description-only.
+            // Unmatched traits keep current behavior (Awakened Bloodlust,
+            // Fast Grappler, Volenta-unique inventions land as plain feats).
+            const template = resolveTraitTemplate(t.name);
+            if (template) {
+              const additions = template.build(t.name, t.description);
+              for (const [key, value] of Object.entries(additions)) {
+                if (key === 'system' && baseDoc.system && typeof value === 'object') {
+                  baseDoc.system = { ...baseDoc.system, ...value };
+                } else {
+                  baseDoc[key] = value;
+                }
+              }
+            }
+            return baseDoc;
+          }),
       );
       let addedTraitNames: string[] = [];
       let traitAddFailures: Array<{ name: string; error: string }> = [];
@@ -2740,6 +2760,143 @@ const CONDITION_ICONS: Record<string, string> = {
   stunned: 'icons/svg/daze.svg',
   unconscious: 'icons/svg/unconscious.svg',
 };
+
+// ----- Phase 10B: trait template registry ----------------------------------
+
+/**
+ * Phase 10B — registry of known monster-trait templates. When create-actor
+ * adds a Reloaded-only trait whose name matches a registered template, the
+ * trait lands with the full Midi/DAE effect shape (key + value + mode +
+ * priority) instead of a description-only feat. Reloaded creatures with
+ * traits like Pack Tactics or Sunlight Sensitivity get correct table-side
+ * automation out of the box.
+ *
+ * Why this is separate from the audit framework (Phase 11): audit READS,
+ * templates BUILD. They're complementary — a future audit rule can lint
+ * "trait name matches a registered template, but item shape doesn't" to
+ * surface stale DDB-imported actors that the registry could fix.
+ *
+ * Registry grows with new templates as we encounter creatures that need
+ * them. Initial set covers the Volenta-relevant + most-broken-DDB cases.
+ */
+export interface TraitTemplate {
+  /** Canonical template name (used as the item name + matched against trait names). */
+  name: string;
+  /** Lower-case names that should resolve to this template (Reloaded variants). */
+  aliases: string[];
+  /**
+   * Build the trait's item document patches. Returns the partial item doc
+   * additions to merge on top of the default {description, source, type:
+   * monster, img}. Typically: { effects: [<effectDoc>], flags?, system? }.
+   */
+  build(name: string, description: string): Record<string, any>;
+}
+
+export const TRAIT_TEMPLATES: TraitTemplate[] = [
+  {
+    name: 'Pack Tactics',
+    aliases: ['pack tactics'],
+    build: () => {
+      const effId = genEffectId();
+      return {
+        effects: [{
+          _id: effId,
+          name: 'Pack Tactics',
+          statuses: [],
+          transfer: true,
+          disabled: false,
+          img: 'icons/environment/wilderness/statue-hound-horned.webp',
+          type: 'base',
+          system: {},
+          origin: null,
+          sort: 0,
+          tint: '#ffffff',
+          description: '',
+          // Midi custom-mode (mode=0) evaluates value as JS at attack-roll
+          // time. Pack Tactics fires when at least 2 hostile-to-target
+          // tokens are within 5ft of the target — the attacker plus at
+          // least one ally. `targetUuid` is bound by Midi's workflow.
+          // Critical: the `key` field IS required — DDB-importer omits it,
+          // which makes the effect apply indiscriminately ("always
+          // advantage on attacks") instead of conditional. That's the bug
+          // Ben surfaced when he said his Pack Tactics fires too broadly.
+          changes: [{
+            key: 'flags.midi-qol.advantage.attack.all',
+            value: 'findNearby(-1, targetUuid, 5, 0).length > 1',
+            mode: 0,
+            priority: 20,
+          }],
+          flags: {
+            dae: { transfer: true, stackable: 'noneNameOnly', specialDuration: [] },
+            'midi-qol': { forceCEOff: true },
+            core: {},
+          },
+        }],
+      };
+    },
+  },
+  {
+    name: 'Sunlight Sensitivity',
+    aliases: ['sunlight sensitivity', 'sunlight hypersensitivity'],
+    build: () => {
+      const effId = genEffectId();
+      // Disabled by default because Foundry doesn't have an out-of-the-box
+      // "this token is in sunlight" check. GM toggles the effect on/off
+      // when the creature enters/exits sunlight (matches the World Scripter
+      // pattern Ben uses for similar manual-toggle automations). Future
+      // refinement: a module-side helper that exposes scene-light state.
+      return {
+        effects: [{
+          _id: effId,
+          name: 'Sunlight Sensitivity',
+          statuses: [],
+          transfer: true,
+          disabled: true,
+          img: 'icons/magic/light/explosion-star-glow-yellow.webp',
+          type: 'base',
+          system: {},
+          origin: null,
+          sort: 0,
+          tint: '#ffffff',
+          description: 'Disabled by default — GM enables when the creature is in sunlight',
+          changes: [
+            {
+              key: 'flags.midi-qol.disadvantage.attack.all',
+              value: '1',
+              mode: 0,
+              priority: 20,
+            },
+            {
+              key: 'flags.midi-qol.disadvantage.ability.check.all',
+              value: '1',
+              mode: 0,
+              priority: 20,
+            },
+          ],
+          flags: {
+            dae: { transfer: true, stackable: 'noneNameOnly', specialDuration: [] },
+            'midi-qol': { forceCEOff: true },
+            core: {},
+          },
+        }],
+      };
+    },
+  },
+];
+
+/**
+ * Resolve a trait name to a registered template. Case-insensitive; checks
+ * canonical name + aliases. Returns null if no template matches — caller
+ * falls back to building a description-only feat.
+ */
+export function resolveTraitTemplate(traitName: string): TraitTemplate | null {
+  const lc = traitName.toLowerCase().trim();
+  for (const tpl of TRAIT_TEMPLATES) {
+    if (tpl.name.toLowerCase() === lc) return tpl;
+    if (tpl.aliases.includes(lc)) return tpl;
+  }
+  return null;
+}
 
 /**
  * Build a Foundry ActiveEffect document for a save-fail condition application.

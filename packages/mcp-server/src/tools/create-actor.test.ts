@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload, buildConditionEffect, buildActivityTarget } from './create-actor.js';
+import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload, buildConditionEffect, buildActivityTarget, resolveTraitTemplate, TRAIT_TEMPLATES } from './create-actor.js';
 import type { ParsedAction, ParsedCondition } from '../parsers/action-description.js';
 
 describe('buildItemActivityUpdate', () => {
@@ -575,5 +575,72 @@ describe('buildActivityTarget (Phase 10A.7)', () => {
       affects: { type: 'creature', count: 1 },
     });
     expect(t!.template).toBeUndefined();
+  });
+});
+
+describe('resolveTraitTemplate (Phase 10B)', () => {
+  it('returns null for an unknown trait name (Awakened Bloodlust et al.)', () => {
+    expect(resolveTraitTemplate('Awakened Bloodlust')).toBeNull();
+    expect(resolveTraitTemplate('Fast Grappler')).toBeNull();
+  });
+
+  it('matches "Pack Tactics" canonical name (case-insensitive)', () => {
+    expect(resolveTraitTemplate('Pack Tactics')?.name).toBe('Pack Tactics');
+    expect(resolveTraitTemplate('pack tactics')?.name).toBe('Pack Tactics');
+    expect(resolveTraitTemplate('PACK TACTICS')?.name).toBe('Pack Tactics');
+  });
+
+  it('matches Sunlight Sensitivity AND its alias "Sunlight Hypersensitivity"', () => {
+    expect(resolveTraitTemplate('Sunlight Sensitivity')?.name).toBe('Sunlight Sensitivity');
+    expect(resolveTraitTemplate('Sunlight Hypersensitivity')?.name).toBe('Sunlight Sensitivity');
+  });
+
+  it('Pack Tactics builds an effect with the load-bearing key + value (the DDB-broken bit)', () => {
+    const tpl = resolveTraitTemplate('Pack Tactics')!;
+    const built = tpl.build('Pack Tactics', 'desc');
+    const eff = built.effects[0];
+    expect(eff.transfer).toBe(true);
+    expect(eff.disabled).toBe(false);
+    expect(eff.changes).toHaveLength(1);
+    // CRITICAL: key MUST be set (DDB-importer omits it, causing the
+    // effect to apply indiscriminately as "always advantage on attacks").
+    expect(eff.changes[0].key).toBe('flags.midi-qol.advantage.attack.all');
+    expect(eff.changes[0].value).toContain('findNearby');
+    expect(eff.changes[0].value).toContain('targetUuid');
+    expect(eff.changes[0].mode).toBe(0); // CUSTOM
+    expect(eff.statuses).toEqual([]);
+    expect(eff.flags.dae.transfer).toBe(true);
+  });
+
+  it('Sunlight Sensitivity builds a DISABLED effect (GM toggles when in sunlight)', () => {
+    const tpl = resolveTraitTemplate('Sunlight Sensitivity')!;
+    const built = tpl.build('Sunlight Sensitivity', 'desc');
+    const eff = built.effects[0];
+    expect(eff.transfer).toBe(true);
+    // disabled by default — GM enables when creature enters sunlight
+    expect(eff.disabled).toBe(true);
+    // Two flag changes: disadvantage on attack AND on ability checks
+    const keys = eff.changes.map((c: any) => c.key).sort();
+    expect(keys).toEqual([
+      'flags.midi-qol.disadvantage.ability.check.all',
+      'flags.midi-qol.disadvantage.attack.all',
+    ]);
+  });
+
+  it('every registered template carries the canonical structural fields (so Foundry doesn\'t strip on create)', () => {
+    for (const tpl of TRAIT_TEMPLATES) {
+      const built = tpl.build(tpl.name, 'desc');
+      expect(built.effects).toBeDefined();
+      for (const eff of built.effects) {
+        expect(eff._id).toMatch(/^[A-Za-z0-9]{16}$/);
+        expect(eff.type).toBe('base');
+        expect(eff.system).toEqual({});
+        expect(eff.origin).toBeNull();
+        expect(eff.tint).toBe('#ffffff');
+        expect(eff.flags?.dae).toBeDefined();
+        expect(eff.flags?.['midi-qol']).toBeDefined();
+        expect(eff.flags?.core).toEqual({});
+      }
+    }
   });
 });
