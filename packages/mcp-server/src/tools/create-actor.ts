@@ -2698,10 +2698,22 @@ export function buildActivityTarget(
   }
 
   if (shape.affects) {
+    // When a template is present, suppress affects.count and affects.choice.
+    // dnd5e + Midi treat template-targeted activities as "everyone in the area"
+    // — setting count makes the GUI prompt for a count-many manual target
+    // selection, which conflicts with the template's auto-target flow. The
+    // parsed count (e.g. Reloaded's "up to two creatures within 5 feet of one
+    // another") is descriptive prose, not a mechanic dnd5e activities model;
+    // GM enforces the cap manually if it matters at the table.
+    //
+    // UX expected (per Ben's live test of v4): click the feat → Foundry
+    // prompts to place the template → Midi auto-targets every creature inside
+    // → each rolls the save. Setting count breaks that flow.
+    const hasTemplate = !!shape.template;
     target.affects = {
       type: shape.affects.type,
-      ...(shape.affects.count !== undefined ? { count: shape.affects.count } : {}),
-      ...(shape.affects.choice !== undefined ? { choice: shape.affects.choice } : {}),
+      ...(!hasTemplate && shape.affects.count !== undefined ? { count: shape.affects.count } : {}),
+      ...(!hasTemplate && shape.affects.choice !== undefined ? { choice: shape.affects.choice } : {}),
     };
   }
 

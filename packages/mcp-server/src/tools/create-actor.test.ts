@@ -533,7 +533,11 @@ describe('buildActivityTarget (Phase 10A.7)', () => {
     });
   });
 
-  it('writes both template + affects when both are parsed (Tanglefoot pattern)', () => {
+  it('writes template + affects-without-count when both are parsed (Tanglefoot pattern)', () => {
+    // Phase 10A.7 fix: when template is present, drop affects.count + choice.
+    // dnd5e/Midi treat template as target set; setting count breaks the
+    // template-prompt flow with a manual N-target picker. Parsed count
+    // becomes descriptive prose only — GM enforces the cap if it matters.
     const t = buildActivityTarget({
       damage: [],
       targetShape: {
@@ -544,7 +548,7 @@ describe('buildActivityTarget (Phase 10A.7)', () => {
     expect(t).toEqual({
       prompt: true,
       template: { type: 'circle', size: 10, units: 'ft' },
-      affects: { type: 'creature', count: 2, choice: true },
+      affects: { type: 'creature' },
     });
   });
 
