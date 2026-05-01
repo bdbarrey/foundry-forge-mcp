@@ -791,12 +791,28 @@ function compareSingleAction(
         const linkedEffectIds: string[] = saveActEffects
           .map(e => (e && typeof e === 'object' ? e._id ?? e.id : null))
           .filter((id): id is string => typeof id === 'string');
+        // Diagnostic: surface item.effects visibility so the audit can tell us
+        // whether the v0.1.12 module-side patch is exposing item-side
+        // ActiveEffects through getCharacterInfo. If `effectsField` is
+        // 'undefined', the patch isn't landing — module is on pre-v0.1.12 OR
+        // the patch's `effects` field name differs from what audit reads.
+        const effectsFieldType =
+          item.effects === undefined ? 'undefined'
+          : item.effects === null ? 'null'
+          : Array.isArray(item.effects) ? `array[${(item.effects as any[]).length}]`
+          : `not-array(${typeof item.effects})`;
         const itemEffectsArr: any[] = Array.isArray(item.effects) ? item.effects : [];
         const itemEffectsById = new Map<string, any>();
         for (const eff of itemEffectsArr) {
           const id = eff?._id ?? eff?.id;
           if (typeof id === 'string') itemEffectsById.set(id, eff);
         }
+        const itemEffectsSummary = itemEffectsArr.map(e => ({
+          _id: e?._id ?? e?.id,
+          name: e?.name,
+          statuses: Array.isArray(e?.statuses) ? e.statuses : (e?.statuses ? `not-array(${typeof e.statuses})` : []),
+          transfer: e?.transfer,
+        }));
         const linkedEffects = linkedEffectIds
           .map(id => itemEffectsById.get(id))
           .filter(Boolean);
@@ -819,15 +835,25 @@ function compareSingleAction(
           );
           if (saveActEffects.length === 0) {
             note = `save activity effects[] is empty; build pipeline did not attach a condition link`;
-            foundry = 'no-link-entry';
+            foundry = { kind: 'no-link-entry', itemEffectsField: effectsFieldType, itemEffects: itemEffectsSummary };
           } else if (linkedEffectIds.length === 0) {
             note = itemHasMatchingStatusEffect
               ? `save activity has effects[] entry but the _id field was stripped (likely pre-create dnd5e schema validation); item-side effect with statuses: ['${parsed.condition.type}'] is present and needs a post-create hot-patch to link`
               : `save activity has effects[] entry but the _id field was stripped, AND no item-side effect with statuses: ['${parsed.condition.type}'] exists`;
-            foundry = { effectsEntries: saveActEffects.length, missingIds: true, itemHasMatchingStatusEffect };
+            foundry = {
+              effectsEntries: saveActEffects.length,
+              missingIds: true,
+              itemHasMatchingStatusEffect,
+              itemEffectsField: effectsFieldType,
+              itemEffects: itemEffectsSummary,
+            };
           } else if (linkedEffects.length === 0) {
             note = `save activity links effect ids [${linkedEffectIds.join(', ')}] but no item-side effect with those ids exists`;
-            foundry = { linkedIds: linkedEffectIds, itemEffectIds: [...itemEffectsById.keys()] };
+            foundry = {
+              linkedIds: linkedEffectIds,
+              itemEffectIds: [...itemEffectsById.keys()],
+              itemEffectsField: effectsFieldType,
+            };
           } else {
             note = `linked effect(s) present but none carries statuses: ['${parsed.condition.type}']`;
             foundry = { linkedEffects: linkedEffects.map(e => ({ _id: e._id ?? e.id, statuses: e.statuses ?? [] })) };

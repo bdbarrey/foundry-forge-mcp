@@ -567,10 +567,10 @@ describe('compareActor — Phase 10A save.condition link', () => {
     const cond = tf.divergences.find(d => d.field === 'save.condition');
     expect(cond).toBeDefined();
     expect(cond!.severity).toBe('medium');
-    // Refined diagnostic: empty effects[] vs entries-without-_id vs unresolved
-    // ids vs status-mismatch are now distinguished. Empty effects[] returns
-    // the 'no-link-entry' sentinel so callers can pinpoint which failure mode.
-    expect(cond!.foundry).toBe('no-link-entry');
+    // Refined diagnostic: foundry block now carries kind sentinel + the
+    // item.effects field type so we can tell whether visibility is the
+    // problem vs the data being genuinely absent.
+    expect(cond!.foundry).toMatchObject({ kind: 'no-link-entry' });
     expect(cond!.note).toContain('did not attach a condition link');
   });
 
