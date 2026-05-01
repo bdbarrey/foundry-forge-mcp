@@ -2705,6 +2705,45 @@ export function buildItemActivityUpdate(
     if (type === 'damage' && parsed.damage.length > 0) {
       u[`${base}.damage.parts`] = parsed.damage.map(damagePartPayload);
     }
+
+    // Phase 10A.7b — targeting on copy-patched activities. Mirrors the
+    // scratch-build path: when parsed.targetShape is set, write template
+    // (radius/cone/line/cube/sphere) and affects (creature type + count)
+    // so Midi prompts for Measured Templates and auto-targets correctly.
+    // Catches Volenta's Hail of Daggers / Dagger (single-creature affects)
+    // and Firebomb (10ft circle template) — all DDB-imported items came
+    // through with target.affects=null/null and target.template=null/null.
+    //
+    // Same target-routing logic as scratch-build:
+    //   - attack-with-save (Bite-style): targeting on attack activity
+    //   - save-only / damage-only: targeting on the carrying activity
+    //   - attack-only: targeting on attack activity
+    // For copy-patch we apply per-type since the base item dictates which
+    // activity exists (we don't pick which activity; we patch what's there).
+    const writeTargetOnAttack = type === 'attack' && parsed.attackBonus !== undefined;
+    const writeTargetOnSave = type === 'save' && parsed.save && parsed.attackBonus === undefined;
+    const writeTargetOnDamage = type === 'damage' && parsed.damage.length > 0;
+    if (parsed.targetShape && (writeTargetOnAttack || writeTargetOnSave || writeTargetOnDamage)) {
+      const tgt = parsed.targetShape;
+      if (tgt.template) {
+        u[`${base}.target.template.type`] = tgt.template.shape;
+        u[`${base}.target.template.size`] = tgt.template.size;
+        u[`${base}.target.template.units`] = 'ft';
+        if (tgt.template.width !== undefined) {
+          u[`${base}.target.template.width`] = tgt.template.width;
+        }
+      }
+      if (tgt.affects) {
+        u[`${base}.target.affects.type`] = tgt.affects.type;
+        if (tgt.affects.count !== undefined) {
+          u[`${base}.target.affects.count`] = tgt.affects.count;
+        }
+        if (tgt.affects.choice !== undefined) {
+          u[`${base}.target.affects.choice`] = tgt.affects.choice;
+        }
+      }
+      u[`${base}.target.prompt`] = true;
+    }
   }
 
   // Versatile alternative damage (Longsword: "9 (1d8+4) slashing or 13 (2d10+4)
