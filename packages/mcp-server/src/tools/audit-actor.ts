@@ -934,6 +934,88 @@ export const ACTIVITY_RULES: ActivityRule[] = [
       };
     },
   },
+
+  // ----- Phase 10A.7 targeting completeness ----------------------------
+  // Save activities with parsed AOE templates need target.template.{type,size}
+  // set, otherwise Foundry/Midi can't prompt the GM to draw a Measured
+  // Template. Without it, "Measured Template Prompt" on the IDENTITY tab
+  // does nothing because there's no shape configured.
+  {
+    id: 'target.template',
+    label: 'parsed AOE template (radius/cone/line/etc.) written to activity target.template',
+    appliesWhen: ctx =>
+      !!ctx.parsed.targetShape?.template
+      && (!!ctx.saveAct || !!ctx.damageAct),
+    check: ctx => {
+      const target = ctx.saveAct ?? ctx.damageAct;
+      const tpl = ctx.parsed.targetShape!.template!;
+      const actualType = strOrNull(target.target?.template?.type);
+      const actualSize = numOrNull(target.target?.template?.size);
+      if (actualType === tpl.shape && actualSize === tpl.size) return null;
+      return {
+        field: 'target.template',
+        reloaded: { type: tpl.shape, size: tpl.size },
+        foundry: { type: actualType, size: actualSize },
+        status: 'divergence',
+        severity: 'medium',
+        note: `parsed targetShape.template (${tpl.shape}/${tpl.size}ft) didn't land on activity — Midi won't prompt for a Measured Template`,
+      };
+    },
+  },
+  {
+    id: 'target.affects',
+    label: 'parsed target affects (type + optional count) written to activity target.affects',
+    appliesWhen: ctx =>
+      !!ctx.parsed.targetShape?.affects
+      && (!!ctx.saveAct || !!ctx.attackAct || !!ctx.damageAct),
+    check: ctx => {
+      const target = ctx.saveAct ?? ctx.attackAct ?? ctx.damageAct;
+      const aff = ctx.parsed.targetShape!.affects!;
+      const actualType = strOrNull(target.target?.affects?.type);
+      const actualCount = target.target?.affects?.count;
+      // count is optional — only enforce when parsed includes it
+      const typeOK = actualType === aff.type;
+      const countOK = aff.count === undefined || actualCount === aff.count;
+      if (typeOK && countOK) return null;
+      return {
+        field: 'target.affects',
+        reloaded: aff,
+        foundry: { type: actualType, count: actualCount },
+        status: 'divergence',
+        severity: 'medium',
+        note: `parsed affects (${aff.type}${aff.count ? `, count=${aff.count}` : ''}) didn't land on activity`,
+      };
+    },
+  },
+
+  // ----- Phase 11.2 cross-activity chain detection ----------------------
+  // Bite-style items have both an attack activity (Hit:) and a save
+  // activity (DC X save vs being knocked prone / poisoned / etc.). For
+  // the save to fire automatically after the attack hits, the attack's
+  // triggeredActivityId must reference the save's _id. Without the chain
+  // wired, the GM has to manually click the save activity after every
+  // attack roll. Per Midi-QOL README "Triggered Activities" section.
+  {
+    id: 'attack-save.chain',
+    label: 'item with both attack + save activities should chain attack → save (triggeredActivityId)',
+    appliesWhen: ctx =>
+      !!ctx.attackAct && !!ctx.saveAct
+      && ctx.parsed.attackBonus !== undefined && !!ctx.parsed.save,
+    check: ctx => {
+      const triggered = strOrNull(ctx.attackAct.midiProperties?.triggeredActivityId);
+      const saveId = strOrNull(ctx.saveAct._id ?? ctx.saveAct.id);
+      // 'none' is dnd5e's default placeholder for unset triggers; treat as missing
+      if (triggered && triggered !== 'none' && triggered === saveId) return null;
+      return {
+        field: 'attack-save.chain',
+        reloaded: { triggeredActivityId: saveId },
+        foundry: { triggeredActivityId: triggered },
+        status: 'divergence',
+        severity: 'medium',
+        note: 'attack activity should set midiProperties.triggeredActivityId to the save activity\'s _id so the save auto-fires after a hit (Midi-QOL Triggered Activities pattern)',
+      };
+    },
+  },
 ];
 
 /**

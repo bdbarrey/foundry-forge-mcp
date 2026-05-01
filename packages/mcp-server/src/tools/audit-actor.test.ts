@@ -688,3 +688,216 @@ describe('compareActor — Phase 10A save.condition link', () => {
     expect(fb.divergences.find(d => d.field === 'save.condition')).toBeUndefined();
   });
 });
+
+describe('compareActor — Phase 10A.7 targeting rules', () => {
+  it('flags missing target.template when parsed.targetShape.template is set', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Tanglefoot',
+        description: 'AOE save',
+        parsed: {
+          damage: [],
+          save: { dc: 14, ability: 'str' },
+          targetShape: { template: { shape: 'circle', size: 10 }, affects: { type: 'creature' } },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Tanglefoot', type: 'feat', system: {
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['str'], dc: { calculation: '', formula: '14' } },
+            // No target.template — this is what the rule should flag.
+            target: { affects: { type: 'creature' } },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const tf = audit.actions.find(a => a.name === 'Tanglefoot')!;
+    const tpl = tf.divergences.find(d => d.field === 'target.template');
+    expect(tpl).toBeDefined();
+    expect(tpl!.severity).toBe('medium');
+    expect(tpl!.reloaded).toEqual({ type: 'circle', size: 10 });
+    expect(tpl!.note).toContain("won't prompt for a Measured Template");
+  });
+
+  it('clean match when target.template matches parsed', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Tanglefoot',
+        description: 'AOE save',
+        parsed: {
+          damage: [],
+          save: { dc: 14, ability: 'str' },
+          targetShape: { template: { shape: 'circle', size: 10 }, affects: { type: 'creature', count: 2, choice: true } },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Tanglefoot', type: 'feat', system: {
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['str'], dc: { calculation: '', formula: '14' } },
+            target: {
+              template: { type: 'circle', size: 10, units: 'ft' },
+              affects: { type: 'creature', count: 2, choice: true },
+            },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const tf = audit.actions.find(a => a.name === 'Tanglefoot')!;
+    expect(tf.divergences.find(d => d.field === 'target.template')).toBeUndefined();
+    expect(tf.divergences.find(d => d.field === 'target.affects')).toBeUndefined();
+  });
+
+  it('flags target.affects mismatch (parsed says count=2, actor has count=1)', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Tanglefoot',
+        description: 'AOE save',
+        parsed: {
+          damage: [],
+          save: { dc: 14, ability: 'str' },
+          targetShape: { affects: { type: 'creature', count: 2 } },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Tanglefoot', type: 'feat', system: {
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['str'], dc: { calculation: '', formula: '14' } },
+            target: { affects: { type: 'creature', count: 1 } },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const tf = audit.actions.find(a => a.name === 'Tanglefoot')!;
+    const aff = tf.divergences.find(d => d.field === 'target.affects');
+    expect(aff).toBeDefined();
+    expect(aff!.severity).toBe('medium');
+    expect(aff!.foundry).toMatchObject({ count: 1 });
+    expect(aff!.reloaded).toMatchObject({ count: 2 });
+  });
+});
+
+describe('compareActor — Phase 11.2 attack→save chain rule', () => {
+  it('flags missing chain when item has both attack + save activities (Bite-style)', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Bite',
+        description: 'attack with save-vs-prone',
+        parsed: {
+          damage: [{ formula: '1d8+2', type: 'piercing' }],
+          attackBonus: 4,
+          attackType: 'melee',
+          reach: 5,
+          save: { dc: 11, ability: 'str' },
+          condition: { type: 'prone' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Bite', type: 'weapon', system: {
+        activities: {
+          atk1: {
+            type: 'attack',
+            _id: 'atk1',
+            attack: { bonus: '+4', flat: true, type: { value: 'melee' } },
+            damage: { parts: [{ custom: { enabled: true, formula: '1d8+2' }, types: ['piercing'] }], includeBase: false },
+            range: { reach: 5, units: 'ft' },
+            // No triggeredActivityId — this is what the rule flags.
+          },
+          sav1: {
+            type: 'save',
+            _id: 'sav1',
+            save: { ability: ['str'], dc: { calculation: '', formula: '11' } },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const bite = audit.actions.find(a => a.name === 'Bite')!;
+    const chain = bite.divergences.find(d => d.field === 'attack-save.chain');
+    expect(chain).toBeDefined();
+    expect(chain!.severity).toBe('medium');
+    expect(chain!.note).toContain('triggeredActivityId');
+    expect(chain!.reloaded).toMatchObject({ triggeredActivityId: 'sav1' });
+  });
+
+  it('clean match when attack.midiProperties.triggeredActivityId points at save activity', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Bite',
+        description: 'attack with save-vs-prone',
+        parsed: {
+          damage: [{ formula: '1d8+2', type: 'piercing' }],
+          attackBonus: 4,
+          attackType: 'melee',
+          reach: 5,
+          save: { dc: 11, ability: 'str' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Bite', type: 'weapon', system: {
+        activities: {
+          atk1: {
+            type: 'attack',
+            _id: 'atk1',
+            attack: { bonus: '+4', flat: true, type: { value: 'melee' } },
+            damage: { parts: [{ custom: { enabled: true, formula: '1d8+2' }, types: ['piercing'] }], includeBase: false },
+            range: { reach: 5, units: 'ft' },
+            midiProperties: { triggeredActivityId: 'sav1' },
+          },
+          sav1: {
+            type: 'save',
+            _id: 'sav1',
+            save: { ability: ['str'], dc: { calculation: '', formula: '11' } },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const bite = audit.actions.find(a => a.name === 'Bite')!;
+    expect(bite.divergences.find(d => d.field === 'attack-save.chain')).toBeUndefined();
+  });
+
+  it('does NOT flag chain when item has only an attack (no save)', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Slash',
+        description: 'attack only',
+        parsed: {
+          damage: [{ formula: '1d6+2', type: 'slashing' }],
+          attackBonus: 4,
+          attackType: 'melee',
+          reach: 5,
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Slash', type: 'weapon', system: {
+        activities: {
+          atk1: {
+            type: 'attack',
+            _id: 'atk1',
+            attack: { bonus: '+4', flat: true, type: { value: 'melee' } },
+            damage: { parts: [{ custom: { enabled: true, formula: '1d6+2' }, types: ['slashing'] }], includeBase: false },
+            range: { reach: 5, units: 'ft' },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const slash = audit.actions.find(a => a.name === 'Slash')!;
+    expect(slash.divergences.find(d => d.field === 'attack-save.chain')).toBeUndefined();
+  });
+});
