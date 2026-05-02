@@ -34,7 +34,6 @@ import { MapGenerationTools } from './tools/map-generation.js';
 
 import { TokenManipulationTools } from './tools/token-manipulation.js';
 
-import { NpcPortraitTools } from './tools/npc-portrait.js';
 
 import { FoldersTools } from './tools/folders.js';
 
@@ -1170,14 +1169,6 @@ async function startBackend(): Promise<void> {
     logger.warn('Failed to initialize map generation components', { error });
   }
 
-  // Initialize NPC portrait tools (reuses same ComfyUI client as map generation)
-  const npcPortraitTools = new NpcPortraitTools({
-    logger,
-    comfyuiClient: mapGenerationComfyUIClient,
-    forgeAssetsClient,
-    foundryClient,
-  });
-
   // Set up global ComfyUI message handlers for WebSocket messages from Foundry BEFORE creating map tools
 
   (globalThis as any).backendComfyUIHandlers = {
@@ -1371,7 +1362,6 @@ async function startBackend(): Promise<void> {
 
     ...mapGenerationTools.getToolDefinitions(),
 
-    ...npcPortraitTools.getToolDefinitions(),
 
     ...foldersTools.getToolDefinitions(),
 
@@ -1808,26 +1798,6 @@ async function startBackend(): Promise<void> {
                 case 'switch-scene':
 
                   result = await mapGenerationTools.switchScene(args);
-
-                  break;
-
-                // NPC portrait generation tools
-
-                case 'generate-npc-portrait':
-
-                  result = await npcPortraitTools.handleGeneratePortrait(args);
-
-                  break;
-
-                case 'check-portrait-status':
-
-                  result = await npcPortraitTools.handleCheckPortraitStatus(args);
-
-                  break;
-
-                case 'cancel-portrait-job':
-
-                  result = await npcPortraitTools.handleCancelPortraitJob(args);
 
                   break;
 

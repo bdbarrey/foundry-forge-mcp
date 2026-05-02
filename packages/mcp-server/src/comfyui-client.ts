@@ -17,15 +17,6 @@ export interface ComfyUIWorkflowInput {
   quality?: 'low' | 'medium' | 'high';
 }
 
-export interface ComfyUIPortraitInput {
-  description: string;
-  artStyle?: string;
-  width?: number;
-  height?: number;
-  seed?: number;
-  quality?: 'low' | 'medium' | 'high';
-}
-
 export interface ComfyUIJobResponse {
   prompt_id: string;
   number: number;
@@ -642,112 +633,6 @@ export class ComfyUIClient {
         "class_type": "SaveImage"
       }
     };
-  }
-
-  private buildPortraitWorkflow(input: ComfyUIPortraitInput): Record<string, any> {
-    const artStyle = input.artStyle || 'fantasy RPG art, painterly, detailed';
-    const enhancedPrompt = `fantasy character portrait of ${input.description}, ${artStyle}, bust shot, detailed face, dramatic lighting`;
-    const negativePrompt = 'full body, landscape, blurry, text, watermark, low quality, grid, map, top-down, overhead, deformed face, extra fingers';
-
-    const quality = input.quality || 'medium';
-    const steps = quality === 'high' ? 35 : quality === 'medium' ? 20 : 8;
-
-    // Portrait aspect ratio: 512x768 default, or custom
-    const width = input.width || 512;
-    const height = input.height || 768;
-
-    return {
-      "1": {
-        "inputs": {
-          "ckpt_name": "sd_xl_base_1.0.safetensors"
-        },
-        "class_type": "CheckpointLoaderSimple"
-      },
-      "2": {
-        "inputs": {
-          "text": enhancedPrompt,
-          "clip": ["1", 1]
-        },
-        "class_type": "CLIPTextEncode"
-      },
-      "3": {
-        "inputs": {
-          "text": negativePrompt,
-          "clip": ["1", 1]
-        },
-        "class_type": "CLIPTextEncode"
-      },
-      "4": {
-        "inputs": {
-          "width": width,
-          "height": height,
-          "batch_size": 1
-        },
-        "class_type": "EmptyLatentImage"
-      },
-      "5": {
-        "inputs": {
-          "seed": input.seed || Math.floor(Math.random() * 1000000),
-          "steps": steps,
-          "cfg": 7.0,
-          "denoise": 1.0,
-          "sampler_name": "dpmpp_2m_sde",
-          "scheduler": "karras",
-          "model": ["1", 0],
-          "positive": ["2", 0],
-          "negative": ["3", 0],
-          "latent_image": ["4", 0]
-        },
-        "class_type": "KSampler"
-      },
-      "9": {
-        "inputs": {
-          "vae_name": "sdxl_vae.safetensors"
-        },
-        "class_type": "VAELoader"
-      },
-      "6": {
-        "inputs": {
-          "samples": ["5", 0],
-          "vae": ["9", 0]
-        },
-        "class_type": "VAEDecode"
-      },
-      "7": {
-        "inputs": {
-          "filename_prefix": "npc_portrait",
-          "images": ["6", 0]
-        },
-        "class_type": "SaveImage"
-      }
-    };
-  }
-
-  async submitPortraitJob(input: ComfyUIPortraitInput): Promise<ComfyUIJobResponse> {
-    const workflow = this.buildPortraitWorkflow(input);
-
-    try {
-      const response = await axios.post(`${this.baseUrl}/prompt`, {
-        prompt: workflow,
-        client_id: this.clientId
-      }, {
-        timeout: 10000
-      });
-
-      this.logger.info('ComfyUI portrait job submitted', {
-        promptId: response.data.prompt_id,
-        clientId: this.clientId
-      });
-
-      return response.data;
-    } catch (error: any) {
-      this.logger.error('Failed to submit portrait job to ComfyUI', {
-        error: error instanceof Error ? error.message : 'Unknown error',
-        status: error?.response?.status,
-        response: error?.response?.data
-      });
-      throw error;
-    }
   }
 
   getSizePixels(size: 'small' | 'medium' | 'large'): number {
