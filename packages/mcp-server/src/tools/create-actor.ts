@@ -25,7 +25,7 @@ import {
   ActorIntentSchema,
   TraitIntentSchema,
 } from '../intent/intent-schema.js';
-import { actorIntentToReloadedStatblock } from '../intent/actor-intent-adapter.js';
+import { actorIntentToReloadedStatblock, actorIntentMask, type ActorIntentMask } from '../intent/actor-intent-adapter.js';
 import { ForgeAssetsClient, ForgeAssetEntry } from '../forge-assets-client.js';
 import {
   CONFIDENCE_FLOOR,
@@ -336,9 +336,15 @@ export class CreateActorTools {
       // traits_intent / compendium_base / portrait so the existing Mode A
       // pipeline runs unchanged. Top-level inputs win when both are set.
       let sbFromIntent: ReloadedStatblock | null = null;
+      // Phase 12.1.2 fix (2026-05-02): track which fundamentals the intent
+      // actually supplied so the adapter's defaults don't clobber the spawned
+      // compendium base. Mode A leaves this null (chunk-builders write
+      // everything); Mode E sets it from actorIntentMask(actor_intent).
+      let intentMask: ActorIntentMask | null = null;
       if (input.actor_intent) {
         const actorIntent = input.actor_intent as ActorIntent;
         sbFromIntent = actorIntentToReloadedStatblock(actorIntent);
+        intentMask = actorIntentMask(actorIntent);
         if (actorIntent.base && !input.compendium_base) {
           input.compendium_base = actorIntent.base;
         }
@@ -456,7 +462,7 @@ export class CreateActorTools {
       // 6. Apply field overrides in small chunks so that a failure in one
       //    category (e.g. dnd5e rejects the prof-bonus override) doesn't
       //    prevent the others from landing.
-      const updateResults = await this.applyOverridesChunked(newActor.id, sb, input);
+      const updateResults = await this.applyOverridesChunked(newActor.id, sb, input, intentMask);
       // Concatenate successfully-written field keys for the response.
       const successfulUpdateKeys = updateResults.filter(r => r.ok).flatMap(r => r.fields);
       const failedUpdateChunks = updateResults.filter(r => !r.ok).map(r => ({ chunk: r.label, error: r.error }));
@@ -2074,12 +2080,13 @@ export class CreateActorTools {
     actorId: string,
     sb: ReloadedStatblock,
     input: { file_path?: string | undefined },
+    intentMask: ActorIntentMask | null = null,
   ): Promise<Array<{ label: string; fields: string[]; ok: boolean; error?: string }>> {
     const flagsChunk: Record<string, any> = {};
     this.stampFlags(flagsChunk, sb, input);
 
     const chunks: Array<{ label: string; payload: Record<string, any> }> = [
-      { label: 'core-numerics', payload: this.buildCoreNumericsChunk(sb) },
+      { label: 'core-numerics', payload: this.buildCoreNumericsChunk(sb, intentMask) },
       { label: 'saves', payload: this.buildSavesChunk(sb) },
       { label: 'prof-bonus', payload: this.buildProfBonusChunk(sb) },
       { label: 'skills', payload: this.buildSkillsChunk(sb) },
@@ -2169,18 +2176,33 @@ export class CreateActorTools {
     return { added, failed };
   }
 
-  private buildCoreNumericsChunk(sb: ReloadedStatblock): Record<string, any> {
+  private buildCoreNumericsChunk(
+    sb: ReloadedStatblock,
+    mask: ActorIntentMask | null = null,
+  ): Record<string, any> {
     const u: Record<string, any> = {};
-    u['system.attributes.hp.max'] = sb.hp.avg;
-    u['system.attributes.hp.value'] = sb.hp.avg;
-    if (sb.hp.formula) u['system.attributes.hp.formula'] = sb.hp.formula;
-    u['system.attributes.ac.flat'] = sb.ac;
-    u['system.attributes.ac.calc'] = 'flat';
-    for (const [mode, value] of Object.entries(sb.speed)) {
-      u[`system.attributes.movement.${mode}`] = value;
+    // mask is null in Mode A (real statblock parse) — write every field.
+    // mask is non-null in Mode E — skip a block when the intent didn't
+    // supply it, so adapter defaults (HP 1 / AC 10 / walk 0 / abilities 10)
+    // don't overwrite the spawned compendium base.
+    if (!mask || mask.hp) {
+      u['system.attributes.hp.max'] = sb.hp.avg;
+      u['system.attributes.hp.value'] = sb.hp.avg;
+      if (sb.hp.formula) u['system.attributes.hp.formula'] = sb.hp.formula;
     }
-    for (const ab of ['str', 'dex', 'con', 'int', 'wis', 'cha'] as const) {
-      u[`system.abilities.${ab}.value`] = sb.abilities[ab].score;
+    if (!mask || mask.ac) {
+      u['system.attributes.ac.flat'] = sb.ac;
+      u['system.attributes.ac.calc'] = 'flat';
+    }
+    if (!mask || mask.speed) {
+      for (const [mode, value] of Object.entries(sb.speed)) {
+        u[`system.attributes.movement.${mode}`] = value;
+      }
+    }
+    if (!mask || mask.abilities) {
+      for (const ab of ['str', 'dex', 'con', 'int', 'wis', 'cha'] as const) {
+        u[`system.abilities.${ab}.value`] = sb.abilities[ab].score;
+      }
     }
     if (sb.challengeNumeric !== null) u['system.details.cr'] = sb.challengeNumeric;
     if (sb.alignment) u['system.details.alignment'] = sb.alignment;

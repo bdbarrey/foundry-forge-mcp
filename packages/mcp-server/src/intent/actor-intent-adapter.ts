@@ -86,6 +86,48 @@ function joinConditionsOrNull(arr?: ConditionType[]): string | null {
   return arr.join(', ');
 }
 
+/**
+ * Tracks which core-numerics fields were explicitly supplied by the caller.
+ * Mode E with a minimal intent ({name, base}) leaves these false so the
+ * downstream chunk-builders skip writing — preserving the spawned compendium
+ * base's HP/AC/speed/abilities. Mode A doesn't use the mask (sb fields are
+ * always parser-derived from a real statblock), so the chunk-builders treat
+ * an absent mask as "write everything" for backward compatibility.
+ */
+export interface ActorIntentMask {
+  hp: boolean;
+  ac: boolean;
+  speed: boolean;
+  abilities: boolean;
+}
+
+function speedHasAnyMode(speed: ActorIntent['speed']): boolean {
+  if (!speed) return false;
+  return (
+    speed.walk !== undefined
+    || speed.swim !== undefined
+    || speed.fly !== undefined
+    || speed.climb !== undefined
+    || speed.burrow !== undefined
+  );
+}
+
+/**
+ * Build a field-mask from an ActorIntent. True for each fundamentals block
+ * the caller explicitly supplied; false for blocks the adapter would synthesize
+ * from defaults (HP 1 / AC 10 / walk 0 / abilities 10). The Mode E pipeline
+ * passes this mask to applyOverridesChunked so default-synthesized values
+ * never overwrite the spawned compendium base.
+ */
+export function actorIntentMask(intent: ActorIntent): ActorIntentMask {
+  return {
+    hp: intent.hp?.max !== undefined,
+    ac: intent.ac?.value !== undefined,
+    speed: speedHasAnyMode(intent.speed),
+    abilities: !!intent.abilities,
+  };
+}
+
 function challengeFields(cr: ActorIntent['cr']): { challenge: string; challengeNumeric: number | null } {
   if (cr === undefined || cr === null) return { challenge: '', challengeNumeric: null };
   if (typeof cr === 'number') return { challenge: String(cr), challengeNumeric: cr };

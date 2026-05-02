@@ -7,7 +7,7 @@
 // chunk-builders work unchanged.
 
 import { describe, it, expect } from 'vitest';
-import { actorIntentToReloadedStatblock } from './actor-intent-adapter.js';
+import { actorIntentToReloadedStatblock, actorIntentMask } from './actor-intent-adapter.js';
 import { ActorIntentSchema } from './intent-schema.js';
 import type { ActorIntent } from './activity-intent.js';
 
@@ -248,5 +248,56 @@ describe('Phase 12.1.2 — ActorIntentSchema (Zod) acceptance', () => {
         hp: { max: -5 },
       }).success,
     ).toBe(false);
+  });
+});
+
+// Phase 12.1.2 fix (2026-05-02) — actorIntentMask reports which fundamentals
+// the caller actually supplied so the create-actor pipeline can skip writing
+// adapter-defaulted values over a spawned compendium base. Bug surfaced on
+// D-00-01 St. Andral's NPCs: Mode E with `actor_intent: { name, base }` only
+// produced HP 1 / AC 10 / abilities 10 actors because the synthesized sb's
+// defaults flowed straight through buildCoreNumericsChunk.
+describe('Phase 12.1.2 fix — actorIntentMask', () => {
+  it('returns all-false for a name-only intent (the bug case)', () => {
+    const mask = actorIntentMask({ name: 'Test' });
+    expect(mask).toEqual({ hp: false, ac: false, speed: false, abilities: false });
+  });
+
+  it('returns all-false when only base + name supplied (D-00-01 bug case)', () => {
+    const mask = actorIntentMask({
+      name: 'Father Lucian Petrovich',
+      base: { packId: 'world.ddb-curse-of-strahd-ddb-monsters', itemId: 'ddbPriest16985II' },
+    });
+    expect(mask).toEqual({ hp: false, ac: false, speed: false, abilities: false });
+  });
+
+  it('flips bits true for each block the intent supplies', () => {
+    const mask = actorIntentMask({
+      name: 'Vampire Spawn',
+      ac: { value: 15 },
+      hp: { max: 82 },
+      speed: { walk: 30 },
+      abilities: { str: 16, dex: 16, con: 16, int: 11, wis: 10, cha: 12 },
+    });
+    expect(mask).toEqual({ hp: true, ac: true, speed: true, abilities: true });
+  });
+
+  it('only marks speed true when at least one mode is set (empty speed object stays false)', () => {
+    expect(actorIntentMask({ name: 'X', speed: {} }).speed).toBe(false);
+    expect(actorIntentMask({ name: 'X', speed: { walk: 30 } }).speed).toBe(true);
+    expect(actorIntentMask({ name: 'X', speed: { fly: 60 } }).speed).toBe(true);
+    expect(actorIntentMask({ name: 'X', speed: { swim: 40 } }).speed).toBe(true);
+    expect(actorIntentMask({ name: 'X', speed: { climb: 20 } }).speed).toBe(true);
+    expect(actorIntentMask({ name: 'X', speed: { burrow: 10 } }).speed).toBe(true);
+  });
+
+  it('treats hp without max as unset (only formula does not signal a real HP override)', () => {
+    expect(actorIntentMask({ name: 'X', hp: {} as any }).hp).toBe(false);
+    expect(actorIntentMask({ name: 'X', hp: { max: 1 } }).hp).toBe(true);
+  });
+
+  it('treats ac without value as unset (note alone does not signal a real AC override)', () => {
+    expect(actorIntentMask({ name: 'X', ac: { note: 'natural armor' } as any }).ac).toBe(false);
+    expect(actorIntentMask({ name: 'X', ac: { value: 12 } }).ac).toBe(true);
   });
 });

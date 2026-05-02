@@ -845,3 +845,96 @@ describe('handleCreateActorsBatch', () => {
     await expect(tool.handleCreateActorsBatch({ actors: undefined })).rejects.toThrow();
   });
 });
+
+// Phase 12.1.2 fix (2026-05-02) — Mode E minimal-intent passthrough.
+// Bug: actor_intent: { name, base } only → adapter synthesizes sb with default
+// HP 1 / AC 10 / abilities 10 / walk 0 → buildCoreNumericsChunk writes those
+// defaults to the actor → spawned compendium base's stats clobbered.
+// Fix: ActorIntentMask flags which blocks the intent supplied; chunk-builder
+// skips a block when the mask says false, so adapter defaults stay inert.
+describe('buildCoreNumericsChunk — Mode E mask gates default-overwrites', () => {
+  function makeTool() {
+    const fakeLogger: any = {
+      info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+    };
+    fakeLogger.child = () => fakeLogger;
+    return new CreateActorTools({
+      foundryClient: { query: vi.fn() } as any,
+      logger: fakeLogger,
+    });
+  }
+
+  // Hand-crafted sb mirrors what actorIntentToReloadedStatblock emits for a
+  // name-only intent — keeps this test free of cross-module coupling.
+  function defaultSb() {
+    return {
+      name: 'X', size: 'Medium', type: 'Humanoid', subtype: null, alignment: '',
+      ac: 10, acNote: null,
+      hp: { avg: 1, formula: null },
+      speedText: '', speed: { walk: 0 },
+      abilities: {
+        str: { score: 10, mod: 0 }, dex: { score: 10, mod: 0 },
+        con: { score: 10, mod: 0 }, int: { score: 10, mod: 0 },
+        wis: { score: 10, mod: 0 }, cha: { score: 10, mod: 0 },
+      },
+      saves: {}, skills: {},
+      damageResistances: null, damageImmunities: null,
+      damageVulnerabilities: null, conditionImmunities: null,
+      sensesText: '', passivePerception: null,
+      languages: '', challenge: '', challengeNumeric: null, proficiencyBonus: null,
+      traits: [], actions: [], bonusActions: [], reactions: [],
+      legendaryActions: [], lairActions: [],
+    };
+  }
+
+  it('Mode A (mask=null): writes every fundamental, current behavior preserved', () => {
+    const tool: any = makeTool();
+    const out = tool.buildCoreNumericsChunk(defaultSb(), null);
+    expect(out['system.attributes.hp.max']).toBe(1);
+    expect(out['system.attributes.ac.flat']).toBe(10);
+    expect(out['system.attributes.movement.walk']).toBe(0);
+    expect(out['system.abilities.str.value']).toBe(10);
+    expect(out['system.abilities.cha.value']).toBe(10);
+  });
+
+  it('Mode E all-false mask: writes NO HP/AC/speed/abilities (the D-00-01 fix)', () => {
+    const tool: any = makeTool();
+    const out = tool.buildCoreNumericsChunk(defaultSb(), {
+      hp: false, ac: false, speed: false, abilities: false,
+    });
+    expect(out['system.attributes.hp.max']).toBeUndefined();
+    expect(out['system.attributes.hp.value']).toBeUndefined();
+    expect(out['system.attributes.ac.flat']).toBeUndefined();
+    expect(out['system.attributes.ac.calc']).toBeUndefined();
+    expect(out['system.attributes.movement.walk']).toBeUndefined();
+    expect(out['system.abilities.str.value']).toBeUndefined();
+    expect(out['system.abilities.wis.value']).toBeUndefined();
+  });
+
+  it('Mode E partial mask: writes only the blocks the mask says true', () => {
+    const tool: any = makeTool();
+    const sb = { ...defaultSb(), hp: { avg: 50, formula: '8d10' }, ac: 17 };
+    const out = tool.buildCoreNumericsChunk(sb, {
+      hp: true, ac: false, speed: false, abilities: false,
+    });
+    // HP block written (mask.hp = true)
+    expect(out['system.attributes.hp.max']).toBe(50);
+    expect(out['system.attributes.hp.value']).toBe(50);
+    expect(out['system.attributes.hp.formula']).toBe('8d10');
+    // Other blocks skipped
+    expect(out['system.attributes.ac.flat']).toBeUndefined();
+    expect(out['system.attributes.movement.walk']).toBeUndefined();
+    expect(out['system.abilities.str.value']).toBeUndefined();
+  });
+
+  it('Mode E mask still lets cr/alignment write (those are not in the mask scope)', () => {
+    const tool: any = makeTool();
+    const sb = { ...defaultSb(), challengeNumeric: 5, alignment: 'Neutral Evil' };
+    const out = tool.buildCoreNumericsChunk(sb, {
+      hp: false, ac: false, speed: false, abilities: false,
+    });
+    // cr/alignment write regardless of mask — the mask only gates HP/AC/speed/abilities
+    expect(out['system.details.cr']).toBe(5);
+    expect(out['system.details.alignment']).toBe('Neutral Evil');
+  });
+});
