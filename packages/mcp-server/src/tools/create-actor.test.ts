@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload, buildConditionEffect, buildActivityTarget, resolveTraitTemplate, TRAIT_TEMPLATES } from './create-actor.js';
+import { describe, it, expect, vi } from 'vitest';
+import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload, buildConditionEffect, buildActivityTarget, resolveTraitTemplate, TRAIT_TEMPLATES, batchEntryName, CreateActorTools } from './create-actor.js';
 import type { ParsedAction, ParsedCondition } from '../parsers/action-description.js';
 
 describe('buildItemActivityUpdate', () => {
@@ -693,5 +693,155 @@ describe('resolveTraitTemplate (Phase 10B)', () => {
         expect(eff.flags?.core).toEqual({});
       }
     }
+  });
+});
+
+// ----- Phase 12.1.3 — batch tool ------------------------------------------
+
+describe('batchEntryName', () => {
+  it('prefers actor_intent.name (Mode E)', () => {
+    expect(batchEntryName({ actor_intent: { name: 'Volenta' } }, 0)).toBe('Volenta');
+    // actor_intent.name wins even when other fields are present
+    expect(
+      batchEntryName(
+        { actor_intent: { name: 'Volenta' }, creature_name: 'X', actor_name: 'Y' },
+        0,
+      ),
+    ).toBe('Volenta');
+  });
+
+  it('falls through to creature_name (Mode A/B)', () => {
+    expect(batchEntryName({ creature_name: 'Wight Commander' }, 0)).toBe(
+      'Wight Commander',
+    );
+  });
+
+  it('falls through to actor_name (Mode C rename)', () => {
+    expect(batchEntryName({ actor_name: 'Renamed' }, 0)).toBe('Renamed');
+  });
+
+  it('reports compendium_base.itemId when no name fields are present', () => {
+    expect(batchEntryName({ compendium_base: { packId: 'p', itemId: 'foo' } }, 0)).toBe(
+      '<base:foo>',
+    );
+  });
+
+  it('extracts h2 from reloaded_source markdown', () => {
+    expect(
+      batchEntryName(
+        { reloaded_source: '<div class="statblock"><h2>Wolf Spawn</h2>...</div>' },
+        0,
+      ),
+    ).toBe('Wolf Spawn');
+  });
+
+  it('falls back to <entry N> when nothing matches', () => {
+    expect(batchEntryName({}, 7)).toBe('<entry 7>');
+    expect(batchEntryName(null, 0)).toBe('<entry 0>');
+    expect(batchEntryName(undefined, 3)).toBe('<entry 3>');
+  });
+});
+
+describe('handleCreateActorsBatch', () => {
+  // Stub deps — handleCreateActor is mocked, so foundryClient never actually
+  // gets called.
+  function makeTool() {
+    const fakeLogger: any = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    // CreateActorTools' constructor calls logger.child({...}); mirror the
+    // structured-logger interface by returning self.
+    fakeLogger.child = () => fakeLogger;
+    const fakeFoundry = { query: vi.fn() } as any;
+    return new CreateActorTools({
+      foundryClient: fakeFoundry,
+      logger: fakeLogger,
+    });
+  }
+
+  it('runs entries sequentially, reports per-entry success + actorId', async () => {
+    const tool = makeTool();
+    const calls: string[] = [];
+    vi.spyOn(tool, 'handleCreateActor').mockImplementation(async (args: any) => {
+      calls.push(args.creature_name);
+      return { success: true, actorId: `actor-${args.creature_name}` };
+    });
+
+    const result = await tool.handleCreateActorsBatch({
+      actors: [
+        { creature_name: 'Alpha' },
+        { creature_name: 'Beta' },
+        { creature_name: 'Gamma' },
+      ],
+    });
+
+    expect(calls).toEqual(['Alpha', 'Beta', 'Gamma']);
+    expect(result.total).toBe(3);
+    expect(result.succeeded).toBe(3);
+    expect(result.failed).toBe(0);
+    expect(result.results).toHaveLength(3);
+    expect(result.results[0]).toMatchObject({
+      index: 0,
+      name: 'Alpha',
+      success: true,
+      actorId: 'actor-Alpha',
+    });
+    expect(result.results[2]).toMatchObject({ name: 'Gamma', actorId: 'actor-Gamma' });
+  });
+
+  it('isolates per-entry failures and continues the batch', async () => {
+    const tool = makeTool();
+    vi.spyOn(tool, 'handleCreateActor').mockImplementation(async (args: any) => {
+      if (args.creature_name === 'BrokenBeta') throw new Error('parse failed');
+      return { success: true, actorId: `id-${args.creature_name}` };
+    });
+
+    const result = await tool.handleCreateActorsBatch({
+      actors: [
+        { creature_name: 'Alpha' },
+        { creature_name: 'BrokenBeta' },
+        { creature_name: 'Gamma' },
+      ],
+    });
+
+    expect(result.total).toBe(3);
+    expect(result.succeeded).toBe(2);
+    expect(result.failed).toBe(1);
+    expect(result.results[0]).toMatchObject({ success: true, actorId: 'id-Alpha' });
+    expect(result.results[1]).toMatchObject({ success: false, error: 'parse failed' });
+    expect(result.results[2]).toMatchObject({ success: true, actorId: 'id-Gamma' });
+  });
+
+  it('extracts names per entry using actor_intent / creature_name fallback chain', async () => {
+    const tool = makeTool();
+    vi.spyOn(tool, 'handleCreateActor').mockImplementation(async () => ({
+      success: true,
+      actorId: 'X',
+    }));
+
+    const result = await tool.handleCreateActorsBatch({
+      actors: [
+        { actor_intent: { name: 'IntentBuild' } },
+        { creature_name: 'ParseBuild' },
+        { compendium_base: { packId: 'p', itemId: 'baseId' } },
+        {},
+      ],
+    });
+
+    expect(result.results.map((r: any) => r.name)).toEqual([
+      'IntentBuild',
+      'ParseBuild',
+      '<base:baseId>',
+      '<entry 3>',
+    ]);
+  });
+
+  it('rejects an empty actors array', async () => {
+    const tool = makeTool();
+    await expect(tool.handleCreateActorsBatch({ actors: [] })).rejects.toThrow();
+    await expect(tool.handleCreateActorsBatch({ actors: undefined })).rejects.toThrow();
   });
 });

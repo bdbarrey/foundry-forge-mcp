@@ -1497,6 +1497,12 @@ async function startBackend(): Promise<void> {
 
                   break;
 
+                case 'create-actors':
+
+                  result = await createActorTools.handleCreateActorsBatch(args);
+
+                  break;
+
                 case 'infer-base-monster':
 
                   result = await createActorTools.handleInferBaseMonster(args);

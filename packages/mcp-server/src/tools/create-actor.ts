@@ -172,6 +172,23 @@ export class CreateActorTools {
         },
       },
       {
+        name: 'create-actors',
+        description:
+          'Phase 12.1.3 — batch create. Takes an array of create-actor inputs and applies them sequentially with per-actor failure isolation. Use when you need to populate a scene end-to-end ("create all the actors for scene X"): emit one entry per creature, pass them all in `actors`, and the tool returns a per-actor result (success + actorId, or failure + error). Failures isolate — a malformed entry doesn\'t halt the batch. Each entry follows the same shape as create-actor input — Mode A (reloaded_source / file_path+creature_name), Mode B (prose), Mode C (compendium_base passthrough), Mode D (Mode A + actions_intent / traits_intent), Mode E (actor_intent), all supported per entry. Sequential execution to avoid Foundry race conditions on concurrent createEmbeddedDocuments. Returns { total, succeeded, failed, results: [{name, success, actorId?, error?, detail?}] }.',
+        inputSchema: {
+          type: 'object',
+          required: ['actors'],
+          properties: {
+            actors: {
+              type: 'array',
+              description: 'Array of create-actor inputs. Each entry is the same shape as the create-actor tool\'s input. You can mix modes per entry — e.g. emit actor_intent for homebrew creatures, reloaded_source for known Reloaded NPCs, compendium_base passthrough for actors with no Reloaded modifications.',
+              items: { type: 'object' },
+              minItems: 1,
+            },
+          },
+        },
+      },
+      {
         name: 'infer-base-monster',
         description:
           'Pre-step for create-actor on Reloaded creatures: parse a Reloaded statblock and return a ranked list of candidate compendium monsters to use as the base for create-actor\'s hybrid path. Scores candidates by CR/HP/AC proximity, ability-score cosine, size, and TRAIT/ACTION NAME OVERLAP — which is the strongest fingerprint (e.g. a CR-5 undead sharing Regeneration + Spider Climb + Sunlight Hypersensitivity is almost certainly built on Vampire Spawn, not a generic undead). Typical workflow: user says "create <Name> actor" → call infer-base-monster first → pass topPick.packId/itemId as create-actor\'s compendium_base. Confidence tier "high" means proceed silently; "low" means no candidate cleared the floor (0.55) and you should ask the user or consider scratch-build.',
@@ -1073,6 +1090,75 @@ export class CreateActorTools {
     } catch (error) {
       this.errorHandler.handleToolError(error, 'create-actor', 'actor creation');
     }
+  }
+
+  /**
+   * Phase 12.1.3 — batch create. Iterates `actors` and calls handleCreateActor
+   * per entry, with per-actor failure isolation: a thrown error from one entry
+   * is caught, logged, and recorded in results — the rest of the batch
+   * continues. Sequential execution (Foundry's createEmbeddedDocuments isn't
+   * built for concurrent multi-actor creation; one race observed in 3a-polish
+   * around addActorItems batches gave us the conservative default).
+   *
+   * Each entry follows the create-actor inputSchema (Mode A/B/C/D/E). The
+   * tool returns aggregate counts + a per-entry result with the original
+   * input's name and either the new actorId or the error message.
+   */
+  async handleCreateActorsBatch(args: any): Promise<any> {
+    const schema = z.object({
+      actors: z.array(z.any()).min(1),
+    });
+    const input = schema.parse(args);
+
+    this.logger.info('create-actors batch invoked', { count: input.actors.length });
+
+    type Result = {
+      index: number;
+      name: string;
+      success: boolean;
+      actorId?: string;
+      error?: string;
+      detail?: any;
+    };
+    const results: Result[] = [];
+    let succeeded = 0;
+    let failed = 0;
+
+    for (let i = 0; i < input.actors.length; i++) {
+      const entry = input.actors[i];
+      const name = this.batchEntryName(entry, i);
+      try {
+        const detail = await this.handleCreateActor(entry);
+        const actorId =
+          (detail as any)?.actorId ?? (detail as any)?.actor?.id ?? undefined;
+        results.push({
+          index: i,
+          name,
+          success: true,
+          ...(actorId ? { actorId } : {}),
+          detail,
+        });
+        succeeded++;
+      } catch (err: any) {
+        const message = err?.message ?? String(err);
+        results.push({ index: i, name, success: false, error: message });
+        failed++;
+        this.logger.warn(`create-actors batch[${i}] "${name}" failed`, {
+          error: message,
+        });
+      }
+    }
+
+    return {
+      total: input.actors.length,
+      succeeded,
+      failed,
+      results,
+    };
+  }
+
+  private batchEntryName(entry: any, idx: number): string {
+    return batchEntryName(entry, idx);
   }
 
   /**
@@ -2936,6 +3022,31 @@ export function buildUsesPayload(marker: ParsedAction['usage'] | null | undefine
     spent: 0,
     recovery: [{ period: recoveryPeriod, type: 'recoverAll' }],
   };
+}
+
+/**
+ * Phase 12.1.3 — pick the best-effort display name for a batch entry. Used
+ * for logging and per-entry result reporting; not load-bearing for the build
+ * itself. Falls back through the input modes:
+ *   actor_intent.name (Mode E)        — preferred, always present in Mode E
+ *   creature_name (Mode A/B)          — when caller passed a Reloaded section heading
+ *   actor_name (Mode C)               — passthrough rename
+ *   compendium_base.itemId (Mode C)   — last resort before parse-by-source
+ *   first <h2> in reloaded_source     — Reloaded markdown convention
+ *   "<entry N>"                       — final fallback
+ */
+export function batchEntryName(entry: any, idx: number): string {
+  if (entry?.actor_intent?.name) return String(entry.actor_intent.name);
+  if (entry?.creature_name) return String(entry.creature_name);
+  if (entry?.actor_name) return String(entry.actor_name);
+  if (entry?.compendium_base?.itemId) {
+    return `<base:${entry.compendium_base.itemId}>`;
+  }
+  if (typeof entry?.reloaded_source === 'string') {
+    const m = entry.reloaded_source.match(/<h2[^>]*>([^<]+)<\/h2>/i);
+    if (m) return m[1].trim();
+  }
+  return `<entry ${idx}>`;
 }
 
 // ----- Phase 3b helpers: copy-patch & scratch-build -------------------------
