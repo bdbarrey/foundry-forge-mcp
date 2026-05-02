@@ -238,14 +238,15 @@ describe('Phase 12.1 — writer output shape from hand-authored intents', () => 
     });
 
     // ActiveEffect is on the item with statuses[] so Midi/dnd5e auto-apply
-    // the canonical condition on save fail. img matches CONFIG.statusEffects
-    // so AE icon and condition icon are the same SVG (single-icon strategy
-    // for dnd5e 5.x — finalized 2026-05-02).
+    // the canonical condition on save fail. AE name + img match the SOURCE
+    // action ("Tanglefoot" + opts.img) so the Temporary Effects panel
+    // tracks "Tanglefoot from Volenta" — distinct from the canonical
+    // Restrained condition state in actor.statuses (2026-05-02 final).
     expect(doc.effects).toHaveLength(1);
     const eff = (doc.effects as any[])[0];
     expect(eff.statuses).toEqual(['restrained']);
-    expect(eff.name).toBe('Restrained');
-    expect(eff.img).toBe('systems/dnd5e/icons/svg/statuses/restrained.svg');
+    expect(eff.name).toBe('Tanglefoot');
+    expect(eff.img).toBe('icons/test/feat.svg'); // opts.img from detOpts()
 
     // Repeat-save → Midi OverTime change on the effect.
     expect(eff.changes).toHaveLength(1);
@@ -300,12 +301,18 @@ describe('Phase 12.1 — capabilities the regex parser cannot produce', () => {
 
     const doc = writeScratchItem(intent, detOpts());
 
-    // Item carries TWO ActiveEffect docs (one per condition).
+    // Item carries TWO ActiveEffect docs (one per condition). Both are
+    // named after the source action ("Thunderstone") with the same source
+    // img — they're distinguished by their statuses[] entry.
     expect(doc.effects).toHaveLength(2);
     expect((doc.effects as any[]).map(e => e.statuses[0])).toEqual([
       'prone',
       'deafened',
     ]);
+    for (const e of doc.effects as any[]) {
+      expect(e.name).toBe('Thunderstone');
+      expect(e.img).toBe('icons/test/feat.svg');
+    }
 
     // Save activity links BOTH effects.
     const activities: Record<string, any> = doc.system.activities;

@@ -430,17 +430,20 @@ describe('buildUsesPayload (Phase 8 dnd5e system.uses shape)', () => {
   });
 });
 
-describe('buildConditionEffect (Phase 10A — final shape 2026-05-02 for dnd5e 5.x)', () => {
-  it('builds a Foundry ActiveEffect doc with statuses[] + canonical img path (single-icon strategy)', () => {
+describe('buildConditionEffect (Phase 10A — legacy regex-parser path; no source action context)', () => {
+  it('builds a Foundry ActiveEffect doc with statuses[] + canonical img path (legacy fallback shape)', () => {
+    // Called without sourceName/sourceImg — falls back to the condition's
+    // title-case name and canonical icon. The intent-driven path
+    // (writeScratchItem) passes the SOURCE action name + img so the AE
+    // represents the source effect rather than the condition state.
     const eff = buildConditionEffect({ type: 'restrained' });
     expect(eff.name).toBe('Restrained');
     // statuses[] is required so Midi/dnd5e auto-apply the canonical
     // condition on save fail (puts type in actor.statuses, the Conditions
     // panel shows it, rules engine applies speed=0/disadvantage/etc).
     expect(eff.statuses).toEqual(['restrained']);
-    // img matches CONFIG.statusEffects[type].img so the AE.img render and
-    // the canonical condition icon render are the same SVG → visually
-    // merge into one icon on the token. Live-verified path on dnd5e 5.3.2.
+    // img falls back to CONFIG.statusEffects[type].img path. Live-verified
+    // on dnd5e 5.3.2.
     expect(eff.img).toBe('systems/dnd5e/icons/svg/statuses/restrained.svg');
     expect(eff.transfer).toBe(false);
     expect(eff.disabled).toBe(false);

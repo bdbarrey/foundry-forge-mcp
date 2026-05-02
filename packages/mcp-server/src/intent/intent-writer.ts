@@ -118,32 +118,28 @@ function escapeHtml(s: string): string {
  *   condition (puts the type in actor.statuses, fires the system's
  *   condition-mechanic hooks, the Conditions panel on the sheet shows it,
  *   chat actions like "you have the X condition" trigger correctly).
- *   This is the system's native pathway — it's what Midi reads to decide
- *   that the target IS restrained, that the rules engine should impose
- *   speed=0 / disadvantage / etc.
  *
- * - The token icon HUD renders a glyph for each AE on the actor (using
- *   AE.img) AND for each canonical condition in actor.statuses (using
- *   CONFIG.statusEffects[type].img). When AE.img and the canonical SVG
- *   are different paths, the user sees TWO icons on the token. When
- *   they're the same path, the renders visually merge into one icon.
+ * - The token icon HUD renders BOTH actor.effects (AE.img per AE) AND
+ *   actor.statuses (canonical CONFIG.statusEffects[type].icon). With our
+ *   AE carrying statuses[], that means TWO icons render on the token.
  *
- * Two earlier attempts went sideways:
- * - flags.dae.showIcon=false (Phase 10C.1) — works in dnd5e 4.x via DAE
- *   but ignored in 5.x because dnd5e itself does the rendering.
- * - Dropping statuses[] entirely + relying on the &Reference[<type>]
- *   enricher in the description — turns out Midi's auto-apply hook
- *   doesn't read description enrichers; the pill is GM-clickable only,
- *   and the canonical condition never gets toggled automatically.
+ * Naming convention (live-verified Volenta 2026-05-02 — user feedback):
+ *   - AE name = source action name (e.g. "Tanglefoot"), passed via
+ *     `sourceName` arg. The AE represents the SOURCE — that's exactly
+ *     what the Temporary Effects panel is meant to track ("Restrained
+ *     from Volenta's Tanglefoot", not just "Restrained").
+ *   - AE img = source action img (the feat's icon), passed via
+ *     `sourceImg`. Distinct from CONFIG.statusEffects[type].icon, so
+ *     the two icons on the token convey distinct information:
+ *       * Source-action icon = "this source effect is active and the
+ *         save-loop is running"
+ *       * Canonical condition icon = "target IS in the X state"
+ *   - statuses[type] still set, so the canonical condition mechanics
+ *     (rules engine integration + Conditions panel toggle) still fire.
  *
- * Final shape: keep statuses[] (so Midi/dnd5e auto-apply the canonical
- * condition on save fail) AND set AE.img to CONDITION_ICONS[type], which
- * points at the same `systems/dnd5e/icons/svg/statuses/<type>.svg` path
- * the system uses for CONFIG.statusEffects. Both renders draw the same
- * SVG → user sees one icon.
- *
- * The AE also carries the OverTime save-loop change (when condition has
- * `repeatSave`) — that's the part the canonical condition AE doesn't have.
+ * If sourceName/sourceImg are omitted (e.g. legacy buildConditionEffect
+ * call from the regex parser path), falls back to condition title-case
+ * name + canonical condition icon. Backward-compatible.
  *
  * `effectId` is supplied by the caller so writeScratchItem can pre-allocate
  * IDs and link them from activities[].effects[]. When omitted, generates a
@@ -152,14 +148,16 @@ function escapeHtml(s: string): string {
 export function writeConditionEffect(
   condition: ConditionIntent,
   effectId?: string,
+  sourceName?: string,
+  sourceImg?: string,
 ): Record<string, any> {
   const id = effectId ?? genEffectId();
   const titleCase = condition.type[0].toUpperCase() + condition.type.slice(1);
   const effect: Record<string, any> = {
     _id: id,
-    name: titleCase,
+    name: sourceName ?? titleCase,
     statuses: [condition.type],
-    img: CONDITION_ICONS[condition.type] ?? 'icons/svg/aura.svg',
+    img: sourceImg ?? CONDITION_ICONS[condition.type] ?? 'icons/svg/aura.svg',
     type: 'base',
     system: {},
     changes: [],
@@ -397,8 +395,13 @@ export function writeScratchItem(
     system.activities = activities;
   }
 
+  // Pass the source action's name + img so the AE represents the SOURCE
+  // (e.g. "Tanglefoot") rather than the canonical condition ("Restrained").
+  // The Temporary Effects panel is for tracking sources; canonical condition
+  // state lives in actor.statuses (and renders separately on the token).
+  // 2026-05-02 user-feedback finalize.
   const itemEffects: Record<string, any>[] = intent.conditions.map((c, i) =>
-    writeConditionEffect(c, effectIdMap.get(i)),
+    writeConditionEffect(c, effectIdMap.get(i), intent.name, opts.img),
   );
 
   const itemFlags: Record<string, any> = {
