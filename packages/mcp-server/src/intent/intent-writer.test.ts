@@ -237,13 +237,15 @@ describe('Phase 12.1 — writer output shape from hand-authored intents', () => 
       units: 'ft',
     });
 
-    // ActiveEffect is on the item — does NOT carry statuses[] (Path B fix
-    // 2026-05-02). The canonical condition status is applied separately
-    // via the &Reference[<type>] enricher in the activity description.
+    // ActiveEffect is on the item with statuses[] so Midi/dnd5e auto-apply
+    // the canonical condition on save fail. img matches CONFIG.statusEffects
+    // so AE icon and condition icon are the same SVG (single-icon strategy
+    // for dnd5e 5.x — finalized 2026-05-02).
     expect(doc.effects).toHaveLength(1);
     const eff = (doc.effects as any[])[0];
-    expect(eff.statuses).toBeUndefined();
+    expect(eff.statuses).toEqual(['restrained']);
     expect(eff.name).toBe('Restrained');
+    expect(eff.img).toBe('systems/dnd5e/icons/svg/statuses/restrained.svg');
 
     // Repeat-save → Midi OverTime change on the effect.
     expect(eff.changes).toHaveLength(1);
@@ -255,8 +257,9 @@ describe('Phase 12.1 — writer output shape from hand-authored intents', () => 
     // Save activity links to the effect by id.
     expect(saveActivity.effects[0]._id).toBe(eff._id);
 
-    // Description carries &Reference[restrained] enricher so Midi auto-toggles
-    // the canonical condition on save fail.
+    // Description retains the &Reference enricher as an informational chat-
+    // card pill (clickable; doesn't auto-apply since statuses[] already
+    // handles the canonical-condition application).
     expect(doc.system.description.value).toContain('&Reference[restrained]');
   });
 });
@@ -297,13 +300,12 @@ describe('Phase 12.1 — capabilities the regex parser cannot produce', () => {
 
     const doc = writeScratchItem(intent, detOpts());
 
-    // Item carries TWO ActiveEffect docs (one per condition). Path B fix
-    // 2026-05-02: statuses[] omitted; identification by AE name instead.
+    // Item carries TWO ActiveEffect docs (one per condition).
     expect(doc.effects).toHaveLength(2);
-    expect((doc.effects as any[]).map(e => e.name)).toEqual(['Prone', 'Deafened']);
-    for (const e of doc.effects as any[]) {
-      expect(e.statuses).toBeUndefined();
-    }
+    expect((doc.effects as any[]).map(e => e.statuses[0])).toEqual([
+      'prone',
+      'deafened',
+    ]);
 
     // Save activity links BOTH effects.
     const activities: Record<string, any> = doc.system.activities;
@@ -316,8 +318,8 @@ describe('Phase 12.1 — capabilities the regex parser cannot produce', () => {
     expect(linkedEffectIds).toEqual(itemEffectIds);
 
     // The deafened condition emits a duration block; prone has none.
-    const proneEffect = (doc.effects as any[]).find(e => e.name === 'Prone');
-    const deafenedEffect = (doc.effects as any[]).find(e => e.name === 'Deafened');
+    const proneEffect = (doc.effects as any[]).find(e => e.statuses[0] === 'prone');
+    const deafenedEffect = (doc.effects as any[]).find(e => e.statuses[0] === 'deafened');
     expect(proneEffect.duration).toBeUndefined();
     expect(deafenedEffect.duration).toEqual({
       startTime: null,
@@ -381,14 +383,10 @@ describe('Phase 12.1 — capabilities the regex parser cannot produce', () => {
       { custom: { enabled: true, formula: '1d6 + 3' }, types: ['piercing'] },
     ]);
 
-    // The save links to the paralyzed effect (identified by name; no
-    // statuses[] per Path B fix 2026-05-02).
+    // The save links to the paralyzed effect.
     expect(saveActivity.effects).toHaveLength(1);
-    expect((doc.effects as any[])[0].name).toBe('Paralyzed');
-    expect((doc.effects as any[])[0].statuses).toBeUndefined();
+    expect((doc.effects as any[])[0].statuses[0]).toBe('paralyzed');
     expect(saveActivity.effects[0]._id).toBe((doc.effects as any[])[0]._id);
-    // Description has the paralyzed reference enricher.
-    expect(doc.system.description.value).toContain('&Reference[paralyzed]');
   });
 });
 

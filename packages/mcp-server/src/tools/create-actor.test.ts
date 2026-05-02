@@ -430,16 +430,18 @@ describe('buildUsesPayload (Phase 8 dnd5e system.uses shape)', () => {
   });
 });
 
-describe('buildConditionEffect (Phase 10A — updated 2026-05-02 for dnd5e 5.x)', () => {
-  it('builds a Foundry ActiveEffect doc WITHOUT statuses[] (Path B: condition applied via &Reference enricher)', () => {
+describe('buildConditionEffect (Phase 10A — final shape 2026-05-02 for dnd5e 5.x)', () => {
+  it('builds a Foundry ActiveEffect doc with statuses[] + canonical img path (single-icon strategy)', () => {
     const eff = buildConditionEffect({ type: 'restrained' });
     expect(eff.name).toBe('Restrained');
-    // 2026-05-02 fix: statuses[] omitted. dnd5e 5.x renders both AE.img and
-    // CONFIG.statusEffects[X].icon when statuses[] is set, causing the
-    // double-icon bug (live-verified Volenta on dnd5e 5.3.2 + Midi 13.0.61).
-    // The activity description's &Reference[<type>] enricher applies the
-    // canonical condition via Midi-QOL's save-fail hook instead.
-    expect(eff.statuses).toBeUndefined();
+    // statuses[] is required so Midi/dnd5e auto-apply the canonical
+    // condition on save fail (puts type in actor.statuses, the Conditions
+    // panel shows it, rules engine applies speed=0/disadvantage/etc).
+    expect(eff.statuses).toEqual(['restrained']);
+    // img matches CONFIG.statusEffects[type].img so the AE.img render and
+    // the canonical condition icon render are the same SVG → visually
+    // merge into one icon on the token. Live-verified path on dnd5e 5.3.2.
+    expect(eff.img).toBe('systems/dnd5e/icons/svg/statuses/restrained.svg');
     expect(eff.transfer).toBe(false);
     expect(eff.disabled).toBe(false);
     expect(eff.type).toBe('base');
@@ -452,9 +454,9 @@ describe('buildConditionEffect (Phase 10A — updated 2026-05-02 for dnd5e 5.x)'
     expect(eff.flags.dae.stackable).toBe('noneName');
     expect(eff.flags.dae.transfer).toBe(false);
     expect(eff.flags.dae.specialDuration).toEqual([]);
-    // showIcon flag dropped: ineffective in dnd5e 5.x (DAE no longer renders
-    // the icon — the system does), and we no longer have statuses[] for it
-    // to suppress against anyway.
+    // showIcon flag dropped: ineffective in dnd5e 5.x (DAE no longer
+    // renders the icon — the system does); icon dedupe handled by the
+    // matching canonical img path above.
     expect(eff.flags.dae.showIcon).toBeUndefined();
     // Midi: forceCEOff so CE doesn't shadow the native Foundry status
     expect(eff.flags['midi-qol'].forceCEOff).toBe(true);

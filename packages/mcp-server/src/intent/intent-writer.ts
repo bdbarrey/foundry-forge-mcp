@@ -111,23 +111,39 @@ function escapeHtml(s: string): string {
 /**
  * Build a Foundry ActiveEffect document from a ConditionIntent.
  *
- * dnd5e 5.x architecture (live-verified Volenta 2026-05-02 on dnd5e 5.3.2 +
- * Midi-QOL 13.0.61): an AE with `statuses[]` causes dnd5e to auto-apply the
- * canonical condition AS WELL — two separate icons render on the affected
- * token (one for our AE.img, one for CONFIG.statusEffects[type].icon). DAE's
- * `flags.dae.showIcon: false` from Phase 10C.1 is ignored in 5.x because DAE
- * isn't doing the rendering anymore.
+ * dnd5e 5.x architecture (live-verified on Volenta 2026-05-02, dnd5e 5.3.2
+ * + Midi-QOL 13.0.61):
  *
- * Fix is to NOT carry `statuses[]` on the AE. The condition is applied
- * separately via the `&Reference[<type>]` enricher injected into the
- * activity description by writeScratchItem — Midi-QOL 13.x's default config
- * auto-toggles the canonical condition status on the target on save fail
- * (chat card pill is also clickable for GM-driven setups).
+ * - `statuses[<type>]` on the AE: dnd5e 5.x auto-applies the canonical
+ *   condition (puts the type in actor.statuses, fires the system's
+ *   condition-mechanic hooks, the Conditions panel on the sheet shows it,
+ *   chat actions like "you have the X condition" trigger correctly).
+ *   This is the system's native pathway — it's what Midi reads to decide
+ *   that the target IS restrained, that the rules engine should impose
+ *   speed=0 / disadvantage / etc.
  *
- * The AE we emit here only carries what the canonical condition can't:
- * the OverTime save-loop ("save vs Restrained at end of each turn"). When
- * the save succeeds, the OverTime removes this AE — and once Midi sees
- * the source effect gone, it auto-clears the linked condition too.
+ * - The token icon HUD renders a glyph for each AE on the actor (using
+ *   AE.img) AND for each canonical condition in actor.statuses (using
+ *   CONFIG.statusEffects[type].img). When AE.img and the canonical SVG
+ *   are different paths, the user sees TWO icons on the token. When
+ *   they're the same path, the renders visually merge into one icon.
+ *
+ * Two earlier attempts went sideways:
+ * - flags.dae.showIcon=false (Phase 10C.1) — works in dnd5e 4.x via DAE
+ *   but ignored in 5.x because dnd5e itself does the rendering.
+ * - Dropping statuses[] entirely + relying on the &Reference[<type>]
+ *   enricher in the description — turns out Midi's auto-apply hook
+ *   doesn't read description enrichers; the pill is GM-clickable only,
+ *   and the canonical condition never gets toggled automatically.
+ *
+ * Final shape: keep statuses[] (so Midi/dnd5e auto-apply the canonical
+ * condition on save fail) AND set AE.img to CONDITION_ICONS[type], which
+ * points at the same `systems/dnd5e/icons/svg/statuses/<type>.svg` path
+ * the system uses for CONFIG.statusEffects. Both renders draw the same
+ * SVG → user sees one icon.
+ *
+ * The AE also carries the OverTime save-loop change (when condition has
+ * `repeatSave`) — that's the part the canonical condition AE doesn't have.
  *
  * `effectId` is supplied by the caller so writeScratchItem can pre-allocate
  * IDs and link them from activities[].effects[]. When omitted, generates a
@@ -142,8 +158,7 @@ export function writeConditionEffect(
   const effect: Record<string, any> = {
     _id: id,
     name: titleCase,
-    // statuses intentionally omitted — see file header. Condition is applied
-    // via the &Reference enricher in the activity description.
+    statuses: [condition.type],
     img: CONDITION_ICONS[condition.type] ?? 'icons/svg/aura.svg',
     type: 'base',
     system: {},
