@@ -492,10 +492,15 @@ describe('buildConditionEffect (Phase 10A)', () => {
     expect(eff.duration?.rounds).toBe(1);
   });
 
-  it('uses a Foundry SVG icon for known conditions', () => {
-    expect(buildConditionEffect({ type: 'prone' }).img).toBe('icons/svg/falling.svg');
-    expect(buildConditionEffect({ type: 'blinded' }).img).toBe('icons/svg/blind.svg');
-    expect(buildConditionEffect({ type: 'restrained' }).img).toBe('icons/svg/net.svg');
+  it('uses dnd5e 5.x canonical condition icons so the AE icon merges with the native status icon (no double-render)', () => {
+    // 2026-05-02 live-verified Volenta: in dnd5e 5.x, an AE with statuses[]
+    // causes the system to render the canonical condition icon AND the AE's
+    // own img — two icons on the token. Pointing img at the same canonical
+    // path means both renders draw the same SVG so they visually merge.
+    expect(buildConditionEffect({ type: 'prone' }).img).toBe('systems/dnd5e/icons/svg/statuses/prone.svg');
+    expect(buildConditionEffect({ type: 'blinded' }).img).toBe('systems/dnd5e/icons/svg/statuses/blinded.svg');
+    expect(buildConditionEffect({ type: 'restrained' }).img).toBe('systems/dnd5e/icons/svg/statuses/restrained.svg');
+    expect(buildConditionEffect({ type: 'deafened' }).img).toBe('systems/dnd5e/icons/svg/statuses/deafened.svg');
   });
 
   it('two effects for the same condition get distinct ids (random 16-char)', () => {

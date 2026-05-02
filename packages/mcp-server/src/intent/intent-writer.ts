@@ -67,24 +67,34 @@ export function damagePartPayload(d: { formula: string; type: string }) {
 }
 
 /**
- * Foundry's bundled SVG icons for dnd5e condition statuses. Ships with core
- * Foundry under `icons/svg/` — renders even when the user hasn't installed
- * an icon-pack module. Keys mirror ConditionType from action-description.ts.
+ * Canonical condition icons that match the dnd5e system's own
+ * CONFIG.statusEffects icons (systems/dnd5e/icons/svg/statuses/<name>.svg).
+ *
+ * In dnd5e 5.x, applying an AE with `statuses: [<condition>]` causes the
+ * system to render its OWN canonical condition icon on the token AND the
+ * AE's `img` icon as a separate icon — two icons stacked. (DAE's
+ * `flags.dae.showIcon: false` flag from Phase 10C.1 is ignored in 5.x
+ * because DAE isn't doing the rendering anymore.)
+ *
+ * Setting our AE's `img` to the same path the system uses means both
+ * renders draw the same SVG, so they visually merge into one icon. (Live-
+ * verified Volenta 2026-05-02 — Tanglefoot's restrained showed `icons/svg/net.svg`
+ * stacked next to dnd5e's `systems/dnd5e/icons/svg/statuses/restrained.svg`.)
  */
 export const CONDITION_ICONS: Record<string, string> = {
-  blinded: 'icons/svg/blind.svg',
-  charmed: 'icons/svg/heart.svg',
-  deafened: 'icons/svg/sound.svg',
-  frightened: 'icons/svg/terror.svg',
-  grappled: 'icons/svg/net.svg',
-  incapacitated: 'icons/svg/silenced.svg',
-  paralyzed: 'icons/svg/paralysis.svg',
-  petrified: 'icons/svg/statue.svg',
-  poisoned: 'icons/svg/poison.svg',
-  prone: 'icons/svg/falling.svg',
-  restrained: 'icons/svg/net.svg',
-  stunned: 'icons/svg/daze.svg',
-  unconscious: 'icons/svg/unconscious.svg',
+  blinded: 'systems/dnd5e/icons/svg/statuses/blinded.svg',
+  charmed: 'systems/dnd5e/icons/svg/statuses/charmed.svg',
+  deafened: 'systems/dnd5e/icons/svg/statuses/deafened.svg',
+  frightened: 'systems/dnd5e/icons/svg/statuses/frightened.svg',
+  grappled: 'systems/dnd5e/icons/svg/statuses/grappled.svg',
+  incapacitated: 'systems/dnd5e/icons/svg/statuses/incapacitated.svg',
+  paralyzed: 'systems/dnd5e/icons/svg/statuses/paralyzed.svg',
+  petrified: 'systems/dnd5e/icons/svg/statuses/petrified.svg',
+  poisoned: 'systems/dnd5e/icons/svg/statuses/poisoned.svg',
+  prone: 'systems/dnd5e/icons/svg/statuses/prone.svg',
+  restrained: 'systems/dnd5e/icons/svg/statuses/restrained.svg',
+  stunned: 'systems/dnd5e/icons/svg/statuses/stunned.svg',
+  unconscious: 'systems/dnd5e/icons/svg/statuses/unconscious.svg',
 };
 
 function escapeHtml(s: string): string {
