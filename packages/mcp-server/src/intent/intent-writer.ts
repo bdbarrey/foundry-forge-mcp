@@ -34,6 +34,7 @@ import type {
   ActionIntent,
   ActivityIntent,
   ConditionIntent,
+  CustomTraitEffect,
   TraitIntent,
 } from './activity-intent.js';
 
@@ -603,8 +604,75 @@ export function writeTrait(
     };
   }
 
+  if (intent.kind === 'custom') {
+    if (!intent.custom) return {};
+    return writeCustomTraitEffect(intent.custom, intent.name, allocEffectId);
+  }
+
   // description-only — no effect, caller falls back to default feat shell.
   return {};
+}
+
+/**
+ * Phase 12.1.1 — emit an ActiveEffect doc from a CustomTraitEffect spec.
+ * Called by writeTrait for kind='custom'. Applies the writer's defaults
+ * for any field the spec leaves unset, mirrors the Pack Tactics /
+ * Sunlight Sensitivity shape so DAE + Midi-QOL behave consistently.
+ */
+function writeCustomTraitEffect(
+  spec: CustomTraitEffect,
+  traitName: string,
+  allocEffectId: () => string,
+): Record<string, any> {
+  const transfer = spec.transfer ?? true;
+  const effect: Record<string, any> = {
+    _id: allocEffectId(),
+    name: spec.effectName ?? traitName,
+    statuses: spec.statuses ?? [],
+    transfer,
+    disabled: spec.disabled ?? false,
+    img: spec.img ?? 'icons/svg/aura.svg',
+    type: 'base',
+    system: {},
+    origin: null,
+    sort: 0,
+    tint: '#ffffff',
+    description: '',
+    changes: (spec.changes ?? []).map(c => ({
+      key: c.key,
+      value: c.value,
+      mode: c.mode ?? 0,
+      priority: c.priority ?? 20,
+    })),
+    flags: {
+      dae: {
+        transfer: spec.flags?.dae?.transfer ?? transfer,
+        stackable: spec.flags?.dae?.stackable ?? 'noneName',
+        specialDuration: spec.flags?.dae?.specialDuration ?? [],
+        ...(spec.flags?.dae?.showIcon !== undefined
+          ? { showIcon: spec.flags.dae.showIcon }
+          : {}),
+      },
+      'midi-qol': {
+        forceCEOff: spec.flags?.['midi-qol']?.forceCEOff ?? true,
+      },
+      core: {},
+    },
+  };
+
+  if (spec.duration && (spec.duration.rounds || spec.duration.seconds)) {
+    effect.duration = {
+      startTime: null,
+      seconds: spec.duration.seconds ?? null,
+      rounds: spec.duration.rounds ?? null,
+      turns: null,
+      startRound: null,
+      startTurn: null,
+      combat: null,
+    };
+  }
+
+  return { effects: [effect] };
 }
 
 // ----- buildUsesPayload (item-level system.uses) ---------------------------

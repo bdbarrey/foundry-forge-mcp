@@ -14,8 +14,15 @@ import {
   writeTrait,
 } from '../intent/intent-writer.js';
 import { parsedActionToIntent } from '../intent/parsed-to-intent.js';
-import type { ActionIntent, ConditionIntent } from '../intent/activity-intent.js';
-import { ActionIntentSchema } from '../intent/intent-schema.js';
+import type {
+  ActionIntent,
+  ConditionIntent,
+  TraitIntent,
+} from '../intent/activity-intent.js';
+import {
+  ActionIntentSchema,
+  TraitIntentSchema,
+} from '../intent/intent-schema.js';
 import { ForgeAssetsClient, ForgeAssetEntry } from '../forge-assets-client.js';
 import {
   CONFIDENCE_FLOOR,
@@ -72,7 +79,7 @@ export class CreateActorTools {
       {
         name: 'create-actor',
         description:
-          'Build a Foundry actor from a CoS Reloaded entry. Four input shapes:\n\nA. Statblock div — Reloaded provides a full `<div class="statblock">` block. Tool spawns from a matched compendium base and overrides every field Reloaded specifies (HP, AC, abilities, skills, traits, actions with attack/save/damage activities, etc.).\n\nB. Prose-only — Reloaded says e.g. "retains the statistics of a **priest**" + "her ***Divine Eminence*** feature now reads as follows:". Tool spawns from the prose-referenced base and rewrites only the named feature descriptions.\n\nC. Pure passthrough — no Reloaded source, just `compendium_base`. Spawn the compendium entry as-is, optionally apply portrait. For NPCs whose Reloaded entry is just a reference (e.g. Rictavio in DDB pack with no modifications).\n\nD. Intent override (Phase 12.1) — alongside Mode A, pass `actions_intent: ActionIntent[]` to fully replace the parser-derived actions for those whose name matches by entry. Use this when Reloaded prose is novel / multi-condition / shaped in a way the regex parser will misread (e.g. Thunderstone with prone + deafened, custom AOE shapes, save-or-half-damage chains the parser misses). Each entry replaces the action of the same name (case-insensitive after stripping any "(1/Day)" / "(Recharge X-Y)" suffix). Actions whose name doesn\'t appear in actions_intent fall back to the parser as today. Statblock-level fields (HP/AC/abilities/skills/traits) still come from the Reloaded source — actions_intent only controls action items.\n\nActionIntent shape (Phase 12.0 schema; full TS types in src/intent/activity-intent.ts):\n  { name: string,                       // matches Reloaded action name\n    description: string,                 // prose for system.description.value\n    activities: ActivityIntent[],        // 1-2 entries: attack, save, or both chained\n    conditions: ConditionIntent[],       // 0-N rider effects (prone, restrained, etc.)\n    usage?: { count, period } | { recharge: [n,m] },\n    versatile?: { formula, type },       // alt damage for two-handed weapons\n    midiProperties?: { saveDamage: "halfdam"|"fulldam"|"nodam" } }\n  ActivityIntent: { intentId: string, kind: "attack"|"save"|"damage", name: string,\n    range?: { value?, long?, reach?, units: "ft" },\n    target?: { template?: { shape: "circle"|"cone"|"line"|"cube"|"sphere"|"cylinder", size, width? },\n               affects?: { type: "creature"|"enemy"|"ally"|..., count?, choice? } },\n    attack?: { bonus: number, attackType?: "melee"|"ranged" },\n    save?: { ability: "str"|"dex"|..., dc: number, onSuccess?: "half" },\n    damage?: { parts: [{formula, type}], includeBase?: boolean, onSave?: "half"|"none"|"full" },\n    triggers?: { activityRef: <other intentId>, targets: "hit"|"all" },  // attack→save chain\n    effects?: [{ conditionRef: number, onSave?: boolean }] }            // index into conditions[]\n  ConditionIntent: { type: "blinded"|"charmed"|...|"unconscious",\n    duration?: { rounds?, seconds?, specialDuration?: "turnEnd"|"turnStart"|... },\n    repeatSave?: { period: "turnEnd"|"turnStart", ability, dc } }      // INDEFINITE; save-to-break\n\nFor Bite-style (attack triggers save after hit), emit TWO activities: an attack with triggers={activityRef:"save", targets:"hit"} pointing at the save\'s intentId, and the save with effects=[{conditionRef:0}] linking to conditions[0]. Multi-condition saves (Thunderstone prone+deafened): conditions=[{type:"prone"},{type:"deafened"}] + save activity.effects=[{conditionRef:0},{conditionRef:1}].\n\nProvide EITHER reloaded_source/file_path+creature_name (modes A/B), OR compendium_base alone (mode C). Optional `portrait` arg applies in all modes. `actions_intent` is additive on top of A/B.',
+          'Build a Foundry actor from a CoS Reloaded entry. Four input shapes:\n\nA. Statblock div — Reloaded provides a full `<div class="statblock">` block. Tool spawns from a matched compendium base and overrides every field Reloaded specifies (HP, AC, abilities, skills, traits, actions with attack/save/damage activities, etc.).\n\nB. Prose-only — Reloaded says e.g. "retains the statistics of a **priest**" + "her ***Divine Eminence*** feature now reads as follows:". Tool spawns from the prose-referenced base and rewrites only the named feature descriptions.\n\nC. Pure passthrough — no Reloaded source, just `compendium_base`. Spawn the compendium entry as-is, optionally apply portrait. For NPCs whose Reloaded entry is just a reference (e.g. Rictavio in DDB pack with no modifications).\n\nD. Intent override (Phase 12.1) — alongside Mode A, pass `actions_intent: ActionIntent[]` and/or `traits_intent: TraitIntent[]` to fully replace the parser-derived actions / registry-derived traits for those whose name matches by entry. Use actions_intent when Reloaded prose is novel / multi-condition / shaped in a way the regex parser will misread (e.g. Thunderstone with prone + deafened, custom AOE shapes, save-or-half-damage chains the parser misses). Use traits_intent when a trait needs a Midi/DAE effect the TRAIT_TEMPLATES registry doesn\'t cover (Magic Resistance, Regeneration, Spider Climb-with-effect) — emit kind="custom" with a CustomTraitEffect spec. Each entry replaces the action/trait of the same name (case-insensitive after stripping any "(1/Day)" / "(Recharge X-Y)" suffix). Actions/traits whose name doesn\'t appear fall back to the parser/registry as before. Statblock-level fields (HP/AC/abilities/skills) still come from the Reloaded source — Mode D only controls action and trait items.\n\nActionIntent shape (Phase 12.0 schema; full TS types in src/intent/activity-intent.ts):\n  { name: string,                       // matches Reloaded action name\n    description: string,                 // prose for system.description.value\n    activities: ActivityIntent[],        // 1-2 entries: attack, save, or both chained\n    conditions: ConditionIntent[],       // 0-N rider effects (prone, restrained, etc.)\n    usage?: { count, period } | { recharge: [n,m] },\n    versatile?: { formula, type },       // alt damage for two-handed weapons\n    midiProperties?: { saveDamage: "halfdam"|"fulldam"|"nodam" } }\n  ActivityIntent: { intentId: string, kind: "attack"|"save"|"damage", name: string,\n    range?: { value?, long?, reach?, units: "ft" },\n    target?: { template?: { shape: "circle"|"cone"|"line"|"cube"|"sphere"|"cylinder", size, width? },\n               affects?: { type: "creature"|"enemy"|"ally"|..., count?, choice? } },\n    attack?: { bonus: number, attackType?: "melee"|"ranged" },\n    save?: { ability: "str"|"dex"|..., dc: number, onSuccess?: "half" },\n    damage?: { parts: [{formula, type}], includeBase?: boolean, onSave?: "half"|"none"|"full" },\n    triggers?: { activityRef: <other intentId>, targets: "hit"|"all" },  // attack→save chain\n    effects?: [{ conditionRef: number, onSave?: boolean }] }            // index into conditions[]\n  ConditionIntent: { type: "blinded"|"charmed"|...|"unconscious",\n    duration?: { rounds?, seconds?, specialDuration?: "turnEnd"|"turnStart"|... },\n    repeatSave?: { period: "turnEnd"|"turnStart", ability, dc } }      // INDEFINITE; save-to-break\n\nFor Bite-style (attack triggers save after hit), emit TWO activities: an attack with triggers={activityRef:"save", targets:"hit"} pointing at the save\'s intentId, and the save with effects=[{conditionRef:0}] linking to conditions[0]. Multi-condition saves (Thunderstone prone+deafened): conditions=[{type:"prone"},{type:"deafened"}] + save activity.effects=[{conditionRef:0},{conditionRef:1}].\n\nProvide EITHER reloaded_source/file_path+creature_name (modes A/B), OR compendium_base alone (mode C). Optional `portrait` arg applies in all modes. `actions_intent` is additive on top of A/B.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -147,6 +154,11 @@ export class CreateActorTools {
             actions_intent: {
               type: 'array',
               description: 'Phase 12.1 — Mode D intent override. Each entry is an ActionIntent (see schema in tool description). Entries replace the parser-derived shape for actions whose name (case-insensitive, usage-suffix-stripped) matches `intent.name`. Use when Reloaded prose is novel / multi-condition / shaped in a way the regex parser will misread. Actions not listed here fall back to parser as before.',
+              items: { type: 'object' },
+            },
+            traits_intent: {
+              type: 'array',
+              description: 'Phase 12.1.1 — trait override. Each entry is a TraitIntent: { kind: "pack-tactics"|"sunlight-sensitivity"|"description-only"|"custom", name: string, description: string, custom?: CustomTraitEffect }. Entries replace the registry/description-only shape for traits whose name matches (case-insensitive). For unknown traits with mechanical effects (Magic Resistance, Regeneration, Spider Climb), use kind="custom" with a CustomTraitEffect spec: { effectName?, img?, statuses?, transfer?, disabled?, changes: [{key, value, mode?, priority?}], duration?, flags? }. Traits not listed here fall through to TRAIT_TEMPLATES registry → description-only feat. Common Midi-QOL change keys: "flags.midi-qol.advantage.attack.all", "flags.midi-qol.disadvantage.ability.save.all", "flags.midi-qol.magicResistance", "system.attributes.movement.{walk|fly|climb|swim}", "system.traits.di.value" (damage immunity), etc.',
               items: { type: 'object' },
             },
           },
@@ -244,6 +256,14 @@ export class CreateActorTools {
       // ActionIntentSchema, with cross-field invariants (effects[].conditionRef
       // in range, triggers.activityRef matches an activity intentId).
       actions_intent: z.array(ActionIntentSchema).optional(),
+      // Phase 12.1.1 — Mode D extension: trait override. Array of TraitIntent
+      // objects; each entry replaces the registry/description-only shape for
+      // the trait whose name matches (case-insensitive). For known canonical
+      // traits the registry already handles correctly (Pack Tactics, Sunlight
+      // Sensitivity), don't pass intent unless you want to override. For
+      // traits the registry doesn't cover (Magic Resistance, Regeneration,
+      // Spider Climb-with-effect), use kind='custom' with a CustomTraitEffect.
+      traits_intent: z.array(TraitIntentSchema).optional(),
     }).refine(
       // Three valid input shapes:
       //   A. reloaded_source (or file_path+creature_name) — has statblock or prose
@@ -359,10 +379,23 @@ export class CreateActorTools {
       //    Traits whose names already exist on the actor (e.g. "Sunlight
       //    Sensitivity" inherited from the compendium Wight) are left alone;
       //    updating divergent descriptions ships in Phase 3a-C.
+      //
+      // Phase 12.1.1 — Mode D extension: trait override. When the caller
+      // (orchestrating Claude session) supplies traits_intent, each entry
+      // replaces the registry/description-only shape for traits matched by
+      // name (case-insensitive). Cast at the Zod boundary like actions_intent.
+      const traitIntentByName = new Map<string, TraitIntent>();
+      for (const intent of (input.traits_intent ?? []) as TraitIntent[]) {
+        traitIntentByName.set(intent.name.toLowerCase(), intent);
+      }
       const traitsToAdd = await Promise.all(
         sb.traits
           .filter(t => !existingItemNames.has(t.name.toLowerCase()))
           .map(async t => {
+            const overrideTraitIntent = traitIntentByName.get(t.name.toLowerCase());
+            // Description override: prefer intent.description (caller's
+            // canonical prose) when intent-mode; fall back to Reloaded prose.
+            const description = overrideTraitIntent?.description ?? t.description;
             const baseDoc: Record<string, any> = {
               name: t.name,
               type: 'feat',
@@ -372,26 +405,35 @@ export class CreateActorTools {
               // broken paths and roll forward to verified fallbacks.
               img: await resolveFeatIcon(t.name, t.parsed),
               system: {
-                description: { value: `<p>${escapeHtml(t.description)}</p>` },
+                description: { value: `<p>${escapeHtml(description)}</p>` },
                 source: { book: 'CoS Reloaded' },
                 type: { value: 'monster' },
               },
             };
-            // Phase 10B: when the trait name matches a registered template
-            // (Pack Tactics, Sunlight Sensitivity, etc.), merge the template's
-            // effect/flag/system additions on top of the base doc. The trait
-            // lands with the full Midi/DAE shape instead of description-only.
-            // Unmatched traits keep current behavior (Awakened Bloodlust,
-            // Fast Grappler, Volenta-unique inventions land as plain feats).
-            const template = resolveTraitTemplate(t.name);
-            if (template) {
-              const additions = template.build(t.name, t.description);
-              for (const [key, value] of Object.entries(additions)) {
-                if (key === 'system' && baseDoc.system && typeof value === 'object') {
-                  baseDoc.system = { ...baseDoc.system, ...value };
-                } else {
-                  baseDoc[key] = value;
-                }
+            // Effect-block source priority:
+            //   1. traits_intent (Mode D override) — caller emits TraitIntent;
+            //      writeTrait handles 'pack-tactics' / 'sunlight-sensitivity'
+            //      via the canonical writer branches, 'custom' via the
+            //      caller-supplied CustomTraitEffect, 'description-only' as no-op.
+            //   2. TRAIT_TEMPLATES registry — name-keyed lookup for canonical
+            //      traits (Pack Tactics, Sunlight Sensitivity etc.) when no
+            //      intent override is provided.
+            //   3. Otherwise plain feat (Awakened Bloodlust, Fast Grappler,
+            //      Volenta-unique inventions).
+            let additions: Record<string, any> = {};
+            if (overrideTraitIntent) {
+              additions = writeTrait(overrideTraitIntent);
+            } else {
+              const template = resolveTraitTemplate(t.name);
+              if (template) {
+                additions = template.build(t.name, t.description);
+              }
+            }
+            for (const [key, value] of Object.entries(additions)) {
+              if (key === 'system' && baseDoc.system && typeof value === 'object') {
+                baseDoc.system = { ...baseDoc.system, ...value };
+              } else {
+                baseDoc[key] = value;
               }
             }
             return baseDoc;

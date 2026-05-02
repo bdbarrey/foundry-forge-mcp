@@ -20,9 +20,9 @@
 // than testable. The 279 existing tests cover that.
 
 import { describe, it, expect } from 'vitest';
-import { writeScratchItem } from './intent-writer.js';
-import type { ActionIntent } from './activity-intent.js';
-import { ActionIntentSchema } from './intent-schema.js';
+import { writeScratchItem, writeTrait } from './intent-writer.js';
+import type { ActionIntent, TraitIntent } from './activity-intent.js';
+import { ActionIntentSchema, TraitIntentSchema } from './intent-schema.js';
 
 function makeIdGen() {
   let n = 0;
@@ -372,5 +372,204 @@ describe('Phase 12.1 — capabilities the regex parser cannot produce', () => {
     expect(saveActivity.effects).toHaveLength(1);
     expect((doc.effects as any[])[0].statuses[0]).toBe('paralyzed');
     expect(saveActivity.effects[0]._id).toBe((doc.effects as any[])[0]._id);
+  });
+});
+
+// ----- Phase 12.1.1 — TraitIntent schema + writeTrait kinds ----------------
+
+describe('Phase 12.1.1 — TraitIntentSchema (Zod) acceptance', () => {
+  it('accepts pack-tactics intent without a custom block', () => {
+    expect(
+      TraitIntentSchema.safeParse({
+        kind: 'pack-tactics',
+        name: 'Pack Tactics',
+        description: '',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('accepts description-only intent', () => {
+    expect(
+      TraitIntentSchema.safeParse({
+        kind: 'description-only',
+        name: 'Innate Spellcasting',
+        description: 'Volenta is a spellcaster — see her spell list.',
+      }).success,
+    ).toBe(true);
+  });
+
+  it('accepts custom intent with a CustomTraitEffect', () => {
+    expect(
+      TraitIntentSchema.safeParse({
+        kind: 'custom',
+        name: 'Magic Resistance',
+        description: 'Advantage on saves against spells and magical effects.',
+        custom: {
+          changes: [
+            {
+              key: 'flags.midi-qol.advantage.ability.save.all',
+              value: '@attributes.spelldc',
+              mode: 0,
+              priority: 20,
+            },
+          ],
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects custom intent missing the custom block', () => {
+    const result = TraitIntentSchema.safeParse({
+      kind: 'custom',
+      name: 'Some Trait',
+      description: 'No effect spec provided.',
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const msg = result.error.issues.map(i => i.message).join('|');
+      expect(msg).toMatch(/kind='custom' requires the `custom` field/);
+    }
+  });
+});
+
+describe('Phase 12.1.1 — writeTrait output by kind', () => {
+  function detEffectOpts() {
+    let n = 0;
+    return {
+      genEffectId: () => {
+        const id = `eff-${String(n).padStart(13, '0')}`;
+        n++;
+        return id;
+      },
+    };
+  }
+
+  it('description-only kind emits no effect block', () => {
+    const out = writeTrait(
+      { kind: 'description-only', name: 'Awakened Bloodlust', description: '' },
+      detEffectOpts(),
+    );
+    expect(out).toEqual({});
+  });
+
+  it('pack-tactics kind emits the canonical findNearby effect', () => {
+    const out = writeTrait(
+      { kind: 'pack-tactics', name: 'Pack Tactics', description: '' },
+      detEffectOpts(),
+    );
+    expect(out.effects).toHaveLength(1);
+    const eff = (out.effects as any[])[0];
+    expect(eff.name).toBe('Pack Tactics');
+    expect(eff.transfer).toBe(true);
+    expect(eff.changes).toHaveLength(1);
+    expect(eff.changes[0]).toMatchObject({
+      key: 'flags.midi-qol.advantage.attack.all',
+      value: 'findNearby(-1, targetUuid, 5, 0).length > 1',
+      mode: 0,
+      priority: 20,
+    });
+  });
+
+  it('sunlight-sensitivity kind emits the disabled-by-default effect', () => {
+    const out = writeTrait(
+      {
+        kind: 'sunlight-sensitivity',
+        name: 'Sunlight Hypersensitivity',
+        description: '',
+      },
+      detEffectOpts(),
+    );
+    expect(out.effects).toHaveLength(1);
+    const eff = (out.effects as any[])[0];
+    expect(eff.disabled).toBe(true);
+    expect(eff.changes).toHaveLength(2);
+    expect(eff.changes.map((c: any) => c.key)).toEqual([
+      'flags.midi-qol.disadvantage.attack.all',
+      'flags.midi-qol.disadvantage.ability.check.all',
+    ]);
+  });
+
+  it('custom kind emits caller-supplied changes with writer defaults', () => {
+    const intent: TraitIntent = {
+      kind: 'custom',
+      name: 'Magic Resistance',
+      description: 'Advantage on saves vs magic.',
+      custom: {
+        changes: [
+          {
+            key: 'flags.midi-qol.advantage.ability.save.all',
+            value: '@attributes.spellLevel',
+          },
+          { key: 'flags.midi-qol.magicResistance', value: '1' },
+        ],
+      },
+    };
+    const out = writeTrait(intent, detEffectOpts());
+    expect(out.effects).toHaveLength(1);
+    const eff = (out.effects as any[])[0];
+
+    // Caller-supplied keys + values pass through.
+    expect(eff.changes).toHaveLength(2);
+    expect(eff.changes[0].key).toBe('flags.midi-qol.advantage.ability.save.all');
+    expect(eff.changes[1].key).toBe('flags.midi-qol.magicResistance');
+
+    // Writer fills mode/priority defaults.
+    expect(eff.changes[0].mode).toBe(0);
+    expect(eff.changes[0].priority).toBe(20);
+
+    // Writer defaults: transfer=true (always-on), disabled=false, statuses=[],
+    // DAE flags + Midi forceCEOff.
+    expect(eff.transfer).toBe(true);
+    expect(eff.disabled).toBe(false);
+    expect(eff.statuses).toEqual([]);
+    expect(eff.flags.dae.transfer).toBe(true);
+    expect(eff.flags.dae.stackable).toBe('noneName');
+    expect(eff.flags['midi-qol'].forceCEOff).toBe(true);
+
+    // Effect name defaults to the trait name.
+    expect(eff.name).toBe('Magic Resistance');
+  });
+
+  it('custom kind respects caller overrides for transfer/disabled/img/effectName', () => {
+    const intent: TraitIntent = {
+      kind: 'custom',
+      name: 'Sunlight Sensitivity',
+      description: '',
+      custom: {
+        effectName: 'Sunlight Sensitivity (custom)',
+        img: 'icons/magic/light/test.webp',
+        transfer: true,
+        disabled: true,
+        changes: [{ key: 'flags.midi-qol.disadvantage.attack.all', value: '1' }],
+      },
+    };
+    const out = writeTrait(intent, detEffectOpts());
+    const eff = (out.effects as any[])[0];
+    expect(eff.name).toBe('Sunlight Sensitivity (custom)');
+    expect(eff.img).toBe('icons/magic/light/test.webp');
+    expect(eff.disabled).toBe(true);
+  });
+
+  it('custom kind emits a duration block when specified', () => {
+    const intent: TraitIntent = {
+      kind: 'custom',
+      name: 'Temporary Resistance',
+      description: 'Effect lasts 1 minute.',
+      custom: {
+        changes: [{ key: 'system.traits.dr.value', value: 'fire' }],
+        duration: { rounds: 10, seconds: 60 },
+      },
+    };
+    const out = writeTrait(intent, detEffectOpts());
+    const eff = (out.effects as any[])[0];
+    expect(eff.duration).toEqual({
+      startTime: null,
+      seconds: 60,
+      rounds: 10,
+      turns: null,
+      startRound: null,
+      startTurn: null,
+      combat: null,
+    });
   });
 });

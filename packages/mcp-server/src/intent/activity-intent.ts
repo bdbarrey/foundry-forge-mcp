@@ -193,14 +193,77 @@ export interface ActionIntent {
 }
 
 /**
- * Trait template kinds. `description-only` is the default — falls through to
- * a plain feat with no ActiveEffect. The named kinds map to TRAIT_TEMPLATES
- * registry entries (Pack Tactics, Sunlight Sensitivity).
+ * Trait template kinds.
+ * - `description-only` — plain feat, no ActiveEffect (Innate Spellcasting label,
+ *   most narrative traits like "Awakened Bloodlust" without mechanical effect).
+ * - `pack-tactics` / `sunlight-sensitivity` — TRAIT_TEMPLATES registry entries
+ *   with canonical Midi/DAE shapes maintained in the writer (drift-resistant).
+ * - `custom` — orchestrating Claude session supplies the ActiveEffect shape
+ *   directly via TraitIntent.custom for traits the registry doesn't cover
+ *   (Magic Resistance, Regeneration, Spider Climb-with-effect, etc.).
  */
-export type TraitIntentKind = 'pack-tactics' | 'sunlight-sensitivity' | 'description-only';
+export type TraitIntentKind =
+  | 'pack-tactics'
+  | 'sunlight-sensitivity'
+  | 'description-only'
+  | 'custom';
+
+/**
+ * Custom rider effect spec — used when TraitIntent.kind === 'custom'. Lets
+ * the orchestrating Claude session emit arbitrary Midi-QOL / DAE / dnd5e
+ * ActiveEffect changes for traits not in the registry.
+ *
+ * Caller fills only the fields that diverge from defaults. Defaults applied
+ * by the writer:
+ *   statuses: []                         // no Foundry condition coupling
+ *   transfer: true                       // always-on (typical for traits)
+ *   disabled: false                      // active by default
+ *   sort: 0, tint: '#ffffff', system: {}, origin: null, description: ''
+ *   flags.dae.{ transfer, stackable: 'noneName', specialDuration: [] }
+ *   flags['midi-qol'].forceCEOff: true
+ *
+ * `transfer: false` is rare for trait effects (effect-only-while-feature-is-
+ * activated), but supported for traits like Sunlight Sensitivity that toggle
+ * via GM action.
+ */
+export interface CustomTraitEffect {
+  /** ActiveEffect.name. Defaults to the parent TraitIntent.name. */
+  effectName?: string;
+  /** Effect icon path. Defaults to a generic aura icon. */
+  img?: string;
+  /** Foundry condition statuses[] this effect toggles when active. */
+  statuses?: string[];
+  /** true = transfer to actor on item add (always-on); false = activity-only. */
+  transfer?: boolean;
+  /** Start disabled (GM toggles on/off — Sunlight Sensitivity pattern). */
+  disabled?: boolean;
+  /** ActiveEffect changes[] — the actual mechanic. */
+  changes?: Array<{
+    key: string;
+    value: string;
+    /** ActiveEffect mode. Default 0 (CUSTOM) — Midi evaluates value as JS. */
+    mode?: number;
+    /** Default 20 (above ABILITY_NODE_DEFAULT_PRIORITY 10). */
+    priority?: number;
+  }>;
+  /** Time-bounded effects (rare for traits). */
+  duration?: { rounds?: number; seconds?: number };
+  /** Override the writer's default DAE / Midi-QOL flag block. */
+  flags?: {
+    dae?: {
+      transfer?: boolean;
+      stackable?: string;
+      specialDuration?: string[];
+      showIcon?: boolean;
+    };
+    'midi-qol'?: { forceCEOff?: boolean };
+  };
+}
 
 export interface TraitIntent {
   kind: TraitIntentKind;
   name: string;
   description: string;
+  /** Required when kind === 'custom'; ignored otherwise. */
+  custom?: CustomTraitEffect;
 }

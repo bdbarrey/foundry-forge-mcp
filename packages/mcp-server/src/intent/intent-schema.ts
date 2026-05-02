@@ -51,7 +51,43 @@ export const TraitIntentKindSchema = z.enum([
   'pack-tactics',
   'sunlight-sensitivity',
   'description-only',
+  'custom',
 ]);
+
+/**
+ * Custom trait effect spec — used when TraitIntent.kind === 'custom'.
+ * The orchestrating Claude session emits this to express ActiveEffect
+ * mechanics for traits not in TRAIT_TEMPLATES (Magic Resistance,
+ * Regeneration, Spider Climb-with-effect, etc.).
+ */
+export const CustomTraitEffectSchema = z.object({
+  effectName: z.string().min(1).optional(),
+  img: z.string().optional(),
+  statuses: z.array(z.string()).optional(),
+  transfer: z.boolean().optional(),
+  disabled: z.boolean().optional(),
+  changes: z.array(z.object({
+    key: z.string().min(1),
+    value: z.string(),
+    mode: z.number().int().optional(),
+    priority: z.number().int().optional(),
+  })).optional(),
+  duration: z.object({
+    rounds: z.number().int().nonnegative().optional(),
+    seconds: z.number().int().nonnegative().optional(),
+  }).optional(),
+  flags: z.object({
+    dae: z.object({
+      transfer: z.boolean().optional(),
+      stackable: z.string().optional(),
+      specialDuration: z.array(z.string()).optional(),
+      showIcon: z.boolean().optional(),
+    }).optional(),
+    'midi-qol': z.object({
+      forceCEOff: z.boolean().optional(),
+    }).optional(),
+  }).optional(),
+});
 
 // ----- Sub-shapes -----------------------------------------------------------
 
@@ -218,7 +254,19 @@ export const TraitIntentSchema = z.object({
   kind: TraitIntentKindSchema,
   name: z.string().min(1),
   description: z.string(),
-});
+  custom: CustomTraitEffectSchema.optional(),
+})
+  // Cross-field invariant: kind='custom' requires the `custom` field with
+  // the effect spec. Other kinds may include it but it's ignored.
+  .superRefine((intent, ctx) => {
+    if (intent.kind === 'custom' && !intent.custom) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['custom'],
+        message: "kind='custom' requires the `custom` field with the ActiveEffect spec",
+      });
+    }
+  });
 
 // ----- Type inference helpers ----------------------------------------------
 
