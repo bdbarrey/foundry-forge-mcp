@@ -267,3 +267,146 @@ export interface TraitIntent {
   /** Required when kind === 'custom'; ignored otherwise. */
   custom?: CustomTraitEffect;
 }
+
+// ----- Phase 12.1.2 — ActorIntent (full statblock-level intent) ------------
+//
+// One creature → one ActorIntent → one Foundry actor. Mode E entry on
+// create-actor: when actor_intent is provided, the regex parser is bypassed
+// entirely. Statblock-level fields (HP/AC/abilities/skills/senses/defenses)
+// + traits[] + actions[] all come from the intent.
+//
+// The downstream pipeline (applyOverridesChunked, trait/action add) still
+// runs — actorIntentToReloadedStatblock synthesizes a ReloadedStatblock-shape
+// from the intent, then the existing Phase 0-11 code consumes it unchanged.
+
+export type CreatureSize = 'Tiny' | 'Small' | 'Medium' | 'Large' | 'Huge' | 'Gargantuan';
+
+export interface ActorACIntent {
+  value: number;
+  /** "natural armor", "leather armor + shield", etc. — unparsed note. */
+  note?: string;
+}
+
+export interface ActorHPIntent {
+  /** Max HP (printed value). */
+  max: number;
+  /** Optional dice formula like "5d8 + 5". */
+  formula?: string;
+}
+
+export interface ActorSpeedIntent {
+  walk?: number;
+  swim?: number;
+  fly?: number;
+  climb?: number;
+  burrow?: number;
+  /** Hover ability — typically combined with fly (ghost, will-o'-wisp). */
+  hover?: boolean;
+}
+
+export interface ActorAbilityScores {
+  str: number;
+  dex: number;
+  con: number;
+  int: number;
+  wis: number;
+  cha: number;
+}
+
+export interface ActorSensesIntent {
+  darkvision?: number;
+  blindsight?: number;
+  truesight?: number;
+  tremorsense?: number;
+  /** Passive Perception. Reloaded statblocks print this explicitly. */
+  passivePerception?: number;
+}
+
+export interface ActorPortraitIntent {
+  /** Foundry-relative path or full URL (e.g. moulinette/.../Vampire.webp). */
+  path?: string;
+  /** Fuzzy lookup against a Forge folder. */
+  lookup?: {
+    folder?: string;
+    minScore?: number;
+    names?: string[];
+    recursive?: boolean;
+  };
+  /** auto = detect pair convention; single = same URL portrait+token; tokenizer = avatar only. */
+  convention?: 'auto' | 'single' | 'tokenizer';
+  applyToToken?: boolean;
+}
+
+export interface ActorIntent {
+  /** Display name on the actor + token. */
+  name: string;
+
+  /**
+   * Compendium base to spawn from. Optional — when omitted, create-actor's
+   * existing search heuristics try to locate one by name. For homebrew
+   * creatures with no compendium analogue, pass an explicit base of a
+   * close-matching SRD monster (the chunk-overrides will rewrite the
+   * stat-relevant fields anyway).
+   */
+  base?: { packId: string; itemId: string };
+
+  // Identity
+  size?: CreatureSize;
+  /** "Humanoid", "Undead", "Beast", "Fiend", etc. */
+  type?: string;
+  /** Parenthetical subtype: "shapechanger", "human", etc. */
+  subtype?: string;
+  /** "Neutral Evil", "CG", "any alignment", etc. */
+  alignment?: string;
+
+  // Combat fundamentals
+  ac?: ActorACIntent;
+  hp?: ActorHPIntent;
+  speed?: ActorSpeedIntent;
+
+  // Abilities + proficiencies
+  abilities?: ActorAbilityScores;
+  /**
+   * Saving-throw proficiencies as ability → printed total bonus. Reloaded
+   * lists e.g. "Saving Throws Str +9, Wis +7" — pass {str: 9, wis: 7}. The
+   * keys signal proficiency; the values inform downstream PB inference but
+   * aren't directly written (dnd5e derives saves from ability + prof).
+   */
+  saves?: Partial<Record<AbilityKey, number>>;
+  /**
+   * Skill proficiencies as skill name (lowercase) → printed bonus. The
+   * pipeline infers proficiency level (basic / expertise / half) from the
+   * delta against ability + PB. Same shape as ReloadedStatblock.skills.
+   */
+  skills?: Record<string, number>;
+
+  // Senses
+  senses?: ActorSensesIntent;
+
+  // Defenses
+  /** Damage resistance keywords ("necrotic", "fire") or full Reloaded phrasing. */
+  damageResistances?: string[];
+  damageImmunities?: string[];
+  damageVulnerabilities?: string[];
+  conditionImmunities?: ConditionType[];
+
+  // Languages — mostly free-form ("Common", "Abyssal", "the languages it knew in life").
+  languages?: string[];
+
+  // Challenge
+  /** CR as printed: number for clean values (5, 21), string for fractions ("1/4") or qualified ("21, or 19 in sunlight"). */
+  cr?: number | string;
+  /** Override dnd5e's CR-derived prof bonus when Reloaded prints something else. */
+  proficiencyBonus?: number;
+
+  // Mechanics
+  traits?: TraitIntent[];
+  actions?: ActionIntent[];
+  bonusActions?: ActionIntent[];
+  reactions?: ActionIntent[];
+  legendaryActions?: ActionIntent[];
+  lairActions?: ActionIntent[];
+
+  // Image — optional alongside the existing top-level `portrait` input on create-actor.
+  portrait?: ActorPortraitIntent;
+}

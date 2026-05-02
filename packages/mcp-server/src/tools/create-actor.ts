@@ -16,13 +16,16 @@ import {
 import { parsedActionToIntent } from '../intent/parsed-to-intent.js';
 import type {
   ActionIntent,
+  ActorIntent,
   ConditionIntent,
   TraitIntent,
 } from '../intent/activity-intent.js';
 import {
   ActionIntentSchema,
+  ActorIntentSchema,
   TraitIntentSchema,
 } from '../intent/intent-schema.js';
+import { actorIntentToReloadedStatblock } from '../intent/actor-intent-adapter.js';
 import { ForgeAssetsClient, ForgeAssetEntry } from '../forge-assets-client.js';
 import {
   CONFIDENCE_FLOOR,
@@ -79,7 +82,7 @@ export class CreateActorTools {
       {
         name: 'create-actor',
         description:
-          'Build a Foundry actor from a CoS Reloaded entry. Four input shapes:\n\nA. Statblock div — Reloaded provides a full `<div class="statblock">` block. Tool spawns from a matched compendium base and overrides every field Reloaded specifies (HP, AC, abilities, skills, traits, actions with attack/save/damage activities, etc.).\n\nB. Prose-only — Reloaded says e.g. "retains the statistics of a **priest**" + "her ***Divine Eminence*** feature now reads as follows:". Tool spawns from the prose-referenced base and rewrites only the named feature descriptions.\n\nC. Pure passthrough — no Reloaded source, just `compendium_base`. Spawn the compendium entry as-is, optionally apply portrait. For NPCs whose Reloaded entry is just a reference (e.g. Rictavio in DDB pack with no modifications).\n\nD. Intent override (Phase 12.1) — alongside Mode A, pass `actions_intent: ActionIntent[]` and/or `traits_intent: TraitIntent[]` to fully replace the parser-derived actions / registry-derived traits for those whose name matches by entry. Use actions_intent when Reloaded prose is novel / multi-condition / shaped in a way the regex parser will misread (e.g. Thunderstone with prone + deafened, custom AOE shapes, save-or-half-damage chains the parser misses). Use traits_intent when a trait needs a Midi/DAE effect the TRAIT_TEMPLATES registry doesn\'t cover (Magic Resistance, Regeneration, Spider Climb-with-effect) — emit kind="custom" with a CustomTraitEffect spec. Each entry replaces the action/trait of the same name (case-insensitive after stripping any "(1/Day)" / "(Recharge X-Y)" suffix). Actions/traits whose name doesn\'t appear fall back to the parser/registry as before. Statblock-level fields (HP/AC/abilities/skills) still come from the Reloaded source — Mode D only controls action and trait items.\n\nActionIntent shape (Phase 12.0 schema; full TS types in src/intent/activity-intent.ts):\n  { name: string,                       // matches Reloaded action name\n    description: string,                 // prose for system.description.value\n    activities: ActivityIntent[],        // 1-2 entries: attack, save, or both chained\n    conditions: ConditionIntent[],       // 0-N rider effects (prone, restrained, etc.)\n    usage?: { count, period } | { recharge: [n,m] },\n    versatile?: { formula, type },       // alt damage for two-handed weapons\n    midiProperties?: { saveDamage: "halfdam"|"fulldam"|"nodam" } }\n  ActivityIntent: { intentId: string, kind: "attack"|"save"|"damage", name: string,\n    range?: { value?, long?, reach?, units: "ft" },\n    target?: { template?: { shape: "circle"|"cone"|"line"|"cube"|"sphere"|"cylinder", size, width? },\n               affects?: { type: "creature"|"enemy"|"ally"|..., count?, choice? } },\n    attack?: { bonus: number, attackType?: "melee"|"ranged" },\n    save?: { ability: "str"|"dex"|..., dc: number, onSuccess?: "half" },\n    damage?: { parts: [{formula, type}], includeBase?: boolean, onSave?: "half"|"none"|"full" },\n    triggers?: { activityRef: <other intentId>, targets: "hit"|"all" },  // attack→save chain\n    effects?: [{ conditionRef: number, onSave?: boolean }] }            // index into conditions[]\n  ConditionIntent: { type: "blinded"|"charmed"|...|"unconscious",\n    duration?: { rounds?, seconds?, specialDuration?: "turnEnd"|"turnStart"|... },\n    repeatSave?: { period: "turnEnd"|"turnStart", ability, dc } }      // INDEFINITE; save-to-break\n\nFor Bite-style (attack triggers save after hit), emit TWO activities: an attack with triggers={activityRef:"save", targets:"hit"} pointing at the save\'s intentId, and the save with effects=[{conditionRef:0}] linking to conditions[0]. Multi-condition saves (Thunderstone prone+deafened): conditions=[{type:"prone"},{type:"deafened"}] + save activity.effects=[{conditionRef:0},{conditionRef:1}].\n\nProvide EITHER reloaded_source/file_path+creature_name (modes A/B), OR compendium_base alone (mode C). Optional `portrait` arg applies in all modes. `actions_intent` is additive on top of A/B.',
+          'Build a Foundry actor from a CoS Reloaded entry. Five input shapes:\n\nA. Statblock div — Reloaded provides a full `<div class="statblock">` block. Tool spawns from a matched compendium base and overrides every field Reloaded specifies (HP, AC, abilities, skills, traits, actions with attack/save/damage activities, etc.).\n\nB. Prose-only — Reloaded says e.g. "retains the statistics of a **priest**" + "her ***Divine Eminence*** feature now reads as follows:". Tool spawns from the prose-referenced base and rewrites only the named feature descriptions.\n\nC. Pure passthrough — no Reloaded source, just `compendium_base`. Spawn the compendium entry as-is, optionally apply portrait. For NPCs whose Reloaded entry is just a reference (e.g. Rictavio in DDB pack with no modifications).\n\nD. Intent override (Phase 12.1.0/12.1.1) — alongside Mode A, pass `actions_intent: ActionIntent[]` and/or `traits_intent: TraitIntent[]` to fully replace the parser-derived actions / registry-derived traits for those whose name matches by entry. Use actions_intent when Reloaded prose is novel / multi-condition / shaped in a way the regex parser will misread (e.g. Thunderstone with prone + deafened, custom AOE shapes, save-or-half-damage chains the parser misses). Use traits_intent when a trait needs a Midi/DAE effect the TRAIT_TEMPLATES registry doesn\'t cover (Magic Resistance, Regeneration, Spider Climb-with-effect) — emit kind="custom" with a CustomTraitEffect spec. Each entry replaces the action/trait of the same name (case-insensitive after stripping any "(1/Day)" / "(Recharge X-Y)" suffix). Actions/traits whose name doesn\'t appear fall back to the parser/registry as before. Statblock-level fields (HP/AC/abilities/skills) still come from the Reloaded source — Mode D only controls action and trait items.\n\nE. Full ActorIntent (Phase 12.1.2) — pass `actor_intent: ActorIntent` to bypass the regex parser entirely. Statblock fundamentals (HP/AC/abilities/skills/senses/defenses/languages/CR) come from the intent; traits and actions go through the same Mode D override paths automatically (actor_intent.traits → traits_intent, actor_intent.{actions,bonusActions,reactions,legendaryActions,lairActions} → actions_intent). Use Mode E when (a) the creature has no Reloaded markdown source, (b) the prose is non-canonical, or (c) you want full structured control. Provide actor_intent.base for the compendium spawn target; the existing search-by-name fallback also applies if base is omitted.\n\nActionIntent shape (Phase 12.0 schema; full TS types in src/intent/activity-intent.ts):\n  { name: string,                       // matches Reloaded action name\n    description: string,                 // prose for system.description.value\n    activities: ActivityIntent[],        // 1-2 entries: attack, save, or both chained\n    conditions: ConditionIntent[],       // 0-N rider effects (prone, restrained, etc.)\n    usage?: { count, period } | { recharge: [n,m] },\n    versatile?: { formula, type },       // alt damage for two-handed weapons\n    midiProperties?: { saveDamage: "halfdam"|"fulldam"|"nodam" } }\n  ActivityIntent: { intentId: string, kind: "attack"|"save"|"damage", name: string,\n    range?: { value?, long?, reach?, units: "ft" },\n    target?: { template?: { shape: "circle"|"cone"|"line"|"cube"|"sphere"|"cylinder", size, width? },\n               affects?: { type: "creature"|"enemy"|"ally"|..., count?, choice? } },\n    attack?: { bonus: number, attackType?: "melee"|"ranged" },\n    save?: { ability: "str"|"dex"|..., dc: number, onSuccess?: "half" },\n    damage?: { parts: [{formula, type}], includeBase?: boolean, onSave?: "half"|"none"|"full" },\n    triggers?: { activityRef: <other intentId>, targets: "hit"|"all" },  // attack→save chain\n    effects?: [{ conditionRef: number, onSave?: boolean }] }            // index into conditions[]\n  ConditionIntent: { type: "blinded"|"charmed"|...|"unconscious",\n    duration?: { rounds?, seconds?, specialDuration?: "turnEnd"|"turnStart"|... },\n    repeatSave?: { period: "turnEnd"|"turnStart", ability, dc } }      // INDEFINITE; save-to-break\n\nFor Bite-style (attack triggers save after hit), emit TWO activities: an attack with triggers={activityRef:"save", targets:"hit"} pointing at the save\'s intentId, and the save with effects=[{conditionRef:0}] linking to conditions[0]. Multi-condition saves (Thunderstone prone+deafened): conditions=[{type:"prone"},{type:"deafened"}] + save activity.effects=[{conditionRef:0},{conditionRef:1}].\n\nProvide EITHER reloaded_source/file_path+creature_name (modes A/B), OR compendium_base alone (mode C). Optional `portrait` arg applies in all modes. `actions_intent` is additive on top of A/B.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -160,6 +163,10 @@ export class CreateActorTools {
               type: 'array',
               description: 'Phase 12.1.1 — trait override. Each entry is a TraitIntent: { kind: "pack-tactics"|"sunlight-sensitivity"|"description-only"|"custom", name: string, description: string, custom?: CustomTraitEffect }. Entries replace the registry/description-only shape for traits whose name matches (case-insensitive). For unknown traits with mechanical effects (Magic Resistance, Regeneration, Spider Climb), use kind="custom" with a CustomTraitEffect spec: { effectName?, img?, statuses?, transfer?, disabled?, changes: [{key, value, mode?, priority?}], duration?, flags? }. Traits not listed here fall through to TRAIT_TEMPLATES registry → description-only feat. Common Midi-QOL change keys: "flags.midi-qol.advantage.attack.all", "flags.midi-qol.disadvantage.ability.save.all", "flags.midi-qol.magicResistance", "system.attributes.movement.{walk|fly|climb|swim}", "system.traits.di.value" (damage immunity), etc.',
               items: { type: 'object' },
+            },
+            actor_intent: {
+              type: 'object',
+              description: 'Phase 12.1.2 — Mode E: full ActorIntent that bypasses the regex parser entirely. Use this when (a) the creature\'s prose doesn\'t fit Reloaded\'s statblock format, (b) you have all the structured data to build the actor without parsing markdown, or (c) you want maximum control over every field. Shape: { name, base?: {packId, itemId}, size?: "Tiny|Small|Medium|Large|Huge|Gargantuan", type?, subtype?, alignment?, ac?: {value, note?}, hp?: {max, formula?}, speed?: {walk?, swim?, fly?, climb?, burrow?, hover?}, abilities?: {str,dex,con,int,wis,cha}, saves?: {<ability>: bonus}, skills?: {<skill>: bonus}, senses?: {darkvision?, blindsight?, truesight?, tremorsense?, passivePerception?}, damageResistances?: string[], damageImmunities?: string[], damageVulnerabilities?: string[], conditionImmunities?: ConditionType[], languages?: string[], cr?: number|string, proficiencyBonus?, traits?: TraitIntent[], actions?: ActionIntent[], bonusActions?: ActionIntent[], reactions?: ActionIntent[], legendaryActions?: ActionIntent[], lairActions?: ActionIntent[], portrait?: PortraitIntent }. actor_intent.base populates compendium_base; actor_intent.actions/traits/portrait pass through to actions_intent/traits_intent/portrait when those aren\'t already set at the top level. Pass actor_intent ALONE (no reloaded_source/file_path) for Mode E; otherwise actor_intent extends Mode A.',
             },
           },
         },
@@ -264,12 +271,25 @@ export class CreateActorTools {
       // traits the registry doesn't cover (Magic Resistance, Regeneration,
       // Spider Climb-with-effect), use kind='custom' with a CustomTraitEffect.
       traits_intent: z.array(TraitIntentSchema).optional(),
+      // Phase 12.1.2 — Mode E: full ActorIntent. Bypasses the regex parser
+      // entirely (statblock fields, traits, actions all from intent). When
+      // provided, the synthesized ReloadedStatblock shape feeds the existing
+      // Mode A pipeline (compendium spawn → chunked overrides → trait/action
+      // add). actor_intent.base populates compendium_base; actor_intent.actions
+      // → actions_intent; actor_intent.traits → traits_intent; actor_intent.portrait
+      // → portrait — except where the caller already set those at the top level
+      // (top-level fields win, so partial overrides are possible).
+      actor_intent: ActorIntentSchema.optional(),
     }).refine(
-      // Three valid input shapes:
+      // Valid input shapes:
       //   A. reloaded_source (or file_path+creature_name) — has statblock or prose
       //   B. compendium_base alone — pure passthrough (Rictavio case)
-      d => !!d.reloaded_source || !!(d.file_path && d.creature_name) || !!d.compendium_base,
-      { message: 'Provide reloaded_source, file_path+creature_name, or compendium_base' },
+      //   E. actor_intent — full intent, no markdown parsing
+      d => !!d.reloaded_source
+        || !!(d.file_path && d.creature_name)
+        || !!d.compendium_base
+        || !!d.actor_intent,
+      { message: 'Provide reloaded_source, file_path+creature_name, compendium_base, or actor_intent' },
     );
     const input = schema.parse(args);
 
@@ -281,7 +301,7 @@ export class CreateActorTools {
     });
 
     try {
-      // ROUTER: three input shapes, three pipelines.
+      // ROUTER: five input shapes, four pipelines.
       //
       //   A. reloaded_source has a `<div class="statblock">`  → existing rich
       //      Phase 0-3 build (numeric overrides, traits, actions, etc.)
@@ -289,32 +309,81 @@ export class CreateActorTools {
       //      `baseHint` + apply feature_overrides + portrait
       //   C. no reloaded_source, compendium_base alone        → pure spawn +
       //      portrait (Rictavio case)
+      //   D. actions_intent / traits_intent extends A/B/C        → name-keyed
+      //      override of parser/registry shapes (Phase 12.1.0/.1.1)
+      //   E. actor_intent fully replaces A/B's parsing            → synthesize
+      //      sb from intent, run through Mode A pipeline (Phase 12.1.2)
       //
+      // Phase 12.1.2 — Mode E: when actor_intent is provided, synthesize a
+      // ReloadedStatblock-shape from it and pull through actions_intent /
+      // traits_intent / compendium_base / portrait so the existing Mode A
+      // pipeline runs unchanged. Top-level inputs win when both are set.
+      let sbFromIntent: ReloadedStatblock | null = null;
+      if (input.actor_intent) {
+        const actorIntent = input.actor_intent as ActorIntent;
+        sbFromIntent = actorIntentToReloadedStatblock(actorIntent);
+        if (actorIntent.base && !input.compendium_base) {
+          input.compendium_base = actorIntent.base;
+        }
+        if (actorIntent.traits && !input.traits_intent) {
+          input.traits_intent = actorIntent.traits;
+        }
+        // Combine all action categories (actions / bonusActions / reactions /
+        // legendaryActions / lairActions) into a single actions_intent array.
+        // The synthetic sb keeps them in their original sb.<category> arrays;
+        // the action loop iterates allReloadedActions = [...sb.actions,
+        // ...sb.bonusActions, ...] and matches each by name to actions_intent.
+        // Names must be unique across categories (a real-world constraint
+        // anyway, since a creature can't have an action and a reaction with
+        // the same name).
+        if (!input.actions_intent) {
+          const all = [
+            ...(actorIntent.actions ?? []),
+            ...(actorIntent.bonusActions ?? []),
+            ...(actorIntent.reactions ?? []),
+            ...(actorIntent.legendaryActions ?? []),
+            ...(actorIntent.lairActions ?? []),
+          ];
+          if (all.length > 0) input.actions_intent = all;
+        }
+        if (actorIntent.portrait && !input.portrait) {
+          input.portrait = actorIntent.portrait;
+        }
+        this.logger.info('Mode E: actor_intent dispatch', {
+          name: actorIntent.name,
+          actions: (actorIntent.actions ?? []).length,
+          traits: (actorIntent.traits ?? []).length,
+          hasBase: !!actorIntent.base,
+        });
+      }
+
       // Resolve source first if we have one. If not and we have compendium_base,
-      // run the passthrough pipeline.
+      // run the passthrough pipeline. Mode E supplies sbFromIntent and skips
+      // the markdown source step entirely.
       const hasSource = !!input.reloaded_source || !!(input.file_path && input.creature_name);
-      if (!hasSource) {
+      if (!hasSource && !sbFromIntent) {
         // Mode C — passthrough.
         return await this.runPassthroughBuild(input);
       }
 
-      // 1. Get markdown source (Modes A + B share this).
-      const markdown = await this.resolveSource(input);
-
-      // 2. Parse — try statblock first; fall back to prose if no div found.
-      let sbParsed: ReloadedStatblock | null = null;
+      // 1. Get markdown source (Modes A + B). Mode E already has sbFromIntent.
+      let sbParsed: ReloadedStatblock | null = sbFromIntent;
       let proseSpec: ReloadedProseSpec | null = null;
-      try {
-        sbParsed = parseReloadedStatblock(markdown);
-      } catch (err) {
-        // No statblock div — try prose.
-        proseSpec = parseReloadedProseSpec(markdown);
-        if (!proseSpec) {
-          throw new Error(
-            'Reloaded source has no <div class="statblock"> and no recognizable prose patterns ' +
-            '("retains the statistics of a X" / "treat as **X**" / feature override bullets). ' +
-            'Pass a full Reloaded statblock OR use compendium_base for pure passthrough.',
-          );
+      if (!sbParsed) {
+        const markdown = await this.resolveSource(input);
+        // 2. Parse — try statblock first; fall back to prose if no div found.
+        try {
+          sbParsed = parseReloadedStatblock(markdown);
+        } catch (err) {
+          // No statblock div — try prose.
+          proseSpec = parseReloadedProseSpec(markdown);
+          if (!proseSpec) {
+            throw new Error(
+              'Reloaded source has no <div class="statblock"> and no recognizable prose patterns ' +
+              '("retains the statistics of a X" / "treat as **X**" / feature override bullets). ' +
+              'Pass a full Reloaded statblock OR use compendium_base for pure passthrough.',
+            );
+          }
         }
       }
 
@@ -323,7 +392,7 @@ export class CreateActorTools {
         return await this.runProseBuild(proseSpec, input);
       }
 
-      // Mode A — full statblock build (existing Phases 0-3).
+      // Mode A or E — full statblock build (existing Phases 0-3).
       const sb = sbParsed!;
       this.logger.debug('Parsed statblock', { name: sb.name, cr: sb.challenge });
 

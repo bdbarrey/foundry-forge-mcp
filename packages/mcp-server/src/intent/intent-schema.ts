@@ -268,9 +268,112 @@ export const TraitIntentSchema = z.object({
     }
   });
 
+// ----- Phase 12.1.2 — ActorIntent (full statblock-level intent) ------------
+
+export const CreatureSizeSchema = z.enum([
+  'Tiny',
+  'Small',
+  'Medium',
+  'Large',
+  'Huge',
+  'Gargantuan',
+]);
+
+export const ActorACIntentSchema = z.object({
+  value: z.number().int().nonnegative(),
+  note: z.string().optional(),
+});
+
+export const ActorHPIntentSchema = z.object({
+  max: z.number().int().nonnegative(),
+  formula: z.string().optional(),
+});
+
+export const ActorSpeedIntentSchema = z.object({
+  walk: z.number().int().nonnegative().optional(),
+  swim: z.number().int().nonnegative().optional(),
+  fly: z.number().int().nonnegative().optional(),
+  climb: z.number().int().nonnegative().optional(),
+  burrow: z.number().int().nonnegative().optional(),
+  hover: z.boolean().optional(),
+});
+
+export const ActorAbilityScoresSchema = z.object({
+  str: z.number().int(),
+  dex: z.number().int(),
+  con: z.number().int(),
+  int: z.number().int(),
+  wis: z.number().int(),
+  cha: z.number().int(),
+});
+
+export const ActorSensesIntentSchema = z.object({
+  darkvision: z.number().int().nonnegative().optional(),
+  blindsight: z.number().int().nonnegative().optional(),
+  truesight: z.number().int().nonnegative().optional(),
+  tremorsense: z.number().int().nonnegative().optional(),
+  passivePerception: z.number().int().nonnegative().optional(),
+});
+
+export const ActorPortraitIntentSchema = z.object({
+  path: z.string().optional(),
+  lookup: z.object({
+    folder: z.string().optional(),
+    minScore: z.number().min(0).max(1).optional(),
+    names: z.array(z.string()).optional(),
+    recursive: z.boolean().optional(),
+  }).optional(),
+  convention: z.enum(['auto', 'single', 'tokenizer']).optional(),
+  applyToToken: z.boolean().optional(),
+});
+
+export const ActorIntentSchema = z.object({
+  name: z.string().min(1),
+
+  base: z.object({
+    packId: z.string().min(1),
+    itemId: z.string().min(1),
+  }).optional(),
+
+  size: CreatureSizeSchema.optional(),
+  type: z.string().optional(),
+  subtype: z.string().optional(),
+  alignment: z.string().optional(),
+
+  ac: ActorACIntentSchema.optional(),
+  hp: ActorHPIntentSchema.optional(),
+  speed: ActorSpeedIntentSchema.optional(),
+
+  abilities: ActorAbilityScoresSchema.optional(),
+  saves: z.record(AbilityKeySchema, z.number().int()).optional(),
+  skills: z.record(z.string(), z.number().int()).optional(),
+
+  senses: ActorSensesIntentSchema.optional(),
+
+  damageResistances: z.array(z.string()).optional(),
+  damageImmunities: z.array(z.string()).optional(),
+  damageVulnerabilities: z.array(z.string()).optional(),
+  conditionImmunities: z.array(ConditionTypeSchema).optional(),
+
+  languages: z.array(z.string()).optional(),
+
+  cr: z.union([z.number(), z.string()]).optional(),
+  proficiencyBonus: z.number().int().nonnegative().optional(),
+
+  traits: z.array(TraitIntentSchema).optional(),
+  actions: z.array(ActionIntentSchema).optional(),
+  bonusActions: z.array(ActionIntentSchema).optional(),
+  reactions: z.array(ActionIntentSchema).optional(),
+  legendaryActions: z.array(ActionIntentSchema).optional(),
+  lairActions: z.array(ActionIntentSchema).optional(),
+
+  portrait: ActorPortraitIntentSchema.optional(),
+});
+
 // ----- Type inference helpers ----------------------------------------------
 
 export type ActionIntentZ = z.infer<typeof ActionIntentSchema>;
 export type ActivityIntentZ = z.infer<typeof ActivityIntentSchema>;
 export type ConditionIntentZ = z.infer<typeof ConditionIntentSchema>;
 export type TraitIntentZ = z.infer<typeof TraitIntentSchema>;
+export type ActorIntentZ = z.infer<typeof ActorIntentSchema>;
