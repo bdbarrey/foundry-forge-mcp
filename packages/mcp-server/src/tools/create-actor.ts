@@ -14,7 +14,8 @@ import {
   writeTrait,
 } from '../intent/intent-writer.js';
 import { parsedActionToIntent } from '../intent/parsed-to-intent.js';
-import type { ConditionIntent } from '../intent/activity-intent.js';
+import type { ActionIntent, ConditionIntent } from '../intent/activity-intent.js';
+import { ActionIntentSchema } from '../intent/intent-schema.js';
 import { ForgeAssetsClient, ForgeAssetEntry } from '../forge-assets-client.js';
 import {
   CONFIDENCE_FLOOR,
@@ -71,7 +72,7 @@ export class CreateActorTools {
       {
         name: 'create-actor',
         description:
-          'Build a Foundry actor from a CoS Reloaded entry. Three input shapes:\n\nA. Statblock div — Reloaded provides a full `<div class="statblock">` block. Tool spawns from a matched compendium base and overrides every field Reloaded specifies (HP, AC, abilities, skills, traits, actions with attack/save/damage activities, etc.).\n\nB. Prose-only — Reloaded says e.g. "retains the statistics of a **priest**" + "her ***Divine Eminence*** feature now reads as follows:". Tool spawns from the prose-referenced base and rewrites only the named feature descriptions.\n\nC. Pure passthrough — no Reloaded source, just `compendium_base`. Spawn the compendium entry as-is, optionally apply portrait. For NPCs whose Reloaded entry is just a reference (e.g. Rictavio in DDB pack with no modifications).\n\nProvide EITHER reloaded_source/file_path+creature_name (modes A/B), OR compendium_base alone (mode C). Optional `portrait` arg applies in all modes.',
+          'Build a Foundry actor from a CoS Reloaded entry. Four input shapes:\n\nA. Statblock div — Reloaded provides a full `<div class="statblock">` block. Tool spawns from a matched compendium base and overrides every field Reloaded specifies (HP, AC, abilities, skills, traits, actions with attack/save/damage activities, etc.).\n\nB. Prose-only — Reloaded says e.g. "retains the statistics of a **priest**" + "her ***Divine Eminence*** feature now reads as follows:". Tool spawns from the prose-referenced base and rewrites only the named feature descriptions.\n\nC. Pure passthrough — no Reloaded source, just `compendium_base`. Spawn the compendium entry as-is, optionally apply portrait. For NPCs whose Reloaded entry is just a reference (e.g. Rictavio in DDB pack with no modifications).\n\nD. Intent override (Phase 12.1) — alongside Mode A, pass `actions_intent: ActionIntent[]` to fully replace the parser-derived actions for those whose name matches by entry. Use this when Reloaded prose is novel / multi-condition / shaped in a way the regex parser will misread (e.g. Thunderstone with prone + deafened, custom AOE shapes, save-or-half-damage chains the parser misses). Each entry replaces the action of the same name (case-insensitive after stripping any "(1/Day)" / "(Recharge X-Y)" suffix). Actions whose name doesn\'t appear in actions_intent fall back to the parser as today. Statblock-level fields (HP/AC/abilities/skills/traits) still come from the Reloaded source — actions_intent only controls action items.\n\nActionIntent shape (Phase 12.0 schema; full TS types in src/intent/activity-intent.ts):\n  { name: string,                       // matches Reloaded action name\n    description: string,                 // prose for system.description.value\n    activities: ActivityIntent[],        // 1-2 entries: attack, save, or both chained\n    conditions: ConditionIntent[],       // 0-N rider effects (prone, restrained, etc.)\n    usage?: { count, period } | { recharge: [n,m] },\n    versatile?: { formula, type },       // alt damage for two-handed weapons\n    midiProperties?: { saveDamage: "halfdam"|"fulldam"|"nodam" } }\n  ActivityIntent: { intentId: string, kind: "attack"|"save"|"damage", name: string,\n    range?: { value?, long?, reach?, units: "ft" },\n    target?: { template?: { shape: "circle"|"cone"|"line"|"cube"|"sphere"|"cylinder", size, width? },\n               affects?: { type: "creature"|"enemy"|"ally"|..., count?, choice? } },\n    attack?: { bonus: number, attackType?: "melee"|"ranged" },\n    save?: { ability: "str"|"dex"|..., dc: number, onSuccess?: "half" },\n    damage?: { parts: [{formula, type}], includeBase?: boolean, onSave?: "half"|"none"|"full" },\n    triggers?: { activityRef: <other intentId>, targets: "hit"|"all" },  // attack→save chain\n    effects?: [{ conditionRef: number, onSave?: boolean }] }            // index into conditions[]\n  ConditionIntent: { type: "blinded"|"charmed"|...|"unconscious",\n    duration?: { rounds?, seconds?, specialDuration?: "turnEnd"|"turnStart"|... },\n    repeatSave?: { period: "turnEnd"|"turnStart", ability, dc } }      // INDEFINITE; save-to-break\n\nFor Bite-style (attack triggers save after hit), emit TWO activities: an attack with triggers={activityRef:"save", targets:"hit"} pointing at the save\'s intentId, and the save with effects=[{conditionRef:0}] linking to conditions[0]. Multi-condition saves (Thunderstone prone+deafened): conditions=[{type:"prone"},{type:"deafened"}] + save activity.effects=[{conditionRef:0},{conditionRef:1}].\n\nProvide EITHER reloaded_source/file_path+creature_name (modes A/B), OR compendium_base alone (mode C). Optional `portrait` arg applies in all modes. `actions_intent` is additive on top of A/B.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -142,6 +143,11 @@ export class CreateActorTools {
             prune_base_items: {
               type: 'boolean',
               description: 'Phase 3b extension (Mode A only). When true, after the build runs, walk the actor\'s feat AND weapon items and remove compendium-base entries that have no name-token overlap with any Reloaded trait or action. In dnd5e 5.x NPC attacks (Bite, Claws, Longsword, Hail of Daggers) are `type=weapon` items, so weapon-pruning is required to drop SRD vampire\'s Bite/Claws on a Volenta build. Spells/equipment/classes/races/backgrounds/containers/loot stay safe. ALWAYS_KEEP list preserves common monster traits (Multiattack, Spellcasting, Legendary Resistance, Sunlight Sensitivity, etc.), token-overlap with Reloaded names preserves matched items (e.g. our copy-patched "Hail of Daggers" overlaps "daggers" with Reloaded\'s action of the same name). Hard cap of 5 deletions per run. Off by default — heavy Reloaded renames can produce false positives. Result is reported as `prunedItems` and `prunedCandidatesOverCap`.',
+            },
+            actions_intent: {
+              type: 'array',
+              description: 'Phase 12.1 — Mode D intent override. Each entry is an ActionIntent (see schema in tool description). Entries replace the parser-derived shape for actions whose name (case-insensitive, usage-suffix-stripped) matches `intent.name`. Use when Reloaded prose is novel / multi-condition / shaped in a way the regex parser will misread. Actions not listed here fall back to parser as before.',
+              items: { type: 'object' },
             },
           },
         },
@@ -231,6 +237,13 @@ export class CreateActorTools {
       // pruning is conservative (hard cap of 5, type=feat only, ALWAYS_KEEP
       // list for common monster traits) but still fallible on heavy renames.
       prune_base_items: z.boolean().optional(),
+      // Phase 12.1 — Mode D intent override. Array of ActionIntent objects;
+      // each entry replaces the parser-derived shape for the action whose
+      // name matches (case-insensitive, after stripping any "(1/Day)" /
+      // "(Recharge X-Y)" suffix). Validation runs per-entry via
+      // ActionIntentSchema, with cross-field invariants (effects[].conditionRef
+      // in range, triggers.activityRef matches an activity intentId).
+      actions_intent: z.array(ActionIntentSchema).optional(),
     }).refine(
       // Three valid input shapes:
       //   A. reloaded_source (or file_path+creature_name) — has statblock or prose
@@ -416,6 +429,19 @@ export class CreateActorTools {
         ...sb.actions, ...sb.bonusActions, ...sb.reactions,
         ...sb.legendaryActions, ...sb.lairActions,
       ];
+      // Phase 12.1 — Mode D intent override. Build a name-keyed map of
+      // ActionIntents the caller (the orchestrating Claude session) wants
+      // to use in place of the parser-derived shape. Match key is the
+      // stem-stripped lowercased name so "Tanglefoot (1/Day)" matches a
+      // Reloaded action named "Tanglefoot" or vice versa.
+      // Cast at the Zod boundary: the schema's inferred type uses `T | undefined`
+      // for optional fields (Zod default), which exactOptionalPropertyTypes
+      // rejects against ActionIntent's `T?` shape. Runtime shape is identical.
+      const intentByName = new Map<string, ActionIntent>();
+      for (const intent of (input.actions_intent ?? []) as ActionIntent[]) {
+        const key = stripUsageSuffix(intent.name).stem.toLowerCase() || intent.name.toLowerCase();
+        intentByName.set(key, intent);
+      }
       const itemUpdates: Array<Record<string, any>> = [];
       const actionsSynced: string[] = [];
       const actionsSkippedNoItem: string[] = [];
@@ -437,23 +463,31 @@ export class CreateActorTools {
           actionsSkippedNoActivity.push(action.name);
           continue;
         }
+        // Phase 12.1 lookup: does the caller want intent-mode for this action?
+        const overrideIntent = intentByName.get(actionStem) ?? intentByName.get(action.name.toLowerCase());
         // Walk every activity on the item and patch only the fields relevant
         // to that activity's type. One item can have both an `attack` and a
         // `save` activity (e.g. Wight Commander Life Drain) — both need
-        // Reloaded's values applied.
-        const itemUpdate = buildItemActivityUpdate(item.id, activities, action.parsed);
-        // Phase 3A: Reloaded is truth for action descriptions. Sync the
-        // item's description.value so the sheet shows the Reloaded text.
-        if (action.description) {
-          itemUpdate['system.description.value'] = `<p>${escapeHtml(action.description)}</p>`;
+        // Reloaded's values applied. Intent-mode bypasses the parser-derived
+        // shape; parser-mode (no override) goes through buildItemActivityUpdate
+        // which itself adapts to ActionIntent under the hood.
+        const itemUpdate = overrideIntent
+          ? writeActivityUpdate(item.id, activities, overrideIntent)
+          : buildItemActivityUpdate(item.id, activities, action.parsed);
+        // Description override: prefer the intent's description (the caller's
+        // canonical prose) when intent-mode; fall back to Reloaded action.description.
+        const description = overrideIntent?.description ?? action.description;
+        if (description) {
+          itemUpdate['system.description.value'] = `<p>${escapeHtml(description)}</p>`;
         }
         // Phase 8: write `system.uses` (max + recovery) when Reloaded
         // encoded usage in the name parenthetical. Also normalize the
         // existing item's name to the bare stem so the sheet shows
         // "Tanglefoot" with a 1/day counter rather than "Tanglefoot (1/day)"
         // duplicating the usage in two places. Skip the rename if the item
-        // already has the bare stem name (avoids a no-op write).
-        const usesPayload = buildUsesPayload(action.parsed.usage);
+        // already has the bare stem name (avoids a no-op write). Intent-mode
+        // takes its uses from intent.usage (caller's authoritative shape).
+        const usesPayload = buildUsesPayload(overrideIntent?.usage ?? action.parsed.usage);
         if (usesPayload) {
           itemUpdate['system.uses'] = usesPayload;
         }
@@ -519,6 +553,70 @@ export class CreateActorTools {
 
         const action = skippedByName.get(name);
         if (!action) continue;
+
+        // Phase 12.1: intent-mode bypasses the inferActionCandidates →
+        // copy-patch path entirely. Intent contains the full structured shape;
+        // a compendium base would be redundant at best, a mismatch at worst.
+        const skippedActionStem = stripUsageSuffix(name).stem.toLowerCase();
+        const overrideIntent =
+          intentByName.get(skippedActionStem) ?? intentByName.get(name.toLowerCase());
+        if (overrideIntent) {
+          try {
+            const itemPayload = await this.buildScratchItemFromIntent(overrideIntent);
+            const addResult = await this.addItemsWithBatchFallback(newActor.id, [itemPayload]);
+            if (addResult.added.length === 0) {
+              actionsBuildFailures.push({
+                name,
+                error: addResult.failed[0]?.error ?? 'add returned no items',
+              });
+              continue;
+            }
+            actionsScratchBuilt.push(name);
+            // Hot-patch the activity.effects[] link post-create — same reason
+            // as the parser path (dnd5e strips activity.effects[]._id during
+            // createEmbeddedDocuments). Generic gate: any item with effects[]
+            // and a save activity gets the link re-issued.
+            const newItemId = (itemPayload as any)._id;
+            const payloadActivities = (itemPayload as any)?.system?.activities ?? {};
+            const saveActivityEntry = Object.entries(payloadActivities).find(
+              ([, act]: [string, any]) => act?.type === 'save',
+            );
+            const saveActivityId = saveActivityEntry?.[0];
+            const itemEffects = (itemPayload as any)?.effects ?? [];
+            const effectId = itemEffects[0]?._id;
+            if (newItemId && saveActivityId && effectId && itemEffects.length > 0) {
+              try {
+                const upd: any = await this.foundryClient.query(
+                  'foundry-forge-mcp.updateActorItems',
+                  {
+                    actorId: newActor.id,
+                    updates: [{
+                      _id: newItemId,
+                      [`system.activities.${saveActivityId}.effects`]: itemEffects.map(
+                        (eff: any) => ({ _id: eff._id, level: { min: null, max: null }, onSave: false }),
+                      ),
+                    }],
+                  },
+                );
+                if (upd?.success === false) {
+                  this.logger.warn(
+                    `Phase 12.1 condition-link hot-patch "${name}" returned success=false`,
+                    { error: upd?.error },
+                  );
+                }
+              } catch (linkErr: any) {
+                this.logger.warn(
+                  `Phase 12.1 condition-link hot-patch "${name}" threw (item still has the effect, just no save link)`,
+                  { error: linkErr?.message },
+                );
+              }
+            }
+          } catch (err: any) {
+            actionsBuildFailures.push({ name, error: err?.message ?? String(err) });
+            this.logger.warn(`Phase 12.1 intent-build "${name}" failed`, { error: err?.message });
+          }
+          continue;
+        }
 
         try {
           const ranked = await this.inferActionCandidates(name, action.parsed, 3);
@@ -1618,6 +1716,44 @@ export class CreateActorTools {
     // keyword chain) and pass the resolved URL into the writer.
     const img = await resolveFeatIcon(finalName, parsed);
     return writeScratchItem(intent, { img });
+  }
+
+  /**
+   * Phase 12.1 — scratch-build a feat item directly from an ActionIntent.
+   * Bypasses the regex parser entirely. Used when the orchestrating Claude
+   * session emits intents via create-actor's `actions_intent` input mode,
+   * typically for prose variants the parser would misread.
+   *
+   * Mirrors buildScratchActionItem's flow but skips the parsed-to-intent
+   * adapter step. Synthesizes the minimum ParsedAction shape resolveFeatIcon
+   * needs (it checks parsed.save / parsed.attackBonus / parsed.attackType /
+   * parsed.damage to pick a themed icon).
+   */
+  private async buildScratchItemFromIntent(intent: ActionIntent): Promise<Record<string, any>> {
+    const { stem } = stripUsageSuffix(intent.name);
+    const finalName = stem || intent.name;
+    // Synthesize the minimum ParsedAction shape resolveFeatIcon needs.
+    const iconShape: Partial<import('../parsers/action-description.js').ParsedAction> = {
+      damage: intent.activities.flatMap(a => a.damage?.parts ?? []),
+    };
+    for (const activity of intent.activities) {
+      if (activity.kind === 'save' && activity.save) {
+        iconShape.save = { ability: activity.save.ability, dc: activity.save.dc };
+      }
+      if (activity.kind === 'attack' && activity.attack) {
+        iconShape.attackBonus = activity.attack.bonus;
+        if (activity.attack.attackType) iconShape.attackType = activity.attack.attackType;
+      }
+    }
+    const img = await resolveFeatIcon(
+      finalName,
+      iconShape as import('../parsers/action-description.js').ParsedAction,
+    );
+    // The intent's name may carry the usage suffix Claude included for
+    // matching; strip it for the actual feat item name so the sheet renders
+    // "Tanglefoot" rather than "Tanglefoot (1/Day)".
+    const finalIntent: ActionIntent = { ...intent, name: finalName };
+    return writeScratchItem(finalIntent, { img });
   }
 
   /**

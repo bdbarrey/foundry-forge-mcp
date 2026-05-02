@@ -1,0 +1,228 @@
+// Phase 12.1.0 — Zod runtime schemas mirroring the activity-intent.ts types.
+// Used by create-actor's `actions_intent` input mode to validate intents
+// emitted by the orchestrating Claude session before they reach the writer.
+//
+// The TS types in activity-intent.ts are the authoritative shape; these Zod
+// schemas reproduce them at runtime. When the two diverge, the TS types are
+// the source of truth — update Zod to match. zInfer<typeof ActionIntentSchema>
+// is exposed below for callers that want a Zod-derived TS type, but the
+// canonical TS type stays in activity-intent.ts.
+//
+// Why this lives in its own file: keeps activity-intent.ts pure (no zod
+// dependency) so consumers that only want types pay no runtime cost. Only
+// the create-actor input boundary imports the Zod schemas.
+
+import { z } from 'zod';
+
+// ----- Primitive enums (mirror the unions from action-description.ts) -------
+
+export const AbilityKeySchema = z.enum(['str', 'dex', 'con', 'int', 'wis', 'cha']);
+
+export const AttackTypeSchema = z.enum(['melee', 'ranged']);
+
+export const ConditionTypeSchema = z.enum([
+  'blinded',
+  'charmed',
+  'deafened',
+  'frightened',
+  'grappled',
+  'incapacitated',
+  'paralyzed',
+  'petrified',
+  'poisoned',
+  'prone',
+  'restrained',
+  'stunned',
+  'unconscious',
+]);
+
+export const TemplateShapeSchema = z.enum([
+  'circle',
+  'cone',
+  'line',
+  'cube',
+  'sphere',
+  'cylinder',
+]);
+
+export const ActivityKindSchema = z.enum(['attack', 'save', 'damage']);
+
+export const TraitIntentKindSchema = z.enum([
+  'pack-tactics',
+  'sunlight-sensitivity',
+  'description-only',
+]);
+
+// ----- Sub-shapes -----------------------------------------------------------
+
+export const DamagePartSchema = z.object({
+  formula: z.string().min(1),
+  type: z.string().min(1),
+});
+
+export const ParsedConditionDurationSchema = z.object({
+  rounds: z.number().int().nonnegative().optional(),
+  seconds: z.number().int().nonnegative().optional(),
+  specialDuration: z
+    .enum(['turnEnd', 'turnStart', 'turnEndSource', 'turnStartSource'])
+    .optional(),
+});
+
+export const ParsedRepeatSaveSchema = z.object({
+  period: z.enum(['turnEnd', 'turnStart']),
+  ability: AbilityKeySchema,
+  dc: z.number().int().positive(),
+});
+
+export const RangeIntentSchema = z.object({
+  value: z.number().int().nonnegative().optional(),
+  long: z.number().int().nonnegative().optional(),
+  reach: z.number().int().nonnegative().optional(),
+  units: z.literal('ft'),
+});
+
+export const TemplateIntentSchema = z.object({
+  shape: TemplateShapeSchema,
+  size: z.number().int().positive(),
+  width: z.number().int().positive().optional(),
+});
+
+export const AffectsIntentSchema = z.object({
+  type: z.enum(['creature', 'enemy', 'ally', 'object', 'self', 'space']),
+  count: z.number().int().positive().optional(),
+  choice: z.boolean().optional(),
+});
+
+export const TargetIntentSchema = z.object({
+  template: TemplateIntentSchema.optional(),
+  affects: AffectsIntentSchema.optional(),
+});
+
+export const AttackIntentSchema = z.object({
+  bonus: z.number().int(),
+  attackType: AttackTypeSchema.optional(),
+});
+
+export const SaveIntentSchema = z.object({
+  ability: AbilityKeySchema,
+  dc: z.number().int().positive(),
+  onSuccess: z.literal('half').optional(),
+});
+
+export const DamageIntentSchema = z.object({
+  parts: z.array(DamagePartSchema),
+  includeBase: z.boolean().optional(),
+  onSave: z.enum(['half', 'none', 'full']).optional(),
+});
+
+export const ActivityEffectLinkSchema = z.object({
+  conditionRef: z.number().int().nonnegative(),
+  onSave: z.boolean().optional(),
+});
+
+export const ActivityIntentSchema = z.object({
+  intentId: z.string().min(1),
+  kind: ActivityKindSchema,
+  name: z.string().min(1),
+  range: RangeIntentSchema.optional(),
+  target: TargetIntentSchema.optional(),
+  attack: AttackIntentSchema.optional(),
+  save: SaveIntentSchema.optional(),
+  damage: DamageIntentSchema.optional(),
+  triggers: z
+    .object({
+      activityRef: z.string().min(1),
+      targets: z.enum(['hit', 'all']),
+    })
+    .optional(),
+  effects: z.array(ActivityEffectLinkSchema).optional(),
+});
+
+export const ConditionIntentSchema = z.object({
+  type: ConditionTypeSchema,
+  duration: ParsedConditionDurationSchema.optional(),
+  repeatSave: ParsedRepeatSaveSchema.optional(),
+});
+
+// UsageIntent is a discriminated union: count+period OR recharge tuple.
+export const UsageIntentSchema = z.union([
+  z.object({
+    count: z.number().int().positive(),
+    period: z.enum(['day', 'long-rest', 'short-rest', 'turn']),
+  }),
+  z.object({
+    recharge: z.tuple([
+      z.number().int().min(1).max(20),
+      z.number().int().min(1).max(20),
+    ]),
+  }),
+]);
+
+export const VersatileIntentSchema = z.object({
+  formula: z.string().min(1),
+  type: z.string().min(1),
+});
+
+export const ActionMidiPropertiesSchema = z.object({
+  saveDamage: z.enum(['halfdam', 'fulldam', 'nodam']).optional(),
+});
+
+// ----- Top-level ActionIntent ----------------------------------------------
+
+export const ActionIntentSchema = z.object({
+  name: z.string().min(1),
+  description: z.string(),
+  usage: UsageIntentSchema.optional(),
+  versatile: VersatileIntentSchema.optional(),
+  midiProperties: ActionMidiPropertiesSchema.optional(),
+  activities: z.array(ActivityIntentSchema),
+  conditions: z.array(ConditionIntentSchema),
+})
+  // Cross-field invariants the writer relies on:
+  // - effects[].conditionRef must be a valid index into conditions[]
+  // - triggers.activityRef must match some other activity's intentId
+  .superRefine((intent, ctx) => {
+    const intentIds = new Set(intent.activities.map(a => a.intentId));
+    intent.activities.forEach((activity, ai) => {
+      if (activity.effects) {
+        activity.effects.forEach((link, ei) => {
+          if (link.conditionRef >= intent.conditions.length) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['activities', ai, 'effects', ei, 'conditionRef'],
+              message: `conditionRef ${link.conditionRef} out of range (conditions has ${intent.conditions.length} entries)`,
+            });
+          }
+        });
+      }
+      if (activity.triggers) {
+        if (!intentIds.has(activity.triggers.activityRef)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['activities', ai, 'triggers', 'activityRef'],
+            message: `triggers.activityRef '${activity.triggers.activityRef}' does not match any activity intentId in this action`,
+          });
+        }
+        if (activity.triggers.activityRef === activity.intentId) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['activities', ai, 'triggers', 'activityRef'],
+            message: `activity cannot trigger itself`,
+          });
+        }
+      }
+    });
+  });
+
+export const TraitIntentSchema = z.object({
+  kind: TraitIntentKindSchema,
+  name: z.string().min(1),
+  description: z.string(),
+});
+
+// ----- Type inference helpers ----------------------------------------------
+
+export type ActionIntentZ = z.infer<typeof ActionIntentSchema>;
+export type ActivityIntentZ = z.infer<typeof ActivityIntentSchema>;
+export type ConditionIntentZ = z.infer<typeof ConditionIntentSchema>;
+export type TraitIntentZ = z.infer<typeof TraitIntentSchema>;
