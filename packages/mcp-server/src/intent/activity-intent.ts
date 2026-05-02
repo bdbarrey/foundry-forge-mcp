@@ -205,6 +205,9 @@ export interface ActionIntent {
 export type TraitIntentKind =
   | 'pack-tactics'
   | 'sunlight-sensitivity'
+  | 'sunlight-hypersensitivity'
+  | 'regeneration'
+  | 'magic-resistance'
   | 'description-only'
   | 'custom';
 

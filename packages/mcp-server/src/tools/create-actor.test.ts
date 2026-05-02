@@ -641,9 +641,57 @@ describe('resolveTraitTemplate (Phase 10B)', () => {
     expect(resolveTraitTemplate('PACK TACTICS')?.name).toBe('Pack Tactics');
   });
 
-  it('matches Sunlight Sensitivity AND its alias "Sunlight Hypersensitivity"', () => {
+  it('Sunlight Sensitivity and Sunlight Hypersensitivity resolve to DIFFERENT templates', () => {
+    // 2026-05-02 — split previously-unified alias. Hypersensitivity adds the
+    // 20-radiant-damage tick that Sensitivity doesn't have; Volenta needs both.
     expect(resolveTraitTemplate('Sunlight Sensitivity')?.name).toBe('Sunlight Sensitivity');
-    expect(resolveTraitTemplate('Sunlight Hypersensitivity')?.name).toBe('Sunlight Sensitivity');
+    expect(resolveTraitTemplate('Sunlight Hypersensitivity')?.name).toBe('Sunlight Hypersensitivity');
+    expect(resolveTraitTemplate('sunlight hypersensitivity')?.name).toBe('Sunlight Hypersensitivity');
+  });
+
+  it('matches Regeneration (case-insensitive) and routes to the regeneration kind', () => {
+    expect(resolveTraitTemplate('Regeneration')?.name).toBe('Regeneration');
+    expect(resolveTraitTemplate('regeneration')?.name).toBe('Regeneration');
+  });
+
+  it('matches Magic Resistance (case-insensitive)', () => {
+    expect(resolveTraitTemplate('Magic Resistance')?.name).toBe('Magic Resistance');
+    expect(resolveTraitTemplate('magic resistance')?.name).toBe('Magic Resistance');
+  });
+
+  it('Regeneration template builds the OverTime healing effect with parsed amount', () => {
+    const tpl = resolveTraitTemplate('Regeneration')!;
+    const built = tpl.build('Regeneration', 'Volenta regains 10 hit points at the start of her turn.');
+    const eff = built.effects[0];
+    expect(eff.transfer).toBe(true);
+    expect(eff.disabled).toBe(false);
+    expect(eff.changes).toHaveLength(1);
+    expect(eff.changes[0].key).toBe('flags.midi-qol.OverTime.regeneration');
+    expect(eff.changes[0].value).toContain('damageRoll=10');
+    expect(eff.changes[0].value).toContain('damageType=healing');
+    // 2026-05-02 user feedback: "would only fire if she wasnt at max HP"
+    expect(eff.changes[0].value).toContain('@attributes.hp.value<@attributes.hp.max');
+  });
+
+  it('Sunlight Hypersensitivity template includes BOTH disadvantage flags AND OverTime damage', () => {
+    const tpl = resolveTraitTemplate('Sunlight Hypersensitivity')!;
+    const built = tpl.build('Sunlight Hypersensitivity', 'It takes 20 radiant damage at the start of its turn.');
+    const eff = built.effects[0];
+    expect(eff.disabled).toBe(true); // GM-toggled
+    const keys = eff.changes.map((c: any) => c.key).sort();
+    expect(keys).toEqual([
+      'flags.midi-qol.OverTime.sunlightHypersensitivity',
+      'flags.midi-qol.disadvantage.ability.check.all',
+      'flags.midi-qol.disadvantage.attack.all',
+    ]);
+  });
+
+  it('Magic Resistance template emits the magicResistance.all flag', () => {
+    const tpl = resolveTraitTemplate('Magic Resistance')!;
+    const built = tpl.build('Magic Resistance', 'desc');
+    const eff = built.effects[0];
+    expect(eff.disabled).toBe(false);
+    expect(eff.changes[0].key).toBe('flags.midi-qol.magicResistance.all');
   });
 
   it('Pack Tactics builds an effect with the load-bearing key + value (the DDB-broken bit)', () => {

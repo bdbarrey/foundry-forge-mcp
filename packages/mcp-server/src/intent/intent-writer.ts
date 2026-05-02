@@ -604,6 +604,109 @@ export function writeTrait(
     };
   }
 
+  if (intent.kind === 'sunlight-hypersensitivity') {
+    // Sunlight Hypersensitivity = Sensitivity (disadvantage on attacks +
+    // ability checks) + 20 radiant damage at start of turn. Vampires only —
+    // distinct from orc-style Sunlight Sensitivity which has no damage tick.
+    // GM toggles disabled→enabled when the creature enters sunlight.
+    const damageAmount = parseLeadingInt(intent.description, /(\d+)\s+radiant\s+damage/i, 20);
+    return {
+      effects: [{
+        _id: allocEffectId(),
+        name: 'Sunlight Hypersensitivity',
+        statuses: [],
+        transfer: true,
+        disabled: true,
+        img: 'icons/magic/light/explosion-star-glow-yellow.webp',
+        type: 'base',
+        system: {},
+        origin: null,
+        sort: 0,
+        tint: '#ffffff',
+        description: 'Disabled by default — GM enables when the creature is in sunlight',
+        changes: [
+          { key: 'flags.midi-qol.OverTime.sunlightHypersensitivity', value: `turn=start,damageRoll=${damageAmount},damageType=radiant,label=Sunlight Hypersensitivity`, mode: 0, priority: 20 },
+          { key: 'flags.midi-qol.disadvantage.attack.all', value: '1', mode: 0, priority: 20 },
+          { key: 'flags.midi-qol.disadvantage.ability.check.all', value: '1', mode: 0, priority: 20 },
+        ],
+        flags: {
+          dae: { transfer: true, stackable: 'noneName', specialDuration: [] },
+          'midi-qol': { forceCEOff: true },
+          core: {},
+        },
+      }],
+    };
+  }
+
+  if (intent.kind === 'regeneration') {
+    // Parse the per-turn heal amount from the description ("regains X hit
+    // points"). Defaults to 10 (standard vampire spawn / vampiric brides).
+    // The condition expression suppresses the heal at full HP so chat doesn't
+    // spam +0 heal rolls. Suppression on radiant/holy damage is GM-managed
+    // (toggle the effect off for a turn) — too complex to automate.
+    const healAmount = parseLeadingInt(intent.description, /regains?\s+(\d+)\s+hit\s+points?/i, 10);
+    return {
+      effects: [{
+        _id: allocEffectId(),
+        name: 'Regeneration',
+        statuses: [],
+        transfer: true,
+        disabled: false,
+        img: 'icons/magic/life/cross-area-circle-green-white.webp',
+        type: 'base',
+        system: {},
+        origin: null,
+        sort: 0,
+        tint: '#ffffff',
+        description: 'Auto-heals at start of turn; condition skips when at max HP',
+        changes: [{
+          key: 'flags.midi-qol.OverTime.regeneration',
+          value: `turn=start,damageRoll=${healAmount},damageType=healing,label=Regeneration,condition=@attributes.hp.value<@attributes.hp.max`,
+          mode: 0,
+          priority: 20,
+        }],
+        flags: {
+          dae: { transfer: true, stackable: 'noneName', specialDuration: [] },
+          'midi-qol': { forceCEOff: true },
+          core: {},
+        },
+      }],
+    };
+  }
+
+  if (intent.kind === 'magic-resistance') {
+    // Advantage on saves against spells and magical effects. Standard Midi
+    // shape uses flags.midi-qol.magicResistance.all — applied passively, no
+    // GM toggle required.
+    return {
+      effects: [{
+        _id: allocEffectId(),
+        name: 'Magic Resistance',
+        statuses: [],
+        transfer: true,
+        disabled: false,
+        img: 'icons/magic/defensive/shield-barrier-glowing-blue.webp',
+        type: 'base',
+        system: {},
+        origin: null,
+        sort: 0,
+        tint: '#ffffff',
+        description: '',
+        changes: [{
+          key: 'flags.midi-qol.magicResistance.all',
+          value: '1',
+          mode: 0,
+          priority: 20,
+        }],
+        flags: {
+          dae: { transfer: true, stackable: 'noneName', specialDuration: [] },
+          'midi-qol': { forceCEOff: true },
+          core: {},
+        },
+      }],
+    };
+  }
+
   if (intent.kind === 'custom') {
     if (!intent.custom) return {};
     return writeCustomTraitEffect(intent.custom, intent.name, allocEffectId);
@@ -611,6 +714,19 @@ export function writeTrait(
 
   // description-only — no effect, caller falls back to default feat shell.
   return {};
+}
+
+/**
+ * Extract the first integer matched by `pattern` from `text`. Returns
+ * `defaultValue` when the pattern doesn't match or the captured group
+ * isn't parseable. Used by trait templates that scale with the printed
+ * value (Regeneration heal amount, Sunlight Hypersensitivity damage tick).
+ */
+function parseLeadingInt(text: string, pattern: RegExp, defaultValue: number): number {
+  const m = text.match(pattern);
+  if (!m || !m[1]) return defaultValue;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) ? n : defaultValue;
 }
 
 /**

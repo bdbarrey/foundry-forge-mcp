@@ -572,4 +572,103 @@ describe('Phase 12.1.1 — writeTrait output by kind', () => {
       combat: null,
     });
   });
+
+  // 2026-05-02 — three trait kinds added to fix Volenta build gap. The previous
+  // build had Regeneration and Sunlight Hypersensitivity as description-only
+  // feats, so Regeneration didn't fire and Hypersensitivity was missing the
+  // 20 radiant damage tick. User reported "regeneration doesnt apply at the
+  // start of her turn" — this suite locks the canonical Midi shapes.
+
+  it('regeneration kind emits OverTime healing with parsed amount + max-HP condition', () => {
+    const out = writeTrait(
+      {
+        kind: 'regeneration',
+        name: 'Regeneration',
+        description:
+          'Volenta regains 10 hit points at the start of her turn if she has at least 1 hit point and isn\'t in sunlight or running water.',
+      },
+      detEffectOpts(),
+    );
+    expect(out.effects).toHaveLength(1);
+    const eff = (out.effects as any[])[0];
+    expect(eff.name).toBe('Regeneration');
+    expect(eff.transfer).toBe(true);
+    expect(eff.disabled).toBe(false);
+    expect(eff.changes).toHaveLength(1);
+    const change = eff.changes[0];
+    expect(change.key).toBe('flags.midi-qol.OverTime.regeneration');
+    expect(change.value).toContain('turn=start');
+    expect(change.value).toContain('damageRoll=10');
+    expect(change.value).toContain('damageType=healing');
+    // Skip-at-max-HP condition — answers user's "shouldn't fire at max HP" intuition.
+    expect(change.value).toContain('condition=@attributes.hp.value<@attributes.hp.max');
+    expect(change.mode).toBe(0);
+  });
+
+  it('regeneration kind parses non-default heal amounts (Troll = 10, Pit Fiend = 20)', () => {
+    const troll = writeTrait(
+      { kind: 'regeneration', name: 'Regeneration', description: 'The troll regains 15 hit points at the start of its turn.' },
+      detEffectOpts(),
+    );
+    expect((troll.effects as any[])[0].changes[0].value).toContain('damageRoll=15');
+
+    const noNumber = writeTrait(
+      { kind: 'regeneration', name: 'Regeneration', description: 'It heals over time.' },
+      detEffectOpts(),
+    );
+    // Defaults to 10 when description has no parseable amount.
+    expect((noNumber.effects as any[])[0].changes[0].value).toContain('damageRoll=10');
+  });
+
+  it('sunlight-hypersensitivity emits BOTH OverTime damage AND disadvantage flags', () => {
+    const out = writeTrait(
+      {
+        kind: 'sunlight-hypersensitivity',
+        name: 'Sunlight Hypersensitivity',
+        description:
+          'While in sunlight, Volenta takes 20 radiant damage at the start of her turn, and she has disadvantage on attack rolls and ability checks.',
+      },
+      detEffectOpts(),
+    );
+    expect(out.effects).toHaveLength(1);
+    const eff = (out.effects as any[])[0];
+    expect(eff.disabled).toBe(true); // GM-toggled — same as plain Sunlight Sensitivity
+    const keys = eff.changes.map((c: any) => c.key);
+    expect(keys).toContain('flags.midi-qol.OverTime.sunlightHypersensitivity');
+    expect(keys).toContain('flags.midi-qol.disadvantage.attack.all');
+    expect(keys).toContain('flags.midi-qol.disadvantage.ability.check.all');
+    const overtime = eff.changes.find((c: any) => c.key === 'flags.midi-qol.OverTime.sunlightHypersensitivity');
+    expect(overtime.value).toContain('damageRoll=20');
+    expect(overtime.value).toContain('damageType=radiant');
+  });
+
+  it('sunlight-hypersensitivity parses non-default damage amounts', () => {
+    const out = writeTrait(
+      {
+        kind: 'sunlight-hypersensitivity',
+        name: 'Sunlight Hypersensitivity',
+        description: 'It takes 30 radiant damage at the start of its turn.',
+      },
+      detEffectOpts(),
+    );
+    const eff = (out.effects as any[])[0];
+    const overtime = eff.changes.find((c: any) => c.key === 'flags.midi-qol.OverTime.sunlightHypersensitivity');
+    expect(overtime.value).toContain('damageRoll=30');
+  });
+
+  it('magic-resistance emits the magicResistance.all advantage flag (always-on)', () => {
+    const out = writeTrait(
+      { kind: 'magic-resistance', name: 'Magic Resistance', description: 'Advantage on saves vs spells and magical effects.' },
+      detEffectOpts(),
+    );
+    expect(out.effects).toHaveLength(1);
+    const eff = (out.effects as any[])[0];
+    expect(eff.disabled).toBe(false); // Always-on
+    expect(eff.changes).toHaveLength(1);
+    expect(eff.changes[0]).toMatchObject({
+      key: 'flags.midi-qol.magicResistance.all',
+      value: '1',
+      mode: 0,
+    });
+  });
 });

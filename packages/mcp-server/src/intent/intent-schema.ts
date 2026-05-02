@@ -50,6 +50,9 @@ export const ActivityKindSchema = z.enum(['attack', 'save', 'damage']);
 export const TraitIntentKindSchema = z.enum([
   'pack-tactics',
   'sunlight-sensitivity',
+  'sunlight-hypersensitivity',
+  'regeneration',
+  'magic-resistance',
   'description-only',
   'custom',
 ]);
