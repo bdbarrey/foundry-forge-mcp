@@ -109,12 +109,25 @@ function escapeHtml(s: string): string {
 // ----- writeConditionEffect -------------------------------------------------
 
 /**
- * Build a Foundry ActiveEffect document from a ConditionIntent. Mirrors the
- * DDB-imported Wolf Bite "Status: Prone" effect shape: transfer:false (only
- * fires when the activity links it, not passively on item add), DAE
- * stackable=noneName (one instance per condition), Midi forceCEOff (use
- * Foundry native conditions, not Convenient Effects which can shadow
- * statuses).
+ * Build a Foundry ActiveEffect document from a ConditionIntent.
+ *
+ * dnd5e 5.x architecture (live-verified Volenta 2026-05-02 on dnd5e 5.3.2 +
+ * Midi-QOL 13.0.61): an AE with `statuses[]` causes dnd5e to auto-apply the
+ * canonical condition AS WELL — two separate icons render on the affected
+ * token (one for our AE.img, one for CONFIG.statusEffects[type].icon). DAE's
+ * `flags.dae.showIcon: false` from Phase 10C.1 is ignored in 5.x because DAE
+ * isn't doing the rendering anymore.
+ *
+ * Fix is to NOT carry `statuses[]` on the AE. The condition is applied
+ * separately via the `&Reference[<type>]` enricher injected into the
+ * activity description by writeScratchItem — Midi-QOL 13.x's default config
+ * auto-toggles the canonical condition status on the target on save fail
+ * (chat card pill is also clickable for GM-driven setups).
+ *
+ * The AE we emit here only carries what the canonical condition can't:
+ * the OverTime save-loop ("save vs Restrained at end of each turn"). When
+ * the save succeeds, the OverTime removes this AE — and once Midi sees
+ * the source effect gone, it auto-clears the linked condition too.
  *
  * `effectId` is supplied by the caller so writeScratchItem can pre-allocate
  * IDs and link them from activities[].effects[]. When omitted, generates a
@@ -129,7 +142,8 @@ export function writeConditionEffect(
   const effect: Record<string, any> = {
     _id: id,
     name: titleCase,
-    statuses: [condition.type],
+    // statuses intentionally omitted — see file header. Condition is applied
+    // via the &Reference enricher in the activity description.
     img: CONDITION_ICONS[condition.type] ?? 'icons/svg/aura.svg',
     type: 'base',
     system: {},
@@ -152,11 +166,6 @@ export function writeConditionEffect(
         specialDuration: condition.duration?.specialDuration
           ? [condition.duration.specialDuration]
           : [],
-        // showIcon=false suppresses the effect's own icon — statuses[]
-        // already toggles the dnd5e condition icon. Without this, both
-        // icons render → double icon on token (live-verified Volenta
-        // 2026-04-29). Same flag the DDB Wolf Bite "Status: Prone" uses.
-        showIcon: false,
       },
       'midi-qol': { forceCEOff: true },
       core: {},
@@ -339,8 +348,22 @@ export function writeScratchItem(
 
   const ctx: ActivityWriteCtx = { activityIdMap, effectIdMap };
 
+  // dnd5e 5.x reference enrichers — Midi-QOL 13.x reads &Reference[<status>]
+  // pills from the chat card and auto-applies the matching condition status
+  // on the target on save fail (default config). The pill is also clickable
+  // by the GM for setups where auto-apply is off. Adding these makes the
+  // condition status icon render exactly once (canonical) instead of doubling
+  // up against an AE-with-statuses[]. Names lower-cased to match
+  // CONFIG.statusEffects ids.
+  const referencePills = intent.conditions
+    .map(c => `&Reference[${c.type}]`)
+    .join(' ');
+  const descriptionWithReferences = referencePills
+    ? `<p>${escapeHtml(intent.description)}</p><p>${referencePills}</p>`
+    : `<p>${escapeHtml(intent.description)}</p>`;
+
   const system: Record<string, any> = {
-    description: { value: `<p>${escapeHtml(intent.description)}</p>` },
+    description: { value: descriptionWithReferences },
     source: { book: 'CoS Reloaded' },
     type: { value: 'monster' },
   };

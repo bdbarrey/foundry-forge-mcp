@@ -430,11 +430,16 @@ describe('buildUsesPayload (Phase 8 dnd5e system.uses shape)', () => {
   });
 });
 
-describe('buildConditionEffect (Phase 10A)', () => {
-  it('builds a Foundry ActiveEffect doc with statuses + transfer:false + DAE flags', () => {
+describe('buildConditionEffect (Phase 10A — updated 2026-05-02 for dnd5e 5.x)', () => {
+  it('builds a Foundry ActiveEffect doc WITHOUT statuses[] (Path B: condition applied via &Reference enricher)', () => {
     const eff = buildConditionEffect({ type: 'restrained' });
     expect(eff.name).toBe('Restrained');
-    expect(eff.statuses).toEqual(['restrained']);
+    // 2026-05-02 fix: statuses[] omitted. dnd5e 5.x renders both AE.img and
+    // CONFIG.statusEffects[X].icon when statuses[] is set, causing the
+    // double-icon bug (live-verified Volenta on dnd5e 5.3.2 + Midi 13.0.61).
+    // The activity description's &Reference[<type>] enricher applies the
+    // canonical condition via Midi-QOL's save-fail hook instead.
+    expect(eff.statuses).toBeUndefined();
     expect(eff.transfer).toBe(false);
     expect(eff.disabled).toBe(false);
     expect(eff.type).toBe('base');
@@ -447,10 +452,10 @@ describe('buildConditionEffect (Phase 10A)', () => {
     expect(eff.flags.dae.stackable).toBe('noneName');
     expect(eff.flags.dae.transfer).toBe(false);
     expect(eff.flags.dae.specialDuration).toEqual([]);
-    // showIcon=false suppresses the effect's own icon so Foundry only
-    // renders the status condition icon (toggled by statuses[]). Otherwise
-    // both render → double icon on token.
-    expect(eff.flags.dae.showIcon).toBe(false);
+    // showIcon flag dropped: ineffective in dnd5e 5.x (DAE no longer renders
+    // the icon — the system does), and we no longer have statuses[] for it
+    // to suppress against anyway.
+    expect(eff.flags.dae.showIcon).toBeUndefined();
     // Midi: forceCEOff so CE doesn't shadow the native Foundry status
     expect(eff.flags['midi-qol'].forceCEOff).toBe(true);
     // No duration field when condition has no duration
