@@ -467,6 +467,23 @@ export class CreateActorTools {
       const successfulUpdateKeys = updateResults.filter(r => r.ok).flatMap(r => r.fields);
       const failedUpdateChunks = updateResults.filter(r => !r.ok).map(r => ({ chunk: r.label, error: r.error }));
 
+      // 6b. Seed system.spells.spellN from the Spellcasting feat's prose so
+      //     slot-aware HUDs (Argon Combat HUD, Tidy 5e, etc.) render the
+      //     spell rows. Compendium NPC bases ship a Spellcasting feat with
+      //     "Nth level (X slots): ..." in the description but never populate
+      //     the actor's slot fields — Foundry's NPC sheet inspects the prose
+      //     directly, but third-party HUDs read system.spells.spellN.max.
+      //     Without this step, prepared spells exist on the actor but level
+      //     rows render empty in HUDs. Idempotent — re-running on an actor
+      //     whose slots already match writes the same values.
+      const spellSlotKeys = await this.seedSpellSlotsFromSpellcastingFeat(
+        newActor.id,
+        actorFull?.items ?? [],
+      );
+      if (spellSlotKeys.length > 0) {
+        successfulUpdateKeys.push(...spellSlotKeys);
+      }
+
       // 7. Add Reloaded-only traits (no attack/damage/save — pure narrative).
       //    Traits whose names already exist on the actor (e.g. "Sunlight
       //    Sensitivity" inherited from the compendium Wight) are left alone;
@@ -2116,6 +2133,70 @@ export class CreateActorTools {
       }
     }
     return results;
+  }
+
+  /**
+   * Parse the actor's Spellcasting feat (if present) for "Nth level (X slots)"
+   * lines and write `system.spells.spellN.{max,value,override}` so slot-aware
+   * HUD modules render the level rows. Compendium NPC bases (SRD Priest, Mage,
+   * Cleric, etc.) ship the slot count in feat prose only; the actor's
+   * `system.spells` defaults to all-zero, so HUDs that read those fields
+   * directly (Argon Combat HUD, Tidy 5e) show empty level rows even when
+   * prepared spells exist.
+   *
+   * Returns the list of `system.spells.spellN.*` keys written, or empty
+   * array when no Spellcasting feat / no parseable slots / write fails.
+   * Errors are caught and logged — the build doesn't fail because one HUD
+   * doesn't render correctly.
+   */
+  private async seedSpellSlotsFromSpellcastingFeat(
+    actorId: string,
+    items: Array<{ name?: string; system?: { description?: { value?: string } } }>,
+  ): Promise<string[]> {
+    const spellcastingFeat = items.find(
+      i => String(i?.name ?? '').toLowerCase() === 'spellcasting',
+    );
+    if (!spellcastingFeat) return [];
+    const desc = spellcastingFeat.system?.description?.value ?? '';
+    if (!desc) return [];
+
+    // Match "1st level (4 slots)", "2nd level (3 slots)", etc.
+    // Tolerant: matches across HTML tags, optional plural, varying whitespace.
+    const slotRegex = /(\d+)\s*(?:st|nd|rd|th)\s*level\s*\((\d+)\s*slots?\)/gi;
+    const updates: Record<string, number> = {};
+    let match: RegExpExecArray | null;
+    while ((match = slotRegex.exec(desc)) !== null) {
+      const level = parseInt(match[1], 10);
+      const slots = parseInt(match[2], 10);
+      if (level >= 1 && level <= 9 && slots >= 0) {
+        updates[`system.spells.spell${level}.max`] = slots;
+        updates[`system.spells.spell${level}.value`] = slots;
+        updates[`system.spells.spell${level}.override`] = slots;
+      }
+    }
+    const keys = Object.keys(updates);
+    if (keys.length === 0) return [];
+
+    try {
+      const r: any = await this.foundryClient.query('foundry-forge-mcp.updateActorData', {
+        actorId,
+        updates,
+      });
+      if (r?.success === false) {
+        this.logger.warn('seedSpellSlotsFromSpellcastingFeat: update returned success=false', {
+          actorId,
+          error: r?.error,
+        });
+        return [];
+      }
+      return keys;
+    } catch (err: any) {
+      this.logger.warn('seedSpellSlotsFromSpellcastingFeat failed', {
+        actorId,
+        error: err?.message ?? String(err),
+      });
+      return [];
+    }
   }
 
   /**
