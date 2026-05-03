@@ -446,6 +446,7 @@ export function writeActivityUpdate(
   itemId: string,
   baseActivities: Record<string, any>,
   intent: ActionIntent,
+  opts: { genActivityId?: () => string } = {},
 ): Record<string, any> {
   const u: Record<string, any> = { _id: itemId };
 
@@ -456,11 +457,27 @@ export function writeActivityUpdate(
   const damageGoesOnAttack = !!attackIntent;
   const damageGoesOnSave = !damageGoesOnAttack && !!saveIntent;
 
+  // Track whether the loop patched a base attack activity. If the source
+  // item has no attack-typed activity but the parsed action has attackBonus
+  // (e.g. cosrl-actors weapons whose curator structured everything as save
+  // activities — Rahadin's Poisoned Dart had 4 saves and 0 attacks), we'll
+  // synthesize a fresh attack activity after the loop. Without this, the
+  // attack patch silently dropped on the floor and the actor rolled
+  // attacks via auto-calc (DEX + prof), which often happened to match
+  // Reloaded by coincidence but broke under any prof/ability change.
+  let patchedAttackActivityId: string | null = null;
+  let firstSaveActivityId: string | null = null;
+
   for (const [activityId, activity] of Object.entries(baseActivities)) {
     const base = `system.activities.${activityId}`;
     const type = activity?.type;
 
+    if (type === 'save' && firstSaveActivityId === null) {
+      firstSaveActivityId = activityId;
+    }
+
     if (type === 'attack' && attackIntent?.attack) {
+      patchedAttackActivityId = activityId;
       u[`${base}.attack.bonus`] =
         (attackIntent.attack.bonus >= 0 ? '+' : '') + attackIntent.attack.bonus;
       u[`${base}.attack.flat`] = true;
@@ -537,6 +554,67 @@ export function writeActivityUpdate(
       }
       u[`${base}.target.prompt`] = true;
     }
+  }
+
+  // Synthesis: if parser found attackBonus but source item has no attack
+  // activity, create one. Triggers when the compendium-base curator
+  // (e.g. cosrl-actors) structured the item as save-only activities and
+  // Reloaded prose has both Hit: + DC X save. New attack activity carries
+  // the to-hit bonus, range, target, and parsed damage; midi-chains to
+  // the first save activity if one exists so the save auto-fires after
+  // a hit. Damage on the existing save activity is left untouched
+  // (curator's choice — could be intentional save-side damage like
+  // poison rider). DM may need to manually deduplicate if double-counting
+  // appears at the table.
+  if (attackIntent?.attack && !patchedAttackActivityId) {
+    const allocId = opts.genActivityId ?? genActivityId;
+    const newAttackId = allocId();
+    const base = `system.activities.${newAttackId}`;
+    const attackDoc: Record<string, any> = {
+      type: 'attack',
+      _id: newAttackId,
+      name: 'Attack',
+      attack: {
+        bonus: (attackIntent.attack.bonus >= 0 ? '+' : '') + attackIntent.attack.bonus,
+        flat: true,
+        critical: {},
+        ...(attackIntent.attack.attackType
+          ? { type: { value: attackIntent.attack.attackType, classification: 'weapon' } }
+          : {}),
+      },
+    };
+    if (primaryDamage && primaryDamage.parts.length > 0) {
+      attackDoc.damage = {
+        parts: primaryDamage.parts.map(damagePartPayload),
+        includeBase: false,
+        critical: {},
+      };
+    }
+    if (attackIntent.range) {
+      const range: Record<string, any> = { units: attackIntent.range.units, override: true };
+      if (attackIntent.range.reach !== undefined) range.reach = attackIntent.range.reach;
+      if (attackIntent.range.value !== undefined) range.value = attackIntent.range.value;
+      if (attackIntent.range.long !== undefined) range.long = attackIntent.range.long;
+      attackDoc.range = range;
+    }
+    if (attackIntent.target?.affects) {
+      attackDoc.target = {
+        prompt: true,
+        affects: {
+          type: attackIntent.target.affects.type,
+          ...(attackIntent.target.affects.count !== undefined
+            ? { count: attackIntent.target.affects.count }
+            : {}),
+        },
+      };
+    }
+    if (firstSaveActivityId) {
+      attackDoc.midiProperties = {
+        triggeredActivityId: firstSaveActivityId,
+        triggeredActivityTargets: 'targets',
+      };
+    }
+    u[base] = attackDoc;
   }
 
   // Item-level versatile alt-damage block.

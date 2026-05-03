@@ -900,4 +900,47 @@ describe('compareActor — Phase 11.2 attack→save chain rule', () => {
     const slash = audit.actions.find(a => a.name === 'Slash')!;
     expect(slash.divergences.find(d => d.field === 'attack-save.chain')).toBeUndefined();
   });
+
+  // Regression: production Foundry serializes system.activities as
+  // Record<id, body> where the body has no _id field — only the key
+  // carries the id. Object.values() previously discarded the keys, so
+  // saveAct._id was undefined and the chain check could never match
+  // even when the actor was correctly wired. compareActor must inject
+  // the key as _id when materializing the activity list.
+  it('chain check passes when production-shape activities have no inline _id field', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Saber',
+        description: 'attack with save-vs-prone',
+        parsed: {
+          damage: [{ formula: '1d8+6', type: 'slashing' }],
+          attackBonus: 11,
+          attackType: 'melee',
+          reach: 5,
+          save: { dc: 15, ability: 'str' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Saber', type: 'weapon', system: {
+        activities: {
+          // No inline _id — production data shape from Foundry
+          atkProd: {
+            type: 'attack',
+            attack: { bonus: '+11', flat: true, type: { value: 'melee' } },
+            damage: { parts: [{ custom: { enabled: true, formula: '1d8+6' }, types: ['slashing'] }], includeBase: false },
+            range: { reach: 5, units: 'ft' },
+            midiProperties: { triggeredActivityId: 'savProd' },
+          },
+          savProd: {
+            type: 'save',
+            save: { ability: ['str'], dc: { calculation: '', formula: '15' } },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const saber = audit.actions.find(a => a.name === 'Saber')!;
+    expect(saber.divergences.find(d => d.field === 'attack-save.chain')).toBeUndefined();
+  });
 });

@@ -19,8 +19,8 @@
 // the parser path through it), so byte-equivalence is structural rather
 // than testable. The 279 existing tests cover that.
 
-import { describe, it, expect } from 'vitest';
-import { writeScratchItem, writeTrait } from './intent-writer.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { writeScratchItem, writeTrait, writeActivityUpdate } from './intent-writer.js';
 import type { ActionIntent, TraitIntent } from './activity-intent.js';
 import { ActionIntentSchema, TraitIntentSchema } from './intent-schema.js';
 
@@ -692,5 +692,148 @@ describe('Phase 12.1.1 — writeTrait output by kind', () => {
       value: '1',
       mode: 0,
     });
+  });
+});
+
+// Bug surfaced 2026-05-02: writeActivityUpdate (copy-patch path) iterates
+// the source item's activities and only writes attack data when an attack-
+// typed activity already exists. cosrl-actors curated weapons sometimes
+// structure everything as save activities (Rahadin's Poisoned Dart had 4
+// saves and 0 attacks). When parser found attackBonus=11 from Reloaded
+// prose, the loop had no attack activity to patch — the attack bonus
+// silently dropped. Result: actor rolled attacks via auto-calc (DEX +
+// prof) which often matched Reloaded by coincidence but broke under any
+// proficiency or ability change. Fix: synthesize a fresh attack activity
+// when the loop finds none but the intent has one.
+describe('writeActivityUpdate — synthesize attack activity when source has none', () => {
+  function attackOnlyIntent(): ActionIntent {
+    return {
+      name: 'Poisoned Dart',
+      description: '+11 to hit, range 20/60 ft. Hit: 1d4+6 piercing.',
+      activities: [{
+        intentId: 'atk',
+        kind: 'attack',
+        name: 'Attack',
+        attack: { bonus: 11, attackType: 'ranged' },
+        damage: { parts: [{ formula: '1d4 + 6', type: 'piercing' }], includeBase: false },
+        range: { value: 20, long: 60, units: 'ft' },
+        target: { affects: { type: 'creature', count: 1 } },
+      }],
+    };
+  }
+
+  let idCounter = 0;
+  const detIdGen = () => `synthAtk${String(++idCounter).padStart(8, '0')}`;
+  beforeEach(() => { idCounter = 0; });
+
+  it('synthesizes a new attack activity when source has only save activities', () => {
+    const baseActivities = {
+      saveId001: {
+        type: 'save',
+        save: { ability: ['con'], dc: { calculation: '', formula: '15' } },
+      },
+    };
+    const intent = attackOnlyIntent();
+    intent.activities.push({
+      intentId: 'sav',
+      kind: 'save',
+      name: 'Poisoned',
+      save: { ability: 'con', dc: 15 },
+    });
+    idCounter = 0;
+    const u = writeActivityUpdate('item-1', baseActivities, intent, { genActivityId: detIdGen });
+
+    // A new system.activities.<id> entry should appear with the attack doc.
+    const newActivityKey = Object.keys(u).find(k => k.startsWith('system.activities.synthAtk'));
+    expect(newActivityKey).toBeDefined();
+    const newActivity = u[newActivityKey!];
+    expect(newActivity.type).toBe('attack');
+    expect(newActivity.attack.bonus).toBe('+11');
+    expect(newActivity.attack.flat).toBe(true);
+    expect(newActivity.attack.type.value).toBe('ranged');
+    expect(newActivity.range.value).toBe(20);
+    expect(newActivity.range.long).toBe(60);
+    expect(newActivity.range.override).toBe(true);
+    expect(newActivity.target.affects.type).toBe('creature');
+    expect(newActivity.target.affects.count).toBe(1);
+    expect(newActivity.damage.parts).toHaveLength(1);
+    expect(newActivity.damage.includeBase).toBe(false);
+  });
+
+  it('wires triggeredActivityId to the first save activity when one exists', () => {
+    const baseActivities = {
+      saveFirst000: {
+        type: 'save',
+        save: { ability: ['con'], dc: { calculation: '', formula: '15' } },
+      },
+      saveSecond00: {
+        type: 'save',
+        save: { ability: ['dex'], dc: { calculation: '', formula: '15' } },
+      },
+    };
+    idCounter = 0;
+    const u = writeActivityUpdate('item-1', baseActivities, attackOnlyIntent(), { genActivityId: detIdGen });
+
+    const newActivityKey = Object.keys(u).find(k => k.startsWith('system.activities.synthAtk'));
+    const newActivity = u[newActivityKey!];
+    expect(newActivity.midiProperties.triggeredActivityId).toBe('saveFirst000');
+    expect(newActivity.midiProperties.triggeredActivityTargets).toBe('targets');
+  });
+
+  it('does NOT synthesize when source already has an attack activity (existing patch path runs)', () => {
+    const baseActivities = {
+      atkExisting1: {
+        type: 'attack',
+        attack: { bonus: '', flat: false },
+      },
+    };
+    idCounter = 0;
+    const u = writeActivityUpdate('item-1', baseActivities, attackOnlyIntent(), { genActivityId: detIdGen });
+
+    // Should NOT have a synthesized synthAtk... key — the existing one was patched.
+    const synthesizedKey = Object.keys(u).find(k => k.startsWith('system.activities.synthAtk'));
+    expect(synthesizedKey).toBeUndefined();
+    // The existing activity SHOULD have been patched.
+    expect(u['system.activities.atkExisting1.attack.bonus']).toBe('+11');
+    expect(u['system.activities.atkExisting1.attack.flat']).toBe(true);
+  });
+
+  it('does NOT synthesize when intent has no attack (save-only action)', () => {
+    const baseActivities = {
+      saveId001: {
+        type: 'save',
+        save: { ability: ['con'], dc: { calculation: '', formula: '15' } },
+      },
+    };
+    const saveOnlyIntent: ActionIntent = {
+      name: 'Tanglefoot',
+      description: 'AOE save-or-restrained.',
+      activities: [{
+        intentId: 'sav',
+        kind: 'save',
+        name: 'Save',
+        save: { ability: 'str', dc: 14 },
+        range: { value: 30, units: 'ft' },
+        target: { template: { shape: 'circle', size: 10 } },
+      }],
+    };
+    idCounter = 0;
+    const u = writeActivityUpdate('item-1', baseActivities, saveOnlyIntent, { genActivityId: detIdGen });
+
+    const synthesizedKey = Object.keys(u).find(k => k.startsWith('system.activities.synthAtk'));
+    expect(synthesizedKey).toBeUndefined();
+  });
+
+  it('synthesized attack omits chain wiring when no save activity exists', () => {
+    const baseActivities = {
+      utilOnly0001: { type: 'utility' },
+    };
+    idCounter = 0;
+    const u = writeActivityUpdate('item-1', baseActivities, attackOnlyIntent(), { genActivityId: detIdGen });
+
+    const newActivityKey = Object.keys(u).find(k => k.startsWith('system.activities.synthAtk'));
+    expect(newActivityKey).toBeDefined();
+    const newActivity = u[newActivityKey!];
+    expect(newActivity.midiProperties).toBeUndefined();
   });
 });

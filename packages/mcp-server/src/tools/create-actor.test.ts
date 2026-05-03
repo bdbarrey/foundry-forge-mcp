@@ -1001,3 +1001,106 @@ describe('buildCoreNumericsChunk — Mode E mask gates default-overwrites', () =
     expect(out['system.details.alignment']).toBe('Neutral Evil');
   });
 });
+
+// Bug surfaced 2026-05-02: Mode B/C builds inheriting an SRD Spellcasting feat
+// (Priest, Mage, Cleric base) end with system.spells.spellN.max=0 even though
+// the feat description says "1st level (4 slots): cure wounds, ...". Foundry's
+// own NPC sheet parses the prose, but slot-aware HUDs (Argon Combat HUD,
+// Tidy 5e) read system.spells.spellN.max directly — empty rows render even
+// when prepared spells exist. Fix seeds those fields from the feat prose.
+describe('seedSpellSlotsFromSpellcastingFeat', () => {
+  function makeTool(queryImpl: (q: string, args: any) => Promise<any> = async () => ({ success: true })) {
+    const fakeLogger: any = {
+      info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+    };
+    fakeLogger.child = () => fakeLogger;
+    const fakeFoundry = { query: vi.fn(queryImpl) } as any;
+    const tool = new CreateActorTools({
+      foundryClient: fakeFoundry,
+      logger: fakeLogger,
+    });
+    return { tool, fakeFoundry };
+  }
+
+  // SRD Priest's actual Spellcasting feat description (lifted from the
+  // dnd5e.monsters Father Lucian Petrovich case).
+  const PRIEST_DESC = `<div class="ddb">
+<p><em><strong>Spellcasting.</strong></em> The priest is a 5th-level spellcaster. Its spellcasting ability is Wisdom (spell save DC 13, +5 to hit with spell attacks). The priest has the following cleric spells prepared:</p><p>Cantrips (at will): light, sacred flame, thaumaturgy</p><p>1st level (4 slots): cure wounds, guiding bolt, sanctuary</p><p>2nd level (3 slots): lesser restoration, spiritual weapon</p><p>3rd level (2 slots): dispel magic, spirit guardians</p>
+</div>`;
+
+  it('seeds spell1/2/3 .max/.value/.override from Priest-style feat prose', async () => {
+    const { tool, fakeFoundry } = makeTool();
+    const items = [{
+      name: 'Spellcasting',
+      system: { description: { value: PRIEST_DESC } },
+    }];
+    const written = await (tool as any).seedSpellSlotsFromSpellcastingFeat('actor1', items);
+    expect(written).toContain('system.spells.spell1.max');
+    expect(written).toContain('system.spells.spell2.max');
+    expect(written).toContain('system.spells.spell3.max');
+
+    // Inspect the actual updateActorData payload that landed.
+    const call = fakeFoundry.query.mock.calls.find((c: any) => c[0] === 'foundry-forge-mcp.updateActorData');
+    expect(call).toBeDefined();
+    const updates = call[1].updates;
+    expect(updates['system.spells.spell1.max']).toBe(4);
+    expect(updates['system.spells.spell1.value']).toBe(4);
+    expect(updates['system.spells.spell1.override']).toBe(4);
+    expect(updates['system.spells.spell2.max']).toBe(3);
+    expect(updates['system.spells.spell3.max']).toBe(2);
+    // Cantrips line shouldn't generate a spell0 entry.
+    expect(updates['system.spells.spell0.max']).toBeUndefined();
+  });
+
+  it('returns empty array when no Spellcasting feat present', async () => {
+    const { tool, fakeFoundry } = makeTool();
+    const written = await (tool as any).seedSpellSlotsFromSpellcastingFeat('actor1', [
+      { name: 'Multiattack', system: { description: { value: 'Two attacks.' } } },
+      { name: 'Bite', system: {} },
+    ]);
+    expect(written).toEqual([]);
+    expect(fakeFoundry.query).not.toHaveBeenCalled();
+  });
+
+  it('returns empty array when Spellcasting feat has no parseable slots', async () => {
+    const { tool, fakeFoundry } = makeTool();
+    const items = [{
+      name: 'Spellcasting',
+      system: { description: { value: '<p>Innate spellcaster — no slots.</p>' } },
+    }];
+    const written = await (tool as any).seedSpellSlotsFromSpellcastingFeat('actor1', items);
+    expect(written).toEqual([]);
+    expect(fakeFoundry.query).not.toHaveBeenCalled();
+  });
+
+  it('handles all 9 spell levels (high-CR mage statblocks)', async () => {
+    const { tool, fakeFoundry } = makeTool();
+    const desc = `1st level (4 slots): a, b
+2nd level (3 slots): c
+3rd level (3 slots): d
+4th level (3 slots): e
+5th level (2 slots): f
+6th level (1 slot): g
+7th level (1 slot): h
+8th level (1 slot): i
+9th level (1 slot): j`;
+    await (tool as any).seedSpellSlotsFromSpellcastingFeat('actor1', [
+      { name: 'Spellcasting', system: { description: { value: desc } } },
+    ]);
+    const call = fakeFoundry.query.mock.calls.find((c: any) => c[0] === 'foundry-forge-mcp.updateActorData');
+    const updates = call[1].updates;
+    expect(updates['system.spells.spell9.max']).toBe(1);
+    expect(updates['system.spells.spell5.max']).toBe(2);
+    expect(updates['system.spells.spell6.max']).toBe(1);
+  });
+
+  it('does not throw when foundryClient query fails — logs and returns empty', async () => {
+    const { tool } = makeTool(async () => { throw new Error('connection lost'); });
+    const items = [{
+      name: 'Spellcasting',
+      system: { description: { value: '1st level (4 slots): cure wounds' } },
+    }];
+    const written = await (tool as any).seedSpellSlotsFromSpellcastingFeat('actor1', items);
+    expect(written).toEqual([]);
+  });
+});

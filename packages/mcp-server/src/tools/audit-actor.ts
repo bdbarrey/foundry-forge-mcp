@@ -581,7 +581,14 @@ function compareActions(
     }
     const itemId = item.id ?? item._id;
     const activities = item.system?.activities ?? {};
-    const activityList = Object.values<any>(activities);
+    // Preserve activity ID by injecting key as _id. Foundry's serialized
+    // activities are a Record<id, body> where the body has no _id field —
+    // Object.values() would discard the IDs and break rules like
+    // attack-save.chain that compare triggeredActivityId against saveAct._id.
+    // Test fixtures may pre-set _id on the body; respect that if present.
+    const activityList = Object.entries(activities as Record<string, any>).map(
+      ([id, body]) => ({ ...(body ?? {}), _id: body?._id ?? id }),
+    );
 
     const divergences = compareSingleAction(action, item, activityList);
     results.push({
