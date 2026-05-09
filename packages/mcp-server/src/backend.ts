@@ -1671,6 +1671,12 @@ async function startBackend(): Promise<void> {
 
                   break;
 
+                case 'create-handout-journal':
+
+                  result = await questCreationTools.handleCreateHandoutJournal(args);
+
+                  break;
+
                 case 'link-quest-to-npc':
 
                   result = await questCreationTools.handleLinkQuestToNPC(args);

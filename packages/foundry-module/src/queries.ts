@@ -55,6 +55,7 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.addActorsToScene`] = this.handleAddActorsToScene.bind(this);
     CONFIG.queries[`${modulePrefix}.validateWritePermissions`] = this.handleValidateWritePermissions.bind(this);
     CONFIG.queries[`${modulePrefix}.createJournalEntry`] = this.handleCreateJournalEntry.bind(this);
+    CONFIG.queries[`${modulePrefix}.createImageJournal`] = this.handleCreateImageJournal.bind(this);
     CONFIG.queries[`${modulePrefix}.listJournals`] = this.handleListJournals.bind(this);
     CONFIG.queries[`${modulePrefix}.getJournalContent`] = this.handleGetJournalContent.bind(this);
     CONFIG.queries[`${modulePrefix}.updateJournalContent`] = this.handleUpdateJournalContent.bind(this);
@@ -551,6 +552,31 @@ export class QueryHandlers {
       });
     } catch (error) {
       throw new Error(`Failed to create journal entry: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Handle player-handout image journal creation
+   */
+  async handleCreateImageJournal(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      if (!data.name) throw new Error('name is required');
+      if (!data.imageUrl) throw new Error('imageUrl is required');
+
+      return await this.dataAccess.createImageJournal({
+        name: data.name,
+        imageUrl: data.imageUrl,
+        folderName: data.folderName,
+        dmNote: data.dmNote,
+        playersCanSee: data.playersCanSee,
+      });
+    } catch (error) {
+      throw new Error(`Failed to create image journal: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 

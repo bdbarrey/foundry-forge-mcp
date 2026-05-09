@@ -3400,6 +3400,82 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Create a player-handout journal entry: one image page (Foundry-fetchable URL)
+   * + optional GM-only text page. Pairs with cos-pipeline scene generation, where
+   * the image lives on Forge and the URL is the page src.
+   *
+   * Player visibility intentionally defaults to GM-only — the DM controls reveal
+   * via Foundry's "Show to Players" action; pre-sharing happens by passing
+   * playersCanSee=true.
+   */
+  async createImageJournal(request: {
+    name: string;
+    imageUrl: string;
+    folderName?: string;
+    dmNote?: string;
+    playersCanSee?: boolean;
+  }): Promise<{ id: string; name: string; folderId: string | null; pageCount: number }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', {
+      quantity: 1,
+    });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Journal creation denied: ${permissionCheck.reason}`);
+    }
+
+    if (!request.name) throw new Error('name is required');
+    if (!request.imageUrl) throw new Error('imageUrl is required');
+
+    try {
+      const folderId = request.folderName
+        ? await this.getOrCreateFolder(request.folderName, 'JournalEntry')
+        : null;
+
+      const pages: any[] = [
+        {
+          type: 'image',
+          name: request.name,
+          src: request.imageUrl,
+        },
+      ];
+
+      if (request.dmNote && request.dmNote.trim().length > 0) {
+        pages.push({
+          type: 'text',
+          name: 'DM Notes',
+          text: { content: request.dmNote },
+        });
+      }
+
+      const journalData: any = {
+        name: request.name,
+        pages,
+        ownership: { default: request.playersCanSee ? 2 : 0 },
+        folder: folderId,
+      };
+
+      const journal = await JournalEntry.create(journalData);
+      if (!journal) {
+        throw new Error('JournalEntry.create returned null');
+      }
+
+      const result = {
+        id: journal.id,
+        name: journal.name || request.name,
+        folderId,
+        pageCount: pages.length,
+      };
+
+      this.auditLog('createImageJournal', request, 'success');
+      return result;
+    } catch (error) {
+      this.auditLog('createImageJournal', request, 'failure', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  /**
    * Create actors from compendium entries with custom names
    */
   async createActorFromCompendium(request: ActorCreationRequest): Promise<ActorCreationResult> {
