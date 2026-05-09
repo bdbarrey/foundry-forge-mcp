@@ -3541,8 +3541,13 @@ export class FoundryDataAccess {
         pageId = imagePage?.id || pages[0]?.id || null;
       }
 
-      const sceneWidth = scene.width || scene.dimensions?.width || 4000;
-      const sceneHeight = scene.height || scene.dimensions?.height || 3000;
+      // Default to true canvas center. scene.dimensions.width/height includes
+      // the 25% padding ring around the playable map; scene.width/height is
+      // just the raw image. Using raw width/height puts the note in the
+      // upper-left quarter of the canvas, not its visual center. Prefer
+      // dimensions and fall back to raw width only as a last resort.
+      const sceneWidth = scene.dimensions?.width || scene.width || 4000;
+      const sceneHeight = scene.dimensions?.height || scene.height || 3000;
       const x = typeof request.x === 'number' ? request.x : Math.round(sceneWidth / 2);
       const y = typeof request.y === 'number' ? request.y : Math.round(sceneHeight / 2);
 
