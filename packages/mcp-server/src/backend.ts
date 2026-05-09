@@ -23,6 +23,7 @@ import { SceneTools } from './tools/scene.js';
 import { ActorCreationTools } from './tools/actor-creation.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
+import { HandoutTools } from './tools/handout-creation.js';
 
 import { DiceRollTools } from './tools/dice-roll.js';
 
@@ -1090,6 +1091,8 @@ async function startBackend(): Promise<void> {
 
   const questCreationTools = new QuestCreationTools({ foundryClient, logger });
 
+  const handoutTools = new HandoutTools({ foundryClient, logger });
+
   const diceRollTools = new DiceRollTools({ foundryClient, logger });
 
   const campaignManagementTools = new CampaignManagementTools(foundryClient, logger);
@@ -1351,6 +1354,8 @@ async function startBackend(): Promise<void> {
     ...dsa5CharacterCreator.getToolDefinitions(),
 
     ...questCreationTools.getToolDefinitions(),
+
+    ...handoutTools.getToolDefinitions(),
 
     ...diceRollTools.getToolDefinitions(),
 
@@ -1692,6 +1697,20 @@ async function startBackend(): Promise<void> {
                 case 'search-journals':
 
                   result = await questCreationTools.handleSearchJournals(args);
+
+                  break;
+
+                // Handout tools (image-page journal + scene-note placement)
+
+                case 'create-handout-journal':
+
+                  result = await handoutTools.handleCreateHandoutJournal(args);
+
+                  break;
+
+                case 'place-scene-journal-note':
+
+                  result = await handoutTools.handlePlaceSceneJournalNote(args);
 
                   break;
 
