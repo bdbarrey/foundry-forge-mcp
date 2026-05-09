@@ -134,36 +134,6 @@ export class QuestCreationTools {
         }
       },
       {
-        name: 'create-handout-journal',
-        description: 'Create a player-handout journal entry: one image page pointing at a Foundry-fetchable URL (e.g., a Forge CDN URL from cos-pipeline scene generation), plus an optional DM-only text page. Defaults to GM-only ownership; pass playersCanSee=true for pre-share, otherwise the DM uses Foundry\'s "Show to Players" action. The optional folderName creates or reuses a top-level JournalEntry folder.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: {
-              type: 'string',
-              description: 'Journal entry title (also used as the image page name).'
-            },
-            imageUrl: {
-              type: 'string',
-              description: 'URL Foundry can fetch the image from (Forge CDN URL, world-relative path, etc.).'
-            },
-            folderName: {
-              type: 'string',
-              description: 'Optional flat folder name (e.g. "Arc D - St Andrals Feast"). Created if missing.'
-            },
-            dmNote: {
-              type: 'string',
-              description: 'Optional DM-only text content (gets a second page named "DM Notes"). Plain text or HTML; not parsed as Markdown.'
-            },
-            playersCanSee: {
-              type: 'boolean',
-              description: 'If true, default ownership = OBSERVER (2) so all players see it. Default false (GM-only; show via "Show to Players").'
-            }
-          },
-          required: ['name', 'imageUrl']
-        }
-      },
-      {
         name: 'list-journals',
         description: 'List all journal entries in the world, with optional filtering for quest-related journals',
         inputSchema: {
@@ -244,46 +214,6 @@ export class QuestCreationTools {
 
     } catch (error) {
       this.errorHandler.handleToolError(error, 'create-quest-journal', 'quest creation');
-    }
-  }
-
-  /**
-   * Handle player-handout image journal creation
-   */
-  async handleCreateHandoutJournal(args: any): Promise<any> {
-    try {
-      const requestSchema = z.object({
-        name: z.string().min(1, 'name is required'),
-        imageUrl: z.string().min(1, 'imageUrl is required'),
-        folderName: z.string().optional(),
-        dmNote: z.string().optional(),
-        playersCanSee: z.boolean().optional(),
-      });
-
-      const request = requestSchema.parse(args);
-
-      const result = await this.foundryClient.query('foundry-forge-mcp.createImageJournal', {
-        name: request.name,
-        imageUrl: request.imageUrl,
-        folderName: request.folderName,
-        dmNote: request.dmNote,
-        playersCanSee: request.playersCanSee,
-      });
-
-      if (!result || result.error) {
-        throw new Error(result?.error || 'Failed to create handout journal');
-      }
-
-      return {
-        success: true,
-        journalId: result.id,
-        journalName: result.name,
-        folderId: result.folderId,
-        pageCount: result.pageCount,
-        message: `Handout "${request.name}" created${request.folderName ? ` in folder "${request.folderName}"` : ''}.`,
-      };
-    } catch (error) {
-      this.errorHandler.handleToolError(error, 'create-handout-journal', 'handout journal creation');
     }
   }
 

@@ -3476,6 +3476,111 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Drop a Note document on a scene that links to an existing JournalEntry,
+   * so the DM can right-click → "Show Players" at the table to push the
+   * embedded image to player screens. Pairs with createImageJournal.
+   *
+   * pageId selection: caller may pass an explicit pageId; else we pick the
+   * first image page on the entry; else the first page; else null (note
+   * still works, just opens the entry root).
+   *
+   * Coordinates default to scene center if x/y omitted.
+   */
+  async placeSceneJournalNote(request: {
+    journalId: string;
+    sceneId?: string;
+    sceneName?: string;
+    pageId?: string;
+    x?: number;
+    y?: number;
+    label?: string;
+    iconSize?: number;
+    icon?: string;
+  }): Promise<{
+    noteId: string;
+    sceneId: string;
+    sceneName: string;
+    journalId: string;
+    journalName: string;
+    pageId: string | null;
+    x: number;
+    y: number;
+  }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Scene note creation denied: ${permissionCheck.reason}`);
+    }
+
+    if (!request.journalId) throw new Error('journalId is required');
+    if (!request.sceneId && !request.sceneName) {
+      throw new Error('Either sceneId or sceneName is required');
+    }
+
+    try {
+      const journal: any = game.journal.get(request.journalId);
+      if (!journal) {
+        throw new Error(`JournalEntry ${request.journalId} not found`);
+      }
+
+      let scene: any = null;
+      if (request.sceneId) {
+        scene = game.scenes?.get(request.sceneId);
+        if (!scene) throw new Error(`Scene with id ${request.sceneId} not found`);
+      } else if (request.sceneName) {
+        const target = request.sceneName.toLowerCase();
+        scene = game.scenes?.find((s: any) => (s.name || '').toLowerCase() === target);
+        if (!scene) throw new Error(`Scene named "${request.sceneName}" not found`);
+      }
+
+      let pageId: string | null = request.pageId || null;
+      if (!pageId) {
+        const pages: any[] = Array.from(journal.pages?.values?.() || journal.pages || []);
+        const imagePage = pages.find((p: any) => p.type === 'image');
+        pageId = imagePage?.id || pages[0]?.id || null;
+      }
+
+      const sceneWidth = scene.width || scene.dimensions?.width || 4000;
+      const sceneHeight = scene.height || scene.dimensions?.height || 3000;
+      const x = typeof request.x === 'number' ? request.x : Math.round(sceneWidth / 2);
+      const y = typeof request.y === 'number' ? request.y : Math.round(sceneHeight / 2);
+
+      const noteData: any = {
+        entryId: request.journalId,
+        x,
+        y,
+        text: request.label || journal.name || 'Handout',
+        iconSize: request.iconSize ?? 40,
+        icon: request.icon || 'icons/svg/book.svg',
+        global: false,
+      };
+      if (pageId) noteData.pageId = pageId;
+
+      const created = await scene.createEmbeddedDocuments('Note', [noteData]);
+      const note = Array.isArray(created) ? created[0] : created;
+      if (!note) {
+        throw new Error('Note creation returned no document');
+      }
+
+      this.auditLog('placeSceneJournalNote', request, 'success');
+      return {
+        noteId: note.id,
+        sceneId: scene.id,
+        sceneName: scene.name,
+        journalId: request.journalId,
+        journalName: journal.name,
+        pageId,
+        x,
+        y,
+      };
+    } catch (error) {
+      this.auditLog('placeSceneJournalNote', request, 'failure', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  /**
    * Create actors from compendium entries with custom names
    */
   async createActorFromCompendium(request: ActorCreationRequest): Promise<ActorCreationResult> {

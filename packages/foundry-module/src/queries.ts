@@ -56,6 +56,7 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.validateWritePermissions`] = this.handleValidateWritePermissions.bind(this);
     CONFIG.queries[`${modulePrefix}.createJournalEntry`] = this.handleCreateJournalEntry.bind(this);
     CONFIG.queries[`${modulePrefix}.createImageJournal`] = this.handleCreateImageJournal.bind(this);
+    CONFIG.queries[`${modulePrefix}.placeSceneJournalNote`] = this.handlePlaceSceneJournalNote.bind(this);
     CONFIG.queries[`${modulePrefix}.listJournals`] = this.handleListJournals.bind(this);
     CONFIG.queries[`${modulePrefix}.getJournalContent`] = this.handleGetJournalContent.bind(this);
     CONFIG.queries[`${modulePrefix}.updateJournalContent`] = this.handleUpdateJournalContent.bind(this);
@@ -577,6 +578,37 @@ export class QueryHandlers {
       });
     } catch (error) {
       throw new Error(`Failed to create image journal: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Handle place-scene-journal-note request: drop a Note linking journalId on a scene
+   */
+  async handlePlaceSceneJournalNote(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      if (!data.journalId) throw new Error('journalId is required');
+      if (!data.sceneId && !data.sceneName) {
+        throw new Error('Either sceneId or sceneName is required');
+      }
+
+      return await this.dataAccess.placeSceneJournalNote({
+        journalId: data.journalId,
+        sceneId: data.sceneId,
+        sceneName: data.sceneName,
+        pageId: data.pageId,
+        x: data.x,
+        y: data.y,
+        label: data.label,
+        iconSize: data.iconSize,
+        icon: data.icon,
+      });
+    } catch (error) {
+      throw new Error(`Failed to place scene journal note: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
