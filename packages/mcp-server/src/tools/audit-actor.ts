@@ -76,6 +76,15 @@ export interface AuditResult {
 export interface ActorSnapshot {
   id: string;
   name: string;
+  /**
+   * v0.1.20: actor.img URL (the portrait shown on the character sheet) and
+   * prototypeToken.texture.src (the token image, often an animated webm for
+   * Beneos-canon NPCs). Surfaced so audit-actor can detect portrait_canon
+   * divergences — e.g. a beneos-tagged NPC whose img still points at a DDB
+   * default after a build that used the wrong compendium base.
+   */
+  img?: string;
+  tokenImg?: string;
   system?: any;
   items?: ActorItemSnapshot[];
 }
@@ -1396,7 +1405,14 @@ export class AuditActorTools {
     const name = inner.name ?? identifier;
     const system = inner.system ?? {};
     const items: ActorItemSnapshot[] = Array.isArray(inner.items) ? inner.items : [];
-    return { id, name, system, items };
+    // v0.1.20: pass through portrait + token image URLs so the snapshot
+    // surfaces them. Module-side data-access also populates these in v0.1.20.
+    const img = inner.img;
+    const tokenImg = inner.tokenImg;
+    const snapshot: ActorSnapshot = { id, name, system, items };
+    if (img) snapshot.img = img;
+    if (tokenImg) snapshot.tokenImg = tokenImg;
+    return snapshot;
   }
 
   private actorSnapshotSummary(actor: ActorSnapshot): Record<string, any> {
@@ -1417,6 +1433,14 @@ export class AuditActorTools {
       cr: sys.details?.cr,
       itemCount: items.length,
       itemTypes,
+      // v0.1.20: portrait + token texture URLs. These are what the
+      // portrait_canon-aware tools (apply_npc_portrait_to_foundry,
+      // sync_npc_portrait) read or set. Surfacing them in the snapshot lets
+      // audits catch the case where a build inherited the wrong compendium
+      // base's default art (e.g. DDB Noble png on a beneos-tagged Wachter
+      // sibling) — silently invisible before v0.1.20.
+      img: actor.img ?? null,
+      tokenImg: actor.tokenImg ?? null,
     };
   }
 

@@ -1176,11 +1176,17 @@ export class FoundryDataAccess {
     }
 
     // Build character data structure
+    // v0.1.20: include prototype token texture URL so audit-actor can detect
+    // portrait_canon divergences (a beneos-canon NPC whose token still points
+    // at a DDB Noble default is the kind of regression the actor_only audit
+    // missed all session). actor.img already passes through.
+    const protoTokenSrc = (actor as any).prototypeToken?.texture?.src;
     const characterData: CharacterInfo = {
       id: actor.id || '',
       name: actor.name || '',
       type: actor.type,
       ...(actor.img ? { img: actor.img } : {}),
+      ...(protoTokenSrc ? { tokenImg: protoTokenSrc } : {}),
       folder: (actor as any).folder?.name || null,
       system: this.sanitizeData((actor as any).system),
       items: actor.items.map(item => {
