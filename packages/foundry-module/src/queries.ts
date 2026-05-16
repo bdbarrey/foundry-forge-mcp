@@ -23,6 +23,41 @@ export class QueryHandlers {
   }
 
   /**
+   * Apply page/pageSize to a list. pageSize=0 (or omitted) returns the full
+   * list with no envelope (preserves backwards compatibility). When pagination
+   * is requested, returns a `{ items, total, page, pageSize, totalPages, hasMore }`
+   * envelope so callers can stream large lists across calls without wedging
+   * the WebSocket bridge on a single oversized payload.
+   */
+  /**
+   * Build a pagination opts object that respects exactOptionalPropertyTypes —
+   * only includes keys when they have real values.
+   */
+  private pageOpts(data: { page?: number; pageSize?: number } = {}): { page?: number; pageSize?: number } {
+    const out: { page?: number; pageSize?: number } = {};
+    if (typeof data.page === 'number') out.page = data.page;
+    if (typeof data.pageSize === 'number') out.pageSize = data.pageSize;
+    return out;
+  }
+
+  private paginate<T>(items: T[], opts: { page?: number; pageSize?: number } = {}): T[] | { items: T[]; total: number; page: number; pageSize: number; totalPages: number; hasMore: boolean } {
+    const pageSize = Math.max(0, Math.floor(opts.pageSize ?? 0));
+    if (pageSize === 0) return items;
+    const total = items.length;
+    const page = Math.max(1, Math.floor(opts.page ?? 1));
+    const start = (page - 1) * pageSize;
+    const slice = items.slice(start, start + pageSize);
+    return {
+      items: slice,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+      hasMore: start + pageSize < total,
+    };
+  }
+
+  /**
    * Register all query handlers in CONFIG.queries
    */
   registerHandlers(): void {
@@ -182,7 +217,7 @@ export class QueryHandlers {
    *  - folder: case-insensitive exact match against folder name OR full folder path
    *  - nameContains: case-insensitive substring match against actor name
    */
-  private async handleListActors(data: { type?: string; folder?: string; nameContains?: string }): Promise<any> {
+  private async handleListActors(data: { type?: string; folder?: string; nameContains?: string; page?: number; pageSize?: number }): Promise<any> {
     try {
       const gmCheck = this.validateGMAccess();
       if (!gmCheck.allowed) {
@@ -213,7 +248,7 @@ export class QueryHandlers {
         actors = actors.filter(actor => actor.name.toLowerCase().includes(needle));
       }
 
-      return actors;
+      return this.paginate(actors, this.pageOpts(data));
     } catch (error) {
       throw new Error(`Failed to list actors: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -223,7 +258,7 @@ export class QueryHandlers {
    * Handle list actor folders request — returns the actor folder tree as a flat array.
    * Optional `subtree` filters to a path prefix (case-insensitive segment match).
    */
-  private async handleListActorFolders(data: { subtree?: string } = {}): Promise<any> {
+  private async handleListActorFolders(data: { subtree?: string; page?: number; pageSize?: number } = {}): Promise<any> {
     try {
       const gmCheck = this.validateGMAccess();
       if (!gmCheck.allowed) {
@@ -235,7 +270,13 @@ export class QueryHandlers {
       const opts: { subtree?: string } = {};
       if (data?.subtree) opts.subtree = data.subtree;
       const folders = await this.dataAccess.listActorFolders(opts);
-      return { folders, total: folders.length };
+      const paged = this.paginate(folders, this.pageOpts(data));
+      // Backwards-compat shape: unpaginated path returns { folders, total }.
+      // Paginated path returns { folders, total, page, pageSize, totalPages, hasMore }.
+      if (Array.isArray(paged)) {
+        return { folders: paged, total: paged.length };
+      }
+      return { folders: paged.items, total: paged.total, page: paged.page, pageSize: paged.pageSize, totalPages: paged.totalPages, hasMore: paged.hasMore };
     } catch (error) {
       throw new Error(`Failed to list actor folders: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -615,7 +656,7 @@ export class QueryHandlers {
   /**
    * Handle list journals request
    */
-  async handleListJournals(): Promise<any> {
+  async handleListJournals(data: { nameContains?: string; page?: number; pageSize?: number } = {}): Promise<any> {
     try {
       // SECURITY: Silent GM validation
       const gmCheck = this.validateGMAccess();
@@ -624,7 +665,14 @@ export class QueryHandlers {
       }
 
       this.dataAccess.validateFoundryState();
-      return await this.dataAccess.listJournals();
+      let journals = await this.dataAccess.listJournals();
+
+      if (data?.nameContains) {
+        const needle = data.nameContains.toLowerCase();
+        journals = journals.filter(j => (j.name || '').toLowerCase().includes(needle));
+      }
+
+      return this.paginate(journals, this.pageOpts(data));
     } catch (error) {
       throw new Error(`Failed to list journals: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -919,7 +967,8 @@ export class QueryHandlers {
       }
 
       this.dataAccess.validateFoundryState();
-      return await this.dataAccess.listScenes(data);
+      const scenes = await this.dataAccess.listScenes(data || {});
+      return this.paginate(scenes, this.pageOpts(data));
     } catch (error) {
       throw new Error(`Failed to list scenes: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }

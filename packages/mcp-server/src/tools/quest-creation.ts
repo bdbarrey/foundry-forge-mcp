@@ -135,7 +135,7 @@ export class QuestCreationTools {
       },
       {
         name: 'list-journals',
-        description: 'List all journal entries in the world, with optional filtering for quest-related journals',
+        description: 'List all journal entries in the world, with optional filtering for quest-related journals. For arc-scoped lookups, pass `nameContains` to scope server-side and avoid wedging the bridge on a full-world dump.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -145,7 +145,19 @@ export class QuestCreationTools {
             },
             includeContent: {
               type: 'boolean',
-              description: 'Include journal content preview (default: false)'
+              description: 'Include journal content preview (default: false). Avoid on large worlds — issues one getJournalContent call per match.'
+            },
+            nameContains: {
+              type: 'string',
+              description: 'Optional case-insensitive substring filter on journal name. Applied server-side before pagination.'
+            },
+            page: {
+              type: 'number',
+              description: 'Page number (1-indexed). Required when pageSize > 0.'
+            },
+            pageSize: {
+              type: 'number',
+              description: 'Page size. Omit or 0 = return all matching journals (legacy behavior). Set >0 to paginate.'
             }
           }
         }
@@ -365,39 +377,76 @@ export class QuestCreationTools {
     try {
       const requestSchema = z.object({
         filterQuests: z.boolean().optional().default(false),
-        includeContent: z.boolean().optional().default(false)
+        includeContent: z.boolean().optional().default(false),
+        nameContains: z.string().optional(),
+        page: z.number().optional(),
+        pageSize: z.number().optional(),
       });
 
       const request = requestSchema.parse(args);
 
-      // Get all journals
-      const journals = await this.foundryClient.query('foundry-forge-mcp.listJournals', {});
+      // Forward server-side filters/pagination so the bridge payload stays small.
+      const queryArgs: { nameContains?: string; page?: number; pageSize?: number } = {};
+      if (request.nameContains) queryArgs.nameContains = request.nameContains;
+      // If filterQuests is set, we need to filter post-fetch (it's a name-pattern
+      // check), so we can't paginate at the module layer — the slice would be
+      // taken from unfiltered results. Skip module pagination in that case.
+      if (!request.filterQuests) {
+        if (typeof request.page === 'number' && request.page > 0) queryArgs.page = request.page;
+        if (typeof request.pageSize === 'number' && request.pageSize > 0) queryArgs.pageSize = request.pageSize;
+      }
 
-      if (!journals || journals.error) {
+      const result = await this.foundryClient.query('foundry-forge-mcp.listJournals', queryArgs);
+
+      if (!result || result.error) {
         throw new Error('Failed to retrieve journals');
       }
 
+      // Module returns raw array (unpaginated) or envelope (paginated).
+      const isEnvelope = result && typeof result === 'object' && !Array.isArray(result) && Array.isArray(result.items);
+      const journals: any[] = isEnvelope ? result.items : (Array.isArray(result) ? result : []);
+
       let filteredJournals = journals;
 
-      // Filter for quest-related journals if requested
       if (request.filterQuests) {
         filteredJournals = journals.filter((journal: any) =>
           this.isQuestRelated(journal.name)
         );
+        // Apply pagination client-side for the filterQuests path.
+        if (typeof request.pageSize === 'number' && request.pageSize > 0) {
+          const total = filteredJournals.length;
+          const page = Math.max(1, Math.floor(request.page ?? 1));
+          const pageSize = Math.max(1, Math.floor(request.pageSize));
+          const start = (page - 1) * pageSize;
+          const slice = filteredJournals.slice(start, start + pageSize);
+          return {
+            success: true,
+            journals: await this.maybeAttachContent(slice, request.includeContent),
+            total,
+            page,
+            pageSize,
+            totalPages: Math.ceil(total / pageSize),
+            hasMore: start + pageSize < total,
+            filtered: true,
+          };
+        }
       }
 
-      // Include content if requested
       if (request.includeContent) {
-        for (const journal of filteredJournals) {
-          try {
-            const content = await this.foundryClient.query('foundry-forge-mcp.getJournalContent', {
-              journalId: journal.id
-            });
-            journal.contentPreview = content?.content?.substring(0, 150) + '...' || '';
-          } catch (error) {
-            journal.contentPreview = 'Error loading content';
-          }
-        }
+        filteredJournals = await this.maybeAttachContent(filteredJournals, true);
+      }
+
+      if (isEnvelope) {
+        return {
+          success: true,
+          journals: filteredJournals,
+          total: result.total,
+          page: result.page,
+          pageSize: result.pageSize,
+          totalPages: result.totalPages,
+          hasMore: result.hasMore,
+          filtered: request.filterQuests,
+        };
       }
 
       return {
@@ -410,6 +459,21 @@ export class QuestCreationTools {
     } catch (error) {
       this.errorHandler.handleToolError(error, 'list-journals', 'journal listing');
     }
+  }
+
+  private async maybeAttachContent(journals: any[], include: boolean): Promise<any[]> {
+    if (!include) return journals;
+    for (const journal of journals) {
+      try {
+        const content = await this.foundryClient.query('foundry-forge-mcp.getJournalContent', {
+          journalId: journal.id
+        });
+        journal.contentPreview = (content?.content?.substring(0, 150) ?? '') + '...';
+      } catch (error) {
+        journal.contentPreview = 'Error loading content';
+      }
+    }
+    return journals;
   }
 
   /**

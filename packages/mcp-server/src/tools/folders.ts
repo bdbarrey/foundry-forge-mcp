@@ -28,6 +28,14 @@ export class FoldersTools {
               type: 'string',
               description: 'Optional path prefix to scope the response (e.g., "02 - My Actors"). Returns the matching folder and all descendants. Case-insensitive.',
             },
+            page: {
+              type: 'number',
+              description: 'Page number (1-indexed). Required when pageSize > 0.',
+            },
+            pageSize: {
+              type: 'number',
+              description: 'Page size. Omit or 0 = return all folders (legacy behavior). Set >0 to paginate; the response gains page/pageSize/totalPages/hasMore fields.',
+            },
           },
         },
       },
@@ -37,25 +45,36 @@ export class FoldersTools {
   async handleListFolders(args: any): Promise<any> {
     const schema = z.object({
       subtree: z.string().optional(),
+      page: z.number().optional(),
+      pageSize: z.number().optional(),
     });
 
-    const { subtree } = schema.parse(args);
+    const { subtree, page, pageSize } = schema.parse(args);
 
-    this.logger.info('Listing actor folders', { subtree });
+    this.logger.info('Listing actor folders', { subtree, page, pageSize });
 
     try {
-      const queryArgs: { subtree?: string } = {};
+      const queryArgs: { subtree?: string; page?: number; pageSize?: number } = {};
       if (subtree) queryArgs.subtree = subtree;
+      if (typeof page === 'number' && page > 0) queryArgs.page = page;
+      if (typeof pageSize === 'number' && pageSize > 0) queryArgs.pageSize = pageSize;
 
       const result = await this.foundryClient.query('foundry-forge-mcp.listActorFolders', queryArgs);
 
       this.logger.debug('Successfully retrieved folder list', { count: result?.total ?? 0 });
 
-      return {
+      const out: any = {
         folders: result?.folders ?? [],
         total: result?.total ?? 0,
         scopedTo: subtree ?? 'all',
       };
+      if (typeof result?.page === 'number') {
+        out.page = result.page;
+        out.pageSize = result.pageSize;
+        out.totalPages = result.totalPages;
+        out.hasMore = result.hasMore;
+      }
+      return out;
     } catch (error) {
       this.logger.error('Failed to list actor folders', error);
       throw new Error(`Failed to list actor folders: ${error instanceof Error ? error.message : 'Unknown error'}`);

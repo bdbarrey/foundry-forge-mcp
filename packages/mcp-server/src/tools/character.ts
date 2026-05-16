@@ -72,7 +72,7 @@ export class CharacterTools {
       },
       {
         name: 'list-actors',
-        description: 'List actors in the world (PCs, NPCs, monsters, vehicles, groups). Supports filtering by type, folder (name OR full slash-path; matches the folder and any subfolders), and name substring. Returns id, name, type, folder name, full folderPath, and folderId. Use this for programmatic discovery instead of opening Foundry visually.',
+        description: 'List actors in the world (PCs, NPCs, monsters, vehicles, groups). Supports filtering by type, folder (name OR full slash-path; matches the folder and any subfolders), and name substring. Returns id, name, type, folder name, full folderPath, and folderId. Use this for programmatic discovery instead of opening Foundry visually. For large worlds (Beneos packs), scope with `folder` or `nameContains` to avoid wedging the bridge on an oversized payload.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -87,6 +87,14 @@ export class CharacterTools {
             nameContains: {
               type: 'string',
               description: 'Optional case-insensitive substring filter on actor name.',
+            },
+            page: {
+              type: 'number',
+              description: 'Page number (1-indexed). Required when pageSize > 0.',
+            },
+            pageSize: {
+              type: 'number',
+              description: 'Page size. Omit or 0 = return all matching actors (legacy behavior). Set >0 to paginate; the response uses the `{actors, total, page, pageSize, totalPages, hasMore}` envelope.',
             },
           },
         },
@@ -297,38 +305,61 @@ export class CharacterTools {
       type: z.string().optional(),
       folder: z.string().optional(),
       nameContains: z.string().optional(),
+      page: z.number().optional(),
+      pageSize: z.number().optional(),
     });
 
-    const { type, folder, nameContains } = schema.parse(args);
+    const { type, folder, nameContains, page, pageSize } = schema.parse(args);
 
-    this.logger.info('Listing actors', { type, folder, nameContains });
+    this.logger.info('Listing actors', { type, folder, nameContains, page, pageSize });
 
     try {
-      const queryArgs: { type?: string; folder?: string; nameContains?: string } = {};
+      const queryArgs: { type?: string; folder?: string; nameContains?: string; page?: number; pageSize?: number } = {};
       if (type) queryArgs.type = type;
       if (folder) queryArgs.folder = folder;
       if (nameContains) queryArgs.nameContains = nameContains;
+      if (typeof page === 'number' && page > 0) queryArgs.page = page;
+      if (typeof pageSize === 'number' && pageSize > 0) queryArgs.pageSize = pageSize;
 
-      const actors = await this.foundryClient.query('foundry-forge-mcp.listActors', queryArgs);
+      const result = await this.foundryClient.query('foundry-forge-mcp.listActors', queryArgs);
 
-      this.logger.debug('Successfully retrieved actor list', { count: actors.length });
+      // Module returns either a raw array (unpaginated, backwards-compat) or
+      // an envelope { items, total, page, pageSize, totalPages, hasMore }.
+      const isEnvelope = result && typeof result === 'object' && !Array.isArray(result) && Array.isArray(result.items);
+      const actorList: any[] = isEnvelope ? result.items : (Array.isArray(result) ? result : []);
+
+      this.logger.debug('Successfully retrieved actor list', { count: actorList.length, paginated: isEnvelope });
 
       const filtersApplied: string[] = [];
       if (type) filtersApplied.push(`type=${type}`);
       if (folder) filtersApplied.push(`folder=${folder}`);
       if (nameContains) filtersApplied.push(`nameContains=${nameContains}`);
 
+      const slimActors = actorList.map((actor: any) => ({
+        id: actor.id,
+        name: actor.name,
+        type: actor.type,
+        folder: actor.folder ?? null,
+        folderPath: actor.folderPath ?? null,
+        folderId: actor.folderId ?? null,
+        hasImage: !!actor.img,
+      }));
+
+      if (isEnvelope) {
+        return {
+          actors: slimActors,
+          total: result.total,
+          page: result.page,
+          pageSize: result.pageSize,
+          totalPages: result.totalPages,
+          hasMore: result.hasMore,
+          filtersApplied: filtersApplied.length ? filtersApplied.join(', ') : 'none',
+        };
+      }
+
       return {
-        actors: actors.map((actor: any) => ({
-          id: actor.id,
-          name: actor.name,
-          type: actor.type,
-          folder: actor.folder ?? null,
-          folderPath: actor.folderPath ?? null,
-          folderId: actor.folderId ?? null,
-          hasImage: !!actor.img,
-        })),
-        total: actors.length,
+        actors: slimActors,
+        total: slimActors.length,
         filtersApplied: filtersApplied.length ? filtersApplied.join(', ') : 'none',
       };
 

@@ -5579,7 +5579,7 @@ export class FoundryDataAccess {
   /**
    * List all scenes with filtering options
    */
-  async listScenes(options: { filter?: string; include_active_only?: boolean; folder_filter?: string } = {}): Promise<any[]> {
+  async listScenes(options: { filter?: string; include_active_only?: boolean; folder_filter?: string; fields?: string[] } = {}): Promise<any[]> {
     this.validateFoundryState();
 
     try {
@@ -5606,24 +5606,35 @@ export class FoundryDataAccess {
         );
       }
 
-      // Map to consistent format
-      return scenes.map((scene: any) => ({
-        id: scene.id,
-        name: scene.name,
-        active: scene.active,
-        folder: (scene as any).folder?.name || null,
-        dimensions: {
-          width: scene.dimensions?.width || (scene as any).width || 0,
-          height: scene.dimensions?.height || (scene as any).height || 0
-        },
-        gridSize: scene.grid?.size || 100,
-        background: scene.background?.src || scene.img || '',
-        walls: scene.walls?.size || 0,
-        tokens: scene.tokens?.size || 0,
-        lighting: scene.lights?.size || 0,
-        sounds: scene.sounds?.size || 0,
-        navigation: scene.navigation || false
-      }));
+      // Field projection: callers pass `fields: ["id","name","folder"]` to slim
+      // the payload (full shape is ~1.5 KB/scene with full background paths; on a
+      // Beneos-loaded CoS world that wedges the WebSocket bridge). Omitted or
+      // empty `fields` returns the full shape for backwards compat.
+      const wantFull = !options.fields || options.fields.length === 0;
+      const wanted = new Set(options.fields || []);
+      const include = (k: string) => wantFull || wanted.has(k);
+
+      return scenes.map((scene: any) => {
+        const out: any = {};
+        if (include('id')) out.id = scene.id;
+        if (include('name')) out.name = scene.name;
+        if (include('active')) out.active = scene.active;
+        if (include('folder')) out.folder = (scene as any).folder?.name || null;
+        if (include('dimensions')) {
+          out.dimensions = {
+            width: scene.dimensions?.width || (scene as any).width || 0,
+            height: scene.dimensions?.height || (scene as any).height || 0,
+          };
+        }
+        if (include('gridSize')) out.gridSize = scene.grid?.size || 100;
+        if (include('background')) out.background = scene.background?.src || scene.img || '';
+        if (include('walls')) out.walls = scene.walls?.size || 0;
+        if (include('tokens')) out.tokens = scene.tokens?.size || 0;
+        if (include('lighting')) out.lighting = scene.lights?.size || 0;
+        if (include('sounds')) out.sounds = scene.sounds?.size || 0;
+        if (include('navigation')) out.navigation = scene.navigation || false;
+        return out;
+      });
     } catch (error) {
       throw new Error(`Failed to list scenes: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }

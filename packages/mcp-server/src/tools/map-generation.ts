@@ -104,7 +104,7 @@ export class MapGenerationTools {
       },
       {
         name: 'list-scenes',
-        description: 'List all available Foundry VTT scenes with their details, including folder assignment',
+        description: 'List all available Foundry VTT scenes with their details, including folder assignment. For arc-specific use (battlemap matching), pass `fields: ["id","name","folder"]` and a `filter` keyword — the default unscoped response can hit 300+ KB on Beneos-loaded worlds and wedge the WebSocket bridge.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -121,6 +121,19 @@ export class MapGenerationTools {
             folder_filter: {
               type: 'string',
               description: 'Only return scenes in this folder (exact name, case-insensitive)'
+            },
+            fields: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Project to a subset of fields per scene. Allowed: id, name, active, folder, dimensions, gridSize, background, walls, tokens, lighting, sounds, navigation. Omit or empty array returns the full shape. Use ["id","name","folder"] for catalog/battlemap lookups — drops payload from ~1.5 KB/scene to ~80 B/scene.'
+            },
+            page: {
+              type: 'number',
+              description: 'Page number (1-indexed). Required when pageSize > 0. Returns the slice of scenes for that page.'
+            },
+            pageSize: {
+              type: 'number',
+              description: 'Page size. Omit or 0 = return all matching scenes (legacy behavior). Set >0 to paginate; the response becomes { items, total, page, pageSize, totalPages, hasMore }.'
             }
           }
         }
@@ -150,11 +163,16 @@ export class MapGenerationTools {
   async listScenes(input: any): Promise<any> {
     const safeInput = input ?? {};
     try {
-      const params = {
+      const params: any = {
         filter: typeof safeInput.filter === 'string' ? safeInput.filter : undefined,
         include_active_only: Boolean(safeInput.include_active_only),
         folder_filter: typeof safeInput.folder_filter === 'string' && safeInput.folder_filter.trim() ? safeInput.folder_filter : undefined,
       };
+      if (Array.isArray(safeInput.fields) && safeInput.fields.length > 0) {
+        params.fields = safeInput.fields.filter((f: any) => typeof f === 'string');
+      }
+      if (typeof safeInput.page === 'number' && safeInput.page > 0) params.page = safeInput.page;
+      if (typeof safeInput.pageSize === 'number' && safeInput.pageSize > 0) params.pageSize = safeInput.pageSize;
       return await this.foundryClient.query('foundry-forge-mcp.list-scenes', params);
     } catch (error: any) {
       this.logger.error('List scenes failed', { error, input: safeInput });
