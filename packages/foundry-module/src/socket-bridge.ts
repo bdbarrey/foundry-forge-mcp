@@ -24,6 +24,13 @@ export class SocketBridge {
   private maxReconnectAttempts = 5;
   private reconnectTimer: any = null;
   private activeConnectionType: 'websocket' | 'webrtc' | null = null;
+  /**
+   * In-flight queries by id. When mcp-server sends an `mcp-cancel` with the
+   * matching id, the query is marked cancelled — the handler may still be
+   * running (Promises can't be cancelled in JS), but `handleMCPQuery` will
+   * skip the callback so the orphan response doesn't pressure the WS buffer.
+   */
+  private inFlightQueries: Map<string, { cancelled: boolean }> = new Map();
 
   constructor(private config: BridgeConfig) {
     this.maxReconnectAttempts = config.reconnectAttempts;
@@ -192,13 +199,32 @@ export class SocketBridge {
   private async handleMessage(message: any): Promise<void> {
     try {
       if (message.type === 'mcp-query') {
-        await this.handleMCPQuery(message.data, (response) => {
-          this.sendMessage({
-            type: 'mcp-response',
-            id: message.id,
-            data: response
+        const queryEntry = { cancelled: false };
+        this.inFlightQueries.set(message.id, queryEntry);
+        try {
+          await this.handleMCPQuery(message.data, (response) => {
+            // If the server timed out and sent mcp-cancel before we got here,
+            // skip the response — its only effect would be to flood the WS
+            // buffer with a payload no one is waiting for.
+            if (queryEntry.cancelled) {
+              this.log(`Skipping response for cancelled query: ${message.id} (${message.data?.method})`);
+              return;
+            }
+            this.sendMessage({
+              type: 'mcp-response',
+              id: message.id,
+              data: response
+            });
           });
-        });
+        } finally {
+          this.inFlightQueries.delete(message.id);
+        }
+      } else if (message.type === 'mcp-cancel') {
+        const entry = this.inFlightQueries.get(message.id);
+        if (entry) {
+          entry.cancelled = true;
+          this.log(`Marked query cancelled: ${message.id}`);
+        }
       } else if (message.type === 'ping') {
         this.sendMessage({
           type: 'pong',

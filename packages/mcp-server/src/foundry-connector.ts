@@ -353,6 +353,14 @@ export class FoundryConnector {
     }
   }
 
+  /**
+   * Per-query timeout, in ms. Bumped from 10s → 60s in v0.1.18 — list-scenes
+   * on Beneos-loaded CoS worlds can take 15+ seconds to build + serialize, and
+   * the old 10s timeout would fire mid-write, leaving Foundry to flush a giant
+   * orphan response that pressured the WS buffer and dropped the socket.
+   */
+  private static readonly QUERY_TIMEOUT_MS = 60000;
+
   async query(method: string, data?: any): Promise<any> {
     // Check connection based on active connection type
     const isConnected = this.activeConnectionType === 'webrtc'
@@ -369,8 +377,19 @@ export class FoundryConnector {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingQueries.delete(queryId);
+        // Tell Foundry to abandon the work and skip sending the response.
+        // Without this, a slow query keeps computing past the timeout and the
+        // eventual response (potentially hundreds of KB) lands on a deleted
+        // pending-query slot and pressures the WS buffer, sometimes hard
+        // enough to drop the socket entirely.
+        try {
+          this.sendToFoundry({ type: 'mcp-cancel', id: queryId });
+        } catch {
+          // If the socket is already gone, the cancel can't be delivered;
+          // nothing useful to do here — the close handler will reject pending.
+        }
         reject(new Error(`Query timeout: ${method}`));
-      }, 10000); // 10 second timeout
+      }, FoundryConnector.QUERY_TIMEOUT_MS);
 
       this.pendingQueries.set(queryId, { resolve, reject, timeout });
 
