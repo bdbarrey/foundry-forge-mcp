@@ -361,14 +361,58 @@ export class FoundryConnector {
    */
   private static readonly QUERY_TIMEOUT_MS = 60000;
 
-  async query(method: string, data?: any): Promise<any> {
-    // Check connection based on active connection type
-    const isConnected = this.activeConnectionType === 'webrtc'
-      ? (this.webrtcPeer && this.webrtcPeer.getIsConnected())
-      : (this.foundrySocket && this.foundrySocket.readyState === WebSocket.OPEN);
+  /**
+   * v0.1.19: how long to wait for the Foundry module's auto-reconnect logic
+   * to bring the WebSocket back before failing a query. The module-side
+   * (socket-bridge.ts → scheduleReconnect) uses exponential backoff capped at
+   * 30s, so 35s here covers a full reconnect cycle. Observed in production:
+   * sustained moderate-payload reads (20+ audit-actor calls in sequence) can
+   * occasionally drop the socket without warning; the module reconnects on
+   * its own, but the next mcp-server query that arrives during the gap used
+   * to throw immediately. Waiting briefly lets transient disconnects heal
+   * transparently — agent workflows don't have to be babysat with refreshes.
+   */
+  private static readonly WAIT_FOR_RECONNECT_MS = 35000;
+  private static readonly RECONNECT_POLL_INTERVAL_MS = 250;
 
-    if (!isConnected) {
-      throw new Error('Not connected to Foundry VTT module');
+  /**
+   * Returns true if the active transport is reporting a healthy connection.
+   * Centralised so query() and waitForReconnect() agree on what "connected"
+   * means across both WebSocket and WebRTC paths.
+   */
+  private isTransportConnected(): boolean {
+    if (this.activeConnectionType === 'webrtc') {
+      return !!(this.webrtcPeer && this.webrtcPeer.getIsConnected());
+    }
+    return !!(this.foundrySocket && this.foundrySocket.readyState === WebSocket.OPEN);
+  }
+
+  /**
+   * Wait up to `timeoutMs` for the transport to become connected again,
+   * polling at RECONNECT_POLL_INTERVAL_MS. Returns the final connected state.
+   */
+  private async waitForReconnect(timeoutMs: number): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (this.isTransportConnected()) return true;
+      await new Promise(r => setTimeout(r, FoundryConnector.RECONNECT_POLL_INTERVAL_MS));
+    }
+    return this.isTransportConnected();
+  }
+
+  async query(method: string, data?: any): Promise<any> {
+    // v0.1.19: if disconnected on arrival, give the Foundry-side
+    // scheduleReconnect a chance to reach us before failing. Survives
+    // transient WS drops from buffer pressure on sustained reads.
+    if (!this.isTransportConnected()) {
+      this.logger.info('Query arrived while disconnected; waiting for module auto-reconnect', { method });
+      const waitStart = Date.now();
+      const reconnected = await this.waitForReconnect(FoundryConnector.WAIT_FOR_RECONNECT_MS);
+      const waitedMs = Date.now() - waitStart;
+      if (!reconnected) {
+        throw new Error(`Foundry VTT module not connected (waited ${Math.round(waitedMs / 1000)}s for auto-reconnect; module may be down or browser tab closed)`);
+      }
+      this.logger.info('Module reconnected; resuming query', { method, waitedMs });
     }
 
     const queryId = `query-${++this.queryIdCounter}`;
