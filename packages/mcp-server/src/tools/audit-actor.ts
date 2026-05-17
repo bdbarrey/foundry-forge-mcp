@@ -1323,7 +1323,12 @@ export class AuditActorTools {
             },
             actor_only: {
               type: 'boolean',
-              description: 'Skip the Reloaded comparison and return just an actor-side snapshot (item count, missing required fields, per-item img list).',
+              description: 'Skip the Reloaded comparison and return just an actor-side snapshot (item count, missing required fields, per-item img list). v0.1.22: requires `actor_only_reason` (see below) — actor_only is a snapshot, not a complete audit, and silent use of this shortcut has hidden real divergences. Default to passing reloaded_source whenever Reloaded has a statblock div for the NPC.',
+            },
+            actor_only_reason: {
+              type: 'string',
+              enum: ['no-reloaded-variant', 'vanilla-base', 'intentional-shortcut'],
+              description: 'v0.1.22: required when actor_only=true is used WITHOUT a reloaded_source. Justifies the cheap-path audit. Values: `no-reloaded-variant` (Reloaded has only a [!profile]+ for this NPC, no statblock div) | `vanilla-base` (vanilla DDB/SRD monster like Guard, Mastiff, Commoner) | `intentional-shortcut` (you have a reason but it doesn\'t fit the above; document inline). Returned in the response under actor_only_reason for traceability.',
             },
             validate_icons: {
               type: 'boolean',
@@ -1336,6 +1341,11 @@ export class AuditActorTools {
   }
 
   async handleAuditActor(args: any): Promise<any> {
+    const ACTOR_ONLY_REASONS = [
+      'no-reloaded-variant',
+      'vanilla-base',
+      'intentional-shortcut',
+    ] as const;
     const schema = z.object({
       actorId: z.string().optional(),
       actorName: z.string().optional(),
@@ -1343,12 +1353,26 @@ export class AuditActorTools {
       file_path: z.string().optional(),
       creature_name: z.string().optional(),
       actor_only: z.boolean().optional(),
+      actor_only_reason: z.enum(ACTOR_ONLY_REASONS).optional(),
       validate_icons: z.boolean().optional(),
     }).refine(d => d.actorId || d.actorName, {
       message: 'Provide actorId or actorName',
     }).refine(d =>
       d.actor_only || d.reloaded_source || (d.file_path && d.creature_name),
       { message: 'Provide reloaded_source, file_path+creature_name, or actor_only=true' },
+    ).refine(d =>
+      // v0.1.22: when actor_only=true is used WITHOUT a reloaded_source, an
+      // explicit reason enum is required. Forces the caller to justify the
+      // shortcut. Default audits should pass reloaded_source (full diff);
+      // actor_only is the documented exception for vanilla bases / NPCs
+      // Reloaded doesn't modify. The reason value goes into telemetry and
+      // the response so audits remain auditable.
+      !d.actor_only || d.reloaded_source || (d.file_path && d.creature_name) || !!d.actor_only_reason,
+      { message:
+        'actor_only=true requires `actor_only_reason` (one of: no-reloaded-variant, vanilla-base, intentional-shortcut). ' +
+        'Default to passing reloaded_source whenever a Reloaded statblock div exists for this NPC — actor_only is a snapshot, ' +
+        'not a complete audit. Picking the cheap path silently has missed real divergences (e.g. Urwin Martikov 2026-05-17, ' +
+        '8 critical divergences hidden behind a snapshot-only first pass). See feedback_audit_actor_default_to_full.md.' },
     );
     const input = schema.parse(args);
 
@@ -1359,6 +1383,7 @@ export class AuditActorTools {
       filePath: input.file_path,
       creatureName: input.creature_name,
       actorOnly: !!input.actor_only,
+      actorOnlyReason: input.actor_only_reason,
     });
 
     try {
@@ -1377,6 +1402,7 @@ export class AuditActorTools {
           success: true,
           actor: { id: actor.id, name: actor.name },
           mode: 'actor_only',
+          actor_only_reason: input.actor_only_reason ?? null,
           snapshot: await this.actorSnapshotSummary(actor, input.validate_icons),
         };
       }

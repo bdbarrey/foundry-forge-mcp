@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { FoundryClient } from '../foundry-client.js';
 import { Logger } from '../logger.js';
 import { ErrorHandler } from '../utils/error-handler.js';
+import { validateIconUrl } from './feat-icons.js';
 
 export interface ActorCreationToolsOptions {
   foundryClient: FoundryClient;
@@ -207,7 +208,7 @@ export class ActorCreationTools {
       },
       {
         name: 'update-actor-items',
-        description: 'Update one or more existing items on an actor via updateEmbeddedDocuments. Use for damage formula tweaks, description edits, feature text changes. Each update must include the item _id.',
+        description: 'Update one or more existing items on an actor via updateEmbeddedDocuments. Use for damage formula tweaks, description edits, feature text changes, or img patches. Each update must include the item _id. v0.1.22: img fields are validated via Forge bazaar mirror before write — updates with broken/404 icon paths are rejected so hallucinated filenames cannot ship to live actors. Pass `skipImgValidation: true` to bypass (e.g. for absolute Forge CDN URLs you have already pre-validated).',
         inputSchema: {
           type: 'object',
           properties: {
@@ -218,6 +219,10 @@ export class ActorCreationTools {
               description: 'Array of partial item docs. Each must include _id. Example: [{"_id":"abc123","system.damage.parts":[["2d8+3","slashing"]]}]',
               items: { type: 'object' },
               minItems: 1,
+            },
+            skipImgValidation: {
+              type: 'boolean',
+              description: 'v0.1.22: bypass icon-URL validation for `img` fields in this batch. Default false. Use only when you have pre-validated the paths yourself or are intentionally setting a path that the validator cannot probe (e.g. a private moulinette URL).',
             },
           },
           required: ['updates'],
@@ -554,12 +559,23 @@ export class ActorCreationTools {
 
   /**
    * Handle updating items on an actor
+   *
+   * v0.1.22: validates any `img` field in the updates against the Forge bazaar
+   * mirror before forwarding to the module. Hallucinated filenames (e.g.
+   * `icons/weapons/crossbows/crossbow-heavy.webp` — doesn't exist in core)
+   * are rejected with an explicit error rather than silently shipping to
+   * production actors. Pass `skipImgValidation: true` to bypass.
+   *
+   * Origin: Arc G prep 2026-05-17 — agent wrote made-up icon paths that
+   * 404'd on Forge; previous shipped state was "claimed fixed, actually
+   * broken." Validation at the API boundary closes this class of error.
    */
   async handleUpdateActorItems(args: any): Promise<any> {
     const schema = z.object({
       actorId: z.string().optional(),
       actorName: z.string().optional(),
       updates: z.array(z.record(z.any())).min(1, 'At least one update is required'),
+      skipImgValidation: z.boolean().optional(),
     }).refine(data => data.actorId || data.actorName, {
       message: 'Either actorId or actorName is required',
     });
@@ -572,13 +588,39 @@ export class ActorCreationTools {
       }
     }
 
+    // v0.1.22: validate img fields before write. Catches hallucinated icon
+    // paths at the API boundary. Trusted prefixes pass through; bare
+    // `icons/...` paths probe the Forge bazaar mirror; absolute URLs HEAD-probe.
+    if (!validated.skipImgValidation) {
+      const brokenImgs: Array<{ _id: string; img: string }> = [];
+      for (const upd of validated.updates) {
+        const img = (upd as any).img;
+        if (typeof img !== 'string' || !img) continue;
+        const ok = await validateIconUrl(img);
+        if (!ok) {
+          brokenImgs.push({ _id: String(upd._id), img });
+        }
+      }
+      if (brokenImgs.length > 0) {
+        const details = brokenImgs.map(b => `  - item ${b._id}: ${b.img}`).join('\n');
+        throw new Error(
+          `update-actor-items rejected ${brokenImgs.length} update(s) with unreachable img paths:\n${details}\n\n` +
+          `Fix: probe candidate paths via the Forge bazaar mirror (https://assets.forge-vtt.com/bazaar/core/<path>) ` +
+          `before submitting, or pass skipImgValidation: true to override.`,
+        );
+      }
+    }
+
     this.logger.info('Updating items on actor', {
       actor: validated.actorId || validated.actorName,
       updateCount: validated.updates.length,
+      imgValidation: validated.skipImgValidation ? 'skipped' : 'passed',
     });
 
     try {
-      const result = await this.foundryClient.query('foundry-forge-mcp.updateActorItems', validated);
+      // Strip skipImgValidation from the query payload — module side doesn't need it.
+      const { skipImgValidation, ...modulePayload } = validated;
+      const result = await this.foundryClient.query('foundry-forge-mcp.updateActorItems', modulePayload);
       if (!result.success) {
         throw new Error(result.error || 'Failed to update items');
       }
