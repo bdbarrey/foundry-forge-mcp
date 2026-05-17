@@ -74,6 +74,10 @@ export class ApplyFeatIconsTools {
               type: 'boolean',
               description: 'When true, also apply the generic feature fallback when the resolver finds no themed match. When false (default), items that would only get the fallback are skipped so we don\'t replace one generic icon with another.',
             },
+            dryRun: {
+              type: 'boolean',
+              description: 'v0.1.21: when true, report what WOULD be updated (including broken-bare-path detection) without actually writing changes. Useful as an icon audit pass before deciding to patch.',
+            },
           },
         },
       },
@@ -87,12 +91,14 @@ export class ApplyFeatIconsTools {
       itemIds: z.array(z.string()).optional(),
       force: z.boolean().optional(),
       includeFallback: z.boolean().optional(),
+      dryRun: z.boolean().optional(),
     }).refine(d => d.actorId || d.actorName, {
       message: 'Provide actorId or actorName',
     });
     const input = schema.parse(args);
     const force = input.force ?? false;
     const includeFallback = input.includeFallback ?? false;
+    const dryRun = input.dryRun ?? false;
     const idFilter = input.itemIds ? new Set(input.itemIds) : null;
 
     this.logger.info('apply-feat-icons invoked', {
@@ -132,19 +138,24 @@ export class ApplyFeatIconsTools {
           continue;
         }
 
-        // Eligibility: known-default icon, missing img, OR an http(s) URL
-        // that fails HEAD probing. The third clause catches future broken
-        // URLs we haven't enumerated in DND5E_DEFAULT_FEAT_ICONS — when an
-        // item img 404s, replace it.
+        // Eligibility: known-default icon, missing img, OR an unreachable URL
+        // (HEAD-probed via validateIconUrl, which handles http(s) and bare
+        // core-icon paths). Anything that 404s gets replaced — catches:
+        //   - made-up filenames I wrote by hand (`icons/weapons/.../*.webp`
+        //     that don't exist in Foundry core)
+        //   - Beneos module URLs when Beneos isn't loaded
+        //   - reorganized URLs after dnd5e or Foundry updates
         const isDefault =
           !currentImg
           || DND5E_DEFAULT_FEAT_ICONS.has(currentImg);
-        let brokenHttp = false;
-        if (!isDefault && /^https?:\/\//.test(currentImg)) {
-          brokenHttp = !(await validateIconUrl(currentImg));
+        let broken = false;
+        if (!isDefault && currentImg) {
+          // Trust prefixes (systems/, icons/svg/, modules/) return true from
+          // validateIconUrl; bare icons/... and absolute URLs get probed.
+          broken = !(await validateIconUrl(currentImg));
         }
         const explicitlyTargeted = idFilter?.has(id) ?? false;
-        if (!force && !explicitlyTargeted && !isDefault && !brokenHttp) {
+        if (!force && !explicitlyTargeted && !isDefault && !broken) {
           skipped.push({ id, name, reason: `custom img preserved (${currentImg})` });
           continue;
         }
@@ -167,7 +178,7 @@ export class ApplyFeatIconsTools {
           continue;
         }
 
-        const reason = brokenHttp ? 'broken-http' : (isDefault ? 'default' : 'forced');
+        const reason = broken ? 'broken-icon' : (isDefault ? 'default' : 'forced');
         updates.push({ _id: id, img: newImg });
         considered.push({ id, name, img: newImg, was: currentImg, reason, action: 'update' });
       }
@@ -178,6 +189,19 @@ export class ApplyFeatIconsTools {
           actorId,
           actorName,
           updated: 0,
+          considered,
+          skipped,
+          ...(dryRun ? { dryRun: true } : {}),
+        };
+      }
+
+      if (dryRun) {
+        return {
+          success: true,
+          actorId,
+          actorName,
+          dryRun: true,
+          wouldUpdate: updates.length,
           considered,
           skipped,
         };

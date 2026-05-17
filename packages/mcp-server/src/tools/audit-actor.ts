@@ -21,6 +21,7 @@ import { ErrorHandler } from '../utils/error-handler.js';
 import { parseReloadedStatblock, ReloadedStatblock, StatblockFeature } from '../parsers/reloaded-statblock.js';
 import { ParsedAction, AbilityKey } from '../parsers/action-description.js';
 import { extractStatblockSection, stripUsageSuffix } from './create-actor.js';
+import { validateIconUrl } from './feat-icons.js';
 
 export type Severity = 'critical' | 'medium' | 'low';
 export type Status = 'match' | 'divergence' | 'missing';
@@ -94,6 +95,14 @@ export interface ActorItemSnapshot {
   _id?: string;
   name?: string;
   type?: string;
+  /**
+   * v0.1.21: item's `img` field — the icon shown next to the item name on
+   * the character sheet. Module's getCharacterInfo already includes this
+   * (data-access.ts:1228); previously the typed Snapshot dropped it.
+   * Audit-actor surfaces it so per-item icon brokenness is visible without
+   * a separate enumeration.
+   */
+  img?: string;
   system?: any;
   flags?: any;
   /**
@@ -1314,7 +1323,11 @@ export class AuditActorTools {
             },
             actor_only: {
               type: 'boolean',
-              description: 'Skip the Reloaded comparison and return just an actor-side snapshot (item count, missing required fields).',
+              description: 'Skip the Reloaded comparison and return just an actor-side snapshot (item count, missing required fields, per-item img list).',
+            },
+            validate_icons: {
+              type: 'boolean',
+              description: 'v0.1.21: when actor_only=true, also HEAD-probe each item img and classify as trusted (systems/icons-svg/modules), valid (probed 200), or broken (probed 404 or empty img). Bare `icons/...` paths are probed via Forge bazaar mirror. Off by default (adds ~50ms per item the first time; cached after).',
             },
           },
         },
@@ -1330,6 +1343,7 @@ export class AuditActorTools {
       file_path: z.string().optional(),
       creature_name: z.string().optional(),
       actor_only: z.boolean().optional(),
+      validate_icons: z.boolean().optional(),
     }).refine(d => d.actorId || d.actorName, {
       message: 'Provide actorId or actorName',
     }).refine(d =>
@@ -1363,7 +1377,7 @@ export class AuditActorTools {
           success: true,
           actor: { id: actor.id, name: actor.name },
           mode: 'actor_only',
-          snapshot: this.actorSnapshotSummary(actor),
+          snapshot: await this.actorSnapshotSummary(actor, input.validate_icons),
         };
       }
 
@@ -1415,7 +1429,7 @@ export class AuditActorTools {
     return snapshot;
   }
 
-  private actorSnapshotSummary(actor: ActorSnapshot): Record<string, any> {
+  private async actorSnapshotSummary(actor: ActorSnapshot, validateIcons?: boolean): Promise<Record<string, any>> {
     const sys = actor.system ?? {};
     const items = actor.items ?? [];
     const itemTypes: Record<string, number> = {};
@@ -1423,6 +1437,46 @@ export class AuditActorTools {
       const t = String(it.type ?? 'unknown');
       itemTypes[t] = (itemTypes[t] ?? 0) + 1;
     }
+
+    // v0.1.21: per-item img list. Always included. Surfaces broken-icon
+    // class of errors that previously slipped past every audit (e.g. Brom
+    // Martikov's weapon icons pointing at made-up `icons/weapons/.../*.webp`
+    // paths that 404 silently). When `validateIcons=true`, also probes each
+    // img via validateIconUrl and reports per-item status.
+    const itemsList = items.map((it: any) => ({
+      id: it.id ?? it._id,
+      name: it.name,
+      type: it.type,
+      img: it.img ?? null,
+    }));
+
+    let iconStatus: Array<{ id: any; name: any; img: string | null; status: string }> | undefined;
+    let brokenIconCount = 0;
+    if (validateIcons) {
+      iconStatus = [];
+      for (const it of itemsList) {
+        if (!it.img) {
+          iconStatus.push({ ...it, status: 'missing' });
+          brokenIconCount++;
+          continue;
+        }
+        // Classify before probing (cheap categorization).
+        if (it.img.startsWith('systems/') || it.img.startsWith('icons/svg/') || it.img.startsWith('modules/')) {
+          iconStatus.push({ ...it, status: 'trusted' });
+          continue;
+        }
+        // Probe via the shared resolver — handles bare icons/..., http(s),
+        // and caches per-session.
+        const ok = await validateIconUrl(it.img);
+        if (ok) {
+          iconStatus.push({ ...it, status: 'valid' });
+        } else {
+          iconStatus.push({ ...it, status: 'broken' });
+          brokenIconCount++;
+        }
+      }
+    }
+
     return {
       hp: { max: sys.attributes?.hp?.max, value: sys.attributes?.hp?.value },
       ac: { flat: sys.attributes?.ac?.flat, value: sys.attributes?.ac?.value, calc: sys.attributes?.ac?.calc },
@@ -1433,6 +1487,8 @@ export class AuditActorTools {
       cr: sys.details?.cr,
       itemCount: items.length,
       itemTypes,
+      items: itemsList,
+      ...(iconStatus ? { iconStatus, brokenIconCount } : {}),
       // v0.1.20: portrait + token texture URLs. These are what the
       // portrait_canon-aware tools (apply_npc_portrait_to_foundry,
       // sync_npc_portrait) read or set. Surfacing them in the snapshot lets

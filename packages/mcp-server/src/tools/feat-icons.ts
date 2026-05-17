@@ -35,28 +35,10 @@ const FEATURE_FALLBACK = 'systems/dnd5e/icons/svg/items/feature.svg';
 const reachableCache = new Map<string, boolean>();
 
 /**
- * HEAD-probe the URL with a 2-second timeout. Returns true for 2xx, false
- * for any non-success status, network error, or timeout. Bypasses probing
- * for trusted local paths (systems/..., icons/svg/...) — those resolve
- * through Foundry's static asset server so we can't HEAD them from the
- * backend, and we trust them to exist (system-bundled / Foundry core).
- *
- * Also bypasses for the empty string and non-http schemes — caller may pass
- * sentinel values that aren't URLs at all.
+ * Internal HEAD-probe with caching + 2s timeout. Returns true for 2xx,
+ * false for non-success / network error / timeout. Caches per session.
  */
-export async function validateIconUrl(url: string): Promise<boolean> {
-  if (!url) return false;
-
-  // Trusted local-asset prefixes — assume reachable, don't probe.
-  if (url.startsWith('systems/')
-   || url.startsWith('icons/svg/')
-   || url.startsWith('modules/')) {
-    return true;
-  }
-
-  // Anything that isn't an http(s) URL we can't probe; treat as unreachable.
-  if (!/^https?:\/\//.test(url)) return false;
-
+async function probeUrl(url: string): Promise<boolean> {
   const cached = reachableCache.get(url);
   if (cached !== undefined) return cached;
 
@@ -73,6 +55,48 @@ export async function validateIconUrl(url: string): Promise<boolean> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Validate an icon URL by probing whether it actually resolves.
+ *
+ * Three resolution modes:
+ *   1. **Trusted local prefixes** (`systems/...`, `icons/svg/...`, `modules/...`)
+ *      — served by Foundry's static asset server, can't HEAD from backend.
+ *      Returns true without probing; we trust them as system-bundled.
+ *   2. **Bare core icons** (`icons/...` other than `icons/svg/...`) — Foundry's
+ *      core icon library, served by Forge worlds via the bazaar/core mirror.
+ *      We probe by mapping to `${FORGE_CORE}/...` and HEAD-checking. This
+ *      catches made-up filenames like `icons/weapons/crossbows/crossbow-heavy.webp`
+ *      that don't exist in core (404) BUT also confirms real ones like
+ *      `icons/weapons/swords/shortsword-guard-brass.webp` (200).
+ *   3. **Absolute http(s) URLs** — probe directly. Catches Forge bazaar URLs,
+ *      module-CDN URLs, etc.
+ *
+ * Empty string → false. Non-http non-icons scheme → false (can't probe).
+ */
+export async function validateIconUrl(url: string): Promise<boolean> {
+  if (!url) return false;
+
+  // Trusted local-asset prefixes — assume reachable, don't probe.
+  if (url.startsWith('systems/')
+   || url.startsWith('icons/svg/')
+   || url.startsWith('modules/')) {
+    return true;
+  }
+
+  // Bare core icons (icons/skills/..., icons/weapons/..., icons/creatures/...)
+  // resolve through Forge bazaar mirror on Forge-hosted worlds. Probe via the
+  // public bazaar URL — if the file exists there, the bare path will resolve
+  // in Foundry; if it 404s on bazaar, it 404s in Foundry too.
+  if (url.startsWith('icons/')) {
+    return await probeUrl(`${FORGE_CORE}/${url.replace(/^icons\//, '')}`);
+  }
+
+  // Anything that isn't an http(s) URL we can't probe; treat as unreachable.
+  if (!/^https?:\/\//.test(url)) return false;
+
+  return await probeUrl(url);
 }
 
 /** Test-only helper: clear the reachability cache between tests. */
