@@ -170,6 +170,35 @@ export async function classifyIconUrl(
 }
 
 /**
+ * Arc H gap closure 2026-05-18 — verify an actor portrait URL matches the
+ * canon pattern declared on the NPC's vault profile. Returns:
+ *   - 'match' when the URL matches the expected pattern for the canon tag.
+ *   - 'mismatch' when the URL is set but doesn't match.
+ *   - 'skipped' when canon is 'needs-upgrade' or URL is empty (no comparison
+ *      possible / appropriate).
+ *
+ * Patterns (case-insensitive, allow URL-encoding for spaces):
+ *   custom → `/cos-npc-portraits/<anything>.png` (Klein-pipeline output)
+ *   beneos → `/cos_tokens/<anything>.webp` (Beneos canonical token folder)
+ *   needs-upgrade → no pattern check
+ */
+export function checkPortraitCanonMatch(
+  url: string | null | undefined,
+  canon: 'custom' | 'beneos' | 'needs-upgrade',
+): 'match' | 'mismatch' | 'skipped' {
+  if (canon === 'needs-upgrade') return 'skipped';
+  if (!url || !url.trim()) return 'skipped';
+  const decoded = decodeURIComponent(url).toLowerCase();
+  if (canon === 'custom') {
+    return /\/cos-npc-portraits\/[^/]+\.png$/i.test(decoded) ? 'match' : 'mismatch';
+  }
+  if (canon === 'beneos') {
+    return /\/cos_tokens\/[^/]+\.webp$/i.test(decoded) ? 'match' : 'mismatch';
+  }
+  return 'skipped';
+}
+
+/**
  * Pure comparison: actor + statblock → audit result. Exported for tests.
  * No Foundry / network access.
  */
@@ -1139,6 +1168,110 @@ export const ACTIVITY_RULES: ActivityRule[] = [
       };
     },
   },
+
+  // ----- Arc H gap closure 2026-05-18: usage + midiProperties --------------
+  // Reloaded encodes recharge / per-day limits in the action NAME parenthetical
+  // ("(Recharge 5-6)", "(1/Day)"). dnd5e persists this as system.uses.max +
+  // system.uses.recovery on the item. The Wail of the Forsaken regression
+  // (Recharge 5-6 → Foundry persisted Recharge 6-6) shipped clean because no
+  // rule diffed the recovery formula against the parsed marker.
+  {
+    id: 'usage.recharge',
+    label: 'parsed (Recharge X-Y) matches item.system.uses.recovery',
+    appliesWhen: ctx => {
+      const usage = ctx.parsed.usage as any;
+      return !!usage && 'recharge' in usage;
+    },
+    check: ctx => {
+      const usage = ctx.parsed.usage as { recharge: [number, number] };
+      const [min, max] = usage.recharge;
+      const expected = min === max ? String(min) : `${min}-${max}`;
+      const uses = ctx.item.system?.uses;
+      const recovery = Array.isArray(uses?.recovery) ? uses.recovery : [];
+      const rechargeEntry = recovery.find(
+        (r: any) => r?.period === 'recharge',
+      );
+      if (rechargeEntry && String(rechargeEntry.formula ?? '') === expected) return null;
+      return {
+        field: 'usage.recharge',
+        reloaded: { formula: expected, period: 'recharge' },
+        foundry: rechargeEntry
+          ? { formula: String(rechargeEntry.formula ?? ''), period: rechargeEntry.period }
+          : 'no-recharge-entry',
+        status: rechargeEntry ? 'divergence' : 'missing',
+        severity: 'medium',
+        note: rechargeEntry
+          ? `parsed (Recharge ${expected}) doesn't match item recovery formula`
+          : `parsed (Recharge ${expected}) but no system.uses.recovery entry with period='recharge'`,
+      };
+    },
+  },
+  {
+    id: 'usage.uses',
+    label: 'parsed (N/Day) matches item.system.uses.max + recovery period',
+    appliesWhen: ctx => {
+      const usage = ctx.parsed.usage as any;
+      return !!usage && 'count' in usage && 'period' in usage;
+    },
+    check: ctx => {
+      const usage = ctx.parsed.usage as {
+        count: number;
+        period: 'day' | 'long-rest' | 'short-rest' | 'turn';
+      };
+      const periodMap: Record<string, string> = {
+        day: 'day', 'long-rest': 'lr', 'short-rest': 'sr', turn: 'turn',
+      };
+      const expectedPeriod = periodMap[usage.period] ?? usage.period;
+      const uses = ctx.item.system?.uses;
+      const recovery = Array.isArray(uses?.recovery) ? uses.recovery : [];
+      const periodEntry = recovery.find((r: any) => r?.period === expectedPeriod);
+      const actualMax = String(uses?.max ?? '');
+      const expectedMax = String(usage.count);
+      if (periodEntry && actualMax === expectedMax) return null;
+      return {
+        field: 'usage.uses',
+        reloaded: { count: usage.count, period: usage.period },
+        foundry: { max: actualMax, period: periodEntry?.period ?? null },
+        status: periodEntry ? 'divergence' : 'missing',
+        severity: 'medium',
+        note: `parsed (${usage.count}/${usage.period}) doesn't match item system.uses`,
+      };
+    },
+  },
+
+  // midiProperties.saveDamage on the ITEM (not activity) — the intent writer
+  // mirrors parsed.save.onSuccess into item.flags.midiProperties.saveDamage
+  // (`halfdam` / `nodam` / `fulldam`). Without this flag set, Midi defaults
+  // to applying full damage on a save fail AND nothing on a save success,
+  // which is correct for `nodam` (Tanglefoot) but wrong for `halfdam`
+  // (Wisplight Flare — 4d6 radiant, save half).
+  {
+    id: 'midiProperties.saveDamage',
+    label: 'parsed save.onSuccess matches item.flags.midiProperties.saveDamage',
+    appliesWhen: ctx =>
+      !!ctx.parsed.save?.onSuccess && (!!ctx.saveAct || !!ctx.damageAct),
+    check: ctx => {
+      const onSuccess = ctx.parsed.save!.onSuccess!;
+      // onSuccess = 'half' is the only value the parser currently emits.
+      // Keep the map open for future 'none' / 'full' additions from the parser.
+      const expectedFlag =
+        onSuccess === 'half' ? 'halfdam'
+        : (onSuccess === 'none' as string) ? 'nodam'
+        : (onSuccess === 'full' as string) ? 'fulldam'
+        : null;
+      if (!expectedFlag) return null;
+      const actual = strOrNull(ctx.item.flags?.midiProperties?.saveDamage);
+      if (actual === expectedFlag) return null;
+      return {
+        field: 'midiProperties.saveDamage',
+        reloaded: expectedFlag,
+        foundry: actual,
+        status: actual ? 'divergence' : 'missing',
+        severity: 'medium',
+        note: `parsed onSuccess=${onSuccess} should set item.flags.midiProperties.saveDamage=${expectedFlag}; Midi otherwise defaults to full-damage-on-fail with no half-on-success`,
+      };
+    },
+  },
 ];
 
 /**
@@ -1432,6 +1565,11 @@ export class AuditActorTools {
               type: 'boolean',
               description: 'v0.1.21: when actor_only=true, also HEAD-probe each item img and classify as trusted (systems/icons-svg/modules), valid (probed 200), or broken (probed 404 or empty img). Bare `icons/...` paths are probed via Forge bazaar mirror. Off by default (adds ~50ms per item the first time; cached after).',
             },
+            expected_portrait_canon: {
+              type: 'string',
+              enum: ['custom', 'beneos', 'needs-upgrade'],
+              description: 'Arc H gap closure 2026-05-18: when set + validate_icons=true, verify the actor img URL matches the canon pattern. `custom` → `cos-npc-portraits/<Name>.png`. `beneos` → `cos_tokens/<name>(_token)?.webp`. `needs-upgrade` → skip pattern check (placeholder canon). Mismatch surfaces as a medium-severity divergence on the snapshot. Pass the vault NPC profile\'s `portrait_canon` frontmatter value verbatim.',
+            },
           },
         },
       },
@@ -1453,6 +1591,7 @@ export class AuditActorTools {
       actor_only: z.boolean().optional(),
       actor_only_reason: z.enum(ACTOR_ONLY_REASONS).optional(),
       validate_icons: z.boolean().optional(),
+      expected_portrait_canon: z.enum(['custom', 'beneos', 'needs-upgrade']).optional(),
     }).refine(d => d.actorId || d.actorName, {
       message: 'Provide actorId or actorName',
     }).refine(d =>
@@ -1501,7 +1640,11 @@ export class AuditActorTools {
           actor: { id: actor.id, name: actor.name },
           mode: 'actor_only',
           actor_only_reason: input.actor_only_reason ?? null,
-          snapshot: await this.actorSnapshotSummary(actor, input.validate_icons),
+          snapshot: await this.actorSnapshotSummary(
+            actor,
+            input.validate_icons,
+            input.expected_portrait_canon,
+          ),
         };
       }
 
@@ -1553,7 +1696,11 @@ export class AuditActorTools {
     return snapshot;
   }
 
-  private async actorSnapshotSummary(actor: ActorSnapshot, validateIcons?: boolean): Promise<Record<string, any>> {
+  private async actorSnapshotSummary(
+    actor: ActorSnapshot,
+    validateIcons?: boolean,
+    expectedPortraitCanon?: 'custom' | 'beneos' | 'needs-upgrade',
+  ): Promise<Record<string, any>> {
     const sys = actor.system ?? {};
     const items = actor.items ?? [];
     const itemTypes: Record<string, number> = {};
@@ -1619,6 +1766,23 @@ export class AuditActorTools {
       };
       if (portraitIcon.img.status === 'broken' || portraitIcon.img.status === 'missing') brokenIconCount++;
       if (portraitIcon.tokenImg.status === 'broken' || portraitIcon.tokenImg.status === 'missing') brokenIconCount++;
+
+      // Arc H gap closure 2026-05-18: portrait canon-tag pattern check.
+      // When the caller passes the NPC's vault `portrait_canon` value, verify
+      // the actor URL matches the expected pattern for that canon. Mismatches
+      // surface as a medium-severity divergence in the snapshot — the URL may
+      // resolve cleanly (status=valid) but point at the wrong asset family
+      // (e.g. beneos-tagged NPC whose img landed at `cos-npc-portraits/...`
+      // after the build inherited the wrong base).
+      if (expectedPortraitCanon) {
+        const imgMatch = checkPortraitCanonMatch(actor.img, expectedPortraitCanon);
+        const tokenMatch = checkPortraitCanonMatch(actor.tokenImg, expectedPortraitCanon);
+        (portraitIcon as any).canon = {
+          expected: expectedPortraitCanon,
+          img: imgMatch,
+          tokenImg: tokenMatch,
+        };
+      }
     }
 
     return {

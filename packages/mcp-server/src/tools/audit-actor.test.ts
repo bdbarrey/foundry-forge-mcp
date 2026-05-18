@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { compareActor, ActorSnapshot, classifyIconUrl } from './audit-actor.js';
+import { compareActor, ActorSnapshot, classifyIconUrl, checkPortraitCanonMatch } from './audit-actor.js';
 import * as featIcons from './feat-icons.js';
 import type { ReloadedStatblock } from '../parsers/reloaded-statblock.js';
 
@@ -1107,5 +1107,225 @@ describe('compareActor — TRAIT_RULES (Midi ActiveEffect changes[] verification
     expect(audit.traitsList.find(d => d.field === 'traits.Pack Tactics.changes')).toBeUndefined();
     // missingFromActor is the appropriate signal here.
     expect(audit.features.missingFromActor).toContain('Pack Tactics');
+  });
+});
+
+describe('compareActor — usage.recharge / usage.uses rules', () => {
+  it('passes when parsed (Recharge 5-6) matches item recovery formula', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Wail of the Forsaken',
+        description: 'd',
+        parsed: { damage: [], usage: { recharge: [5, 6] } as any },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Wail of the Forsaken', type: 'feat', system: {
+        activities: { sav1: { type: 'save' } },
+        uses: {
+          max: '1',
+          recovery: [{ period: 'recharge', formula: '5-6' }],
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const item = audit.actions.find(a => a.name === 'Wail of the Forsaken');
+    expect(item!.divergences.find(d => d.field === 'usage.recharge')).toBeUndefined();
+  });
+
+  it('flags wrong recharge formula as medium (Wail of the Forsaken regression)', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Wail of the Forsaken',
+        description: 'd',
+        parsed: { damage: [], usage: { recharge: [5, 6] } as any },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Wail of the Forsaken', type: 'feat', system: {
+        activities: { sav1: { type: 'save' } },
+        uses: {
+          max: '1',
+          recovery: [{ period: 'recharge', formula: '6' }], // wrong — Reloaded says 5-6
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const item = audit.actions.find(a => a.name === 'Wail of the Forsaken');
+    const div = item!.divergences.find(d => d.field === 'usage.recharge');
+    expect(div).toBeDefined();
+    expect(div!.severity).toBe('medium');
+    expect((div!.reloaded as any).formula).toBe('5-6');
+    expect((div!.foundry as any).formula).toBe('6');
+  });
+
+  it('flags missing recharge entry as missing', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Frightful Presence',
+        description: 'd',
+        parsed: { damage: [], usage: { recharge: [4, 6] } as any },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Frightful Presence', type: 'feat', system: {
+        activities: { sav1: { type: 'save' } },
+        uses: { max: '1', recovery: [] },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const item = audit.actions.find(a => a.name === 'Frightful Presence');
+    const div = item!.divergences.find(d => d.field === 'usage.recharge');
+    expect(div).toBeDefined();
+    expect(div!.status).toBe('missing');
+  });
+
+  it('passes when parsed (1/Day) matches item uses.max + period', () => {
+    const sb = makeStatblock({
+      actions: [{
+        name: 'Heroic Surge',
+        description: 'd',
+        parsed: { damage: [], usage: { count: 1, period: 'day' } as any },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Heroic Surge', type: 'feat', system: {
+        activities: { sav1: { type: 'save' } },
+        uses: { max: '1', recovery: [{ period: 'day' }] },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const item = audit.actions.find(a => a.name === 'Heroic Surge');
+    expect(item!.divergences.find(d => d.field === 'usage.uses')).toBeUndefined();
+  });
+});
+
+describe('compareActor — midiProperties.saveDamage rule', () => {
+  it('passes when item.flags.midiProperties.saveDamage matches parsed onSuccess=half', () => {
+    const sb = makeStatblock({
+      bonusActions: [{
+        name: 'Wisplight Flare',
+        description: 'd',
+        parsed: {
+          damage: [{ formula: '4d6', type: 'radiant' }],
+          save: { dc: 16, ability: 'con', onSuccess: 'half' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Wisplight Flare', type: 'spell',
+      flags: { midiProperties: { saveDamage: 'halfdam' } },
+      system: {
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['con'], dc: { calculation: '', formula: '16' } },
+            damage: { parts: [{ custom: { enabled: true, formula: '4d6' }, types: ['radiant'] }], onSave: 'half' },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const item = audit.actions.find(a => a.name === 'Wisplight Flare');
+    expect(item!.divergences.find(d => d.field === 'midiProperties.saveDamage')).toBeUndefined();
+  });
+
+  it('flags missing saveDamage flag when parsed says onSuccess=half', () => {
+    const sb = makeStatblock({
+      bonusActions: [{
+        name: 'Wisplight Flare',
+        description: 'd',
+        parsed: {
+          damage: [{ formula: '4d6', type: 'radiant' }],
+          save: { dc: 16, ability: 'con', onSuccess: 'half' },
+        },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Wisplight Flare', type: 'spell',
+      // No flags.midiProperties → defaults to full-damage-on-fail
+      system: {
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['con'], dc: { calculation: '', formula: '16' } },
+            damage: { parts: [{ custom: { enabled: true, formula: '4d6' }, types: ['radiant'] }] },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const item = audit.actions.find(a => a.name === 'Wisplight Flare');
+    const div = item!.divergences.find(d => d.field === 'midiProperties.saveDamage');
+    expect(div).toBeDefined();
+    expect(div!.severity).toBe('medium');
+    expect(div!.reloaded).toBe('halfdam');
+    expect(div!.foundry).toBeNull();
+  });
+
+  it('does not fire when parsed save has no onSuccess (full damage on fail is default)', () => {
+    const sb = makeStatblock({
+      bonusActions: [{
+        name: 'Deathly Visions',
+        description: 'd',
+        parsed: { damage: [], save: { dc: 16, ability: 'wis' } },
+      }],
+    });
+    const actor = makeActor({ attributes: {}, abilities: {} }, [{
+      name: 'Deathly Visions', type: 'feat', system: {
+        activities: {
+          sav1: {
+            type: 'save',
+            save: { ability: ['wis'], dc: { calculation: '', formula: '16' } },
+          },
+        },
+      },
+    }]);
+    const audit = compareActor(actor, sb);
+    const item = audit.actions.find(a => a.name === 'Deathly Visions');
+    expect(item!.divergences.find(d => d.field === 'midiProperties.saveDamage')).toBeUndefined();
+  });
+});
+
+describe('checkPortraitCanonMatch — Arc H portrait canon-tag rule', () => {
+  it('match: custom canon + cos-npc-portraits/*.png URL', () => {
+    expect(checkPortraitCanonMatch(
+      'https://assets.forge-vtt.com/xyz/cos-npc-portraits/Leo%20Dilisnya.png',
+      'custom',
+    )).toBe('match');
+  });
+
+  it('mismatch: custom canon + Beneos token URL', () => {
+    expect(checkPortraitCanonMatch(
+      'https://assets.forge-vtt.com/xyz/moulinette/.../cos_tokens/majesto_token.webp',
+      'custom',
+    )).toBe('mismatch');
+  });
+
+  it('match: beneos canon + cos_tokens/*.webp URL', () => {
+    expect(checkPortraitCanonMatch(
+      'https://assets.forge-vtt.com/xyz/moulinette/adventures/beneos-battlemaps-universe/beneos_assets/beneos_battlemaps/map_assets/tokens/cos_tokens/majesto_token.webp',
+      'beneos',
+    )).toBe('match');
+  });
+
+  it('mismatch: beneos canon + cos-npc-portraits URL', () => {
+    expect(checkPortraitCanonMatch(
+      'https://assets.forge-vtt.com/xyz/cos-npc-portraits/Leo%20Dilisnya.png',
+      'beneos',
+    )).toBe('mismatch');
+  });
+
+  it('skipped: needs-upgrade canon never errors', () => {
+    expect(checkPortraitCanonMatch(
+      'systems/dnd5e/tokens/undead/Specter.webp',
+      'needs-upgrade',
+    )).toBe('skipped');
+  });
+
+  it('skipped: empty / null URL', () => {
+    expect(checkPortraitCanonMatch(null, 'custom')).toBe('skipped');
+    expect(checkPortraitCanonMatch('', 'beneos')).toBe('skipped');
+    expect(checkPortraitCanonMatch('   ', 'custom')).toBe('skipped');
   });
 });
