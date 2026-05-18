@@ -152,7 +152,7 @@ export class CreateActorTools {
             },
             prune_base_items: {
               type: 'boolean',
-              description: 'Phase 3b extension (Mode A only). When true, after the build runs, walk the actor\'s feat AND weapon items and remove compendium-base entries that have no name-token overlap with any Reloaded trait or action. In dnd5e 5.x NPC attacks (Bite, Claws, Longsword, Hail of Daggers) are `type=weapon` items, so weapon-pruning is required to drop SRD vampire\'s Bite/Claws on a Volenta build. Spells/equipment/classes/races/backgrounds/containers/loot stay safe. ALWAYS_KEEP list preserves common monster traits (Multiattack, Spellcasting, Legendary Resistance, Sunlight Sensitivity, etc.), token-overlap with Reloaded names preserves matched items (e.g. our copy-patched "Hail of Daggers" overlaps "daggers" with Reloaded\'s action of the same name). Hard cap of 5 deletions per run. Off by default — heavy Reloaded renames can produce false positives. Result is reported as `prunedItems` and `prunedCandidatesOverCap`.',
+              description: 'Phase 3b extension (Mode A only). When true (default since 2026-05-17 per Arc H AAR), after the build runs, walk the actor\'s feat AND weapon items and remove compendium-base entries that have no name-token overlap with any Reloaded trait or action. In dnd5e 5.x NPC attacks (Bite, Claws, Longsword, Hail of Daggers) are `type=weapon` items, so weapon-pruning is required to drop SRD vampire\'s Bite/Claws on a Volenta build. Spells/equipment/classes/races/backgrounds/containers/loot stay safe. ALWAYS_KEEP list preserves common monster traits (Multiattack, Spellcasting, Legendary Resistance, Sunlight Sensitivity, etc.), token-overlap with Reloaded names preserves matched items (e.g. our copy-patched "Hail of Daggers" overlaps "daggers" with Reloaded\'s action of the same name). Hard cap of 5 deletions per run. Pass `prune_base_items: false` ONLY for Mode C passthrough builds where Reloaded prose paraphrases base features verbatim (Arc F Ernst Larnak case — Reloaded said "uses Spy stats" instead of quoting each feature name, so pruning over-deleted). Off-by-default produced Specter base contamination on both Arc H Leo Dilisnya forms. Result is reported as `prunedItems` and `prunedCandidatesOverCap`.',
             },
             actions_intent: {
               type: 'array',
@@ -1056,8 +1056,9 @@ export class CreateActorTools {
       //     added items (Reloaded traits / scratch-built actions / copy-patched
       //     items) are visible to the keep-set check. Failures are surfaced in
       //     the response, never raised — pruning is best-effort.
+      // Default flipped 2026-05-17 per Arc H AAR. See shouldRunBasePrune docstring.
       let pruneResult: any = undefined;
-      if (input.prune_base_items === true) {
+      if (shouldRunBasePrune(input)) {
         pruneResult = await this.runBaseItemPrune(
           newActor.id,
           sb,
@@ -1106,7 +1107,7 @@ export class CreateActorTools {
           'Phase 3a-polish: activity range carries override=true so the activity\'s stored value beats the compendium base (was bleeding through on weapons like Hail of Daggers).',
           'Phase 3a-polish: versatile alternative damage (e.g. "or 2d10+4 if two-handed") writes to item-level system.damage.versatile so the sheet exposes the second roll.',
           'Reloaded-only ACTIONS (not traits) that don\'t exist on the compendium base are not auto-created yet — add manually or wait for a follow-up phase.',
-          'Pass `prune_base_items: true` to remove compendium-base feats absent from Reloaded (e.g. drop SRD vampire\'s Bite/Claws on a Volenta build). Default off; conservative; reports kept and pruned items.',
+          'prune_base_items defaults to true (flipped 2026-05-17 per Arc H AAR). Pass `prune_base_items: false` ONLY for Mode C passthrough builds where Reloaded prose paraphrases base features verbatim (Arc F Ernst Larnak case). Pruning is conservative and reports kept + pruned items.',
           'Actor landed in default folder "Foundry MCP Creatures" — move manually for now.',
         ],
       };
@@ -3359,6 +3360,24 @@ const PRUNE_ALWAYS_KEEP = new Set<string>([
 
 /** Hard cap on auto-pruned items per build, regardless of candidate count. */
 export const PRUNE_HARD_CAP = 5;
+
+/**
+ * Truth-table for the `prune_base_items` orchestrator gate.
+ *
+ * Default flipped 2026-05-17 per Arc H AAR:
+ *   - undefined / true → prune runs (default behavior)
+ *   - false            → prune skipped (explicit opt-out for Mode C passthrough
+ *                        builds where Reloaded prose paraphrases base features
+ *                        verbatim — Arc F Ernst Larnak case)
+ *
+ * Off-by-default produced silent Specter contamination on both Arc H Leo
+ * Dilisnya forms (Life Drain, Incorporeal Movement, Sunlight Sensitivity).
+ * The explicit `false` opt-out remains available for legitimate Mode C
+ * passthrough cases.
+ */
+export function shouldRunBasePrune(input: { prune_base_items?: boolean | undefined }): boolean {
+  return input.prune_base_items !== false;
+}
 
 /** English stop-tokens skipped when computing token overlap. */
 const PRUNE_STOP_TOKENS = new Set<string>(['the', 'and', 'with', 'from', 'into', 'for']);

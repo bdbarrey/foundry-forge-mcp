@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, derivePBFromCR, stripUsageSuffix, buildUsesPayload, buildConditionEffect, buildActivityTarget, resolveTraitTemplate, TRAIT_TEMPLATES, batchEntryName, CreateActorTools } from './create-actor.js';
+import { buildItemActivityUpdate, selectPruneCandidates, PRUNE_HARD_CAP, shouldRunBasePrune, derivePBFromCR, stripUsageSuffix, buildUsesPayload, buildConditionEffect, buildActivityTarget, resolveTraitTemplate, TRAIT_TEMPLATES, batchEntryName, CreateActorTools } from './create-actor.js';
 import type { ParsedAction, ParsedCondition } from '../parsers/action-description.js';
 
 describe('buildItemActivityUpdate', () => {
@@ -300,6 +300,27 @@ describe('selectPruneCandidates (Phase 3b extension)', () => {
     const { toPrune, decisions } = selectPruneCandidates(items, []);
     expect(toPrune).toHaveLength(0);
     expect(decisions).toHaveLength(0);
+  });
+});
+
+describe('shouldRunBasePrune (orchestrator default-flip gate, Arc H AAR 2026-05-17)', () => {
+  // Default flipped 2026-05-17: prune was off-by-default which silently
+  // carried Specter base items (Life Drain, Incorporeal Movement, Sunlight
+  // Sensitivity) into both Leo Dilisnya forms. Default-true catches the
+  // common case; explicit `false` opt-out remains for Mode C passthrough
+  // builds where Reloaded prose paraphrases base features (Arc F Ernst
+  // Larnak case).
+
+  it('returns true when prune_base_items is undefined (default behavior post-flip)', () => {
+    expect(shouldRunBasePrune({})).toBe(true);
+  });
+
+  it('returns true when prune_base_items is explicitly true', () => {
+    expect(shouldRunBasePrune({ prune_base_items: true })).toBe(true);
+  });
+
+  it('returns false when prune_base_items is explicitly false (Arc F Ernst Larnak opt-out)', () => {
+    expect(shouldRunBasePrune({ prune_base_items: false })).toBe(false);
   });
 });
 
