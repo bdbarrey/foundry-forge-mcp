@@ -145,6 +145,31 @@ const SENSE_MODES = ['darkvision', 'blindsight', 'tremorsense', 'truesight'] as 
 const SKIP_ACTION_NAMES = new Set(['multiattack']);
 
 /**
+ * Classify an actor-level portrait URL (img / prototypeToken.texture.src).
+ * Returns the same status enum the per-item validate-icons block emits:
+ *   - 'missing' — url is null/empty
+ *   - 'trusted' — system/svg/module path; not network-probable, treated as OK
+ *   - 'valid'   — HEAD-probe succeeded
+ *   - 'broken'  — HEAD-probe failed (URL doesn't resolve)
+ *
+ * Arc H Phase 2 (2026-05-17): added so audit-actor can surface the Majesto
+ * (phantom URL) and Leo Dilisnya (wrong-subject default) failure modes that
+ * the per-item icon probe missed entirely.
+ */
+export async function classifyIconUrl(
+  url: string | null | undefined,
+): Promise<{ url: string | null; status: 'missing' | 'trusted' | 'valid' | 'broken' }> {
+  if (!url) {
+    return { url: null, status: 'missing' };
+  }
+  if (url.startsWith('systems/') || url.startsWith('icons/svg/') || url.startsWith('modules/')) {
+    return { url, status: 'trusted' };
+  }
+  const ok = await validateIconUrl(url);
+  return { url, status: ok ? 'valid' : 'broken' };
+}
+
+/**
  * Pure comparison: actor + statblock → audit result. Exported for tests.
  * No Foundry / network access.
  */
@@ -1478,6 +1503,7 @@ export class AuditActorTools {
 
     let iconStatus: Array<{ id: any; name: any; img: string | null; status: string }> | undefined;
     let brokenIconCount = 0;
+    let portraitIcon: { img: { url: string | null; status: string }; tokenImg: { url: string | null; status: string } } | undefined;
     if (validateIcons) {
       iconStatus = [];
       for (const it of itemsList) {
@@ -1501,6 +1527,25 @@ export class AuditActorTools {
           brokenIconCount++;
         }
       }
+
+      // Arc H Phase 2 (2026-05-17): actor-level portrait + token HEAD-probe.
+      // Previously only per-item imgs were probed, which silently passed Majesto
+      // (img pointed at phantom .../cos_tokens/majesto.webp; the file at that
+      // path didn't exist) and Leo Dilisnya (img was the compendium-default
+      // systems/dnd5e/tokens/undead/Specter.webp — resolves fine but wrong
+      // subject). The portraitIcon section surfaces both:
+      //   - img.status / tokenImg.status: 'missing' | 'trusted' | 'valid' | 'broken'
+      //   - Same classification as per-item icons (system paths trusted; remote
+      //     URLs HEAD-probed; missing/bare flagged).
+      // `brokenIconCount` increments for each broken actor-level url so the
+      // existing Phase F done-gate (brokenIconCount: 0) catches portrait
+      // failures alongside item icons.
+      portraitIcon = {
+        img: await classifyIconUrl(actor.img),
+        tokenImg: await classifyIconUrl(actor.tokenImg),
+      };
+      if (portraitIcon.img.status === 'broken' || portraitIcon.img.status === 'missing') brokenIconCount++;
+      if (portraitIcon.tokenImg.status === 'broken' || portraitIcon.tokenImg.status === 'missing') brokenIconCount++;
     }
 
     return {
@@ -1515,6 +1560,7 @@ export class AuditActorTools {
       itemTypes,
       items: itemsList,
       ...(iconStatus ? { iconStatus, brokenIconCount } : {}),
+      ...(portraitIcon ? { portraitIcon } : {}),
       // v0.1.20: portrait + token texture URLs. These are what the
       // portrait_canon-aware tools (apply_npc_portrait_to_foundry,
       // sync_npc_portrait) read or set. Surfacing them in the snapshot lets

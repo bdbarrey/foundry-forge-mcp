@@ -171,6 +171,32 @@ describe('parseActionDescription — Volenta Dagger (Reloaded drops the colon af
   });
 });
 
+describe('parseActionDescription — Leo Dilisnya Spell Attack (Arc H 2026-05-17)', () => {
+  // CoS Reloaded Arc H Speaker of the Gallows writes "Melee Spell Attack: +8 to hit"
+  // and "Ranged Spell Attack: +8 to hit" — the parser previously only matched
+  // "Weapon Attack" (and bare "Attack"), silently failing to extract attackBonus
+  // for Foretelling Touch and Will-o'-Wisp. Adding "Spell" as an attack-modifier.
+  it('parses Melee Spell Attack (Foretelling Touch shape)', () => {
+    const r = parseActionDescription(
+      'Melee Spell Attack: +8 to hit, reach 5 ft., one creature. Hit: 15 (2d10 + 4) psychic damage.',
+    )!;
+    expect(r.attackType).toBe('melee');
+    expect(r.attackBonus).toBe(8);
+    expect(r.damage).toEqual([{ formula: '2d10 + 4', type: 'psychic' }]);
+    expect(r.reach).toBe(5);
+  });
+
+  it('parses Ranged Spell Attack (Will-o\'-Wisp shape)', () => {
+    const r = parseActionDescription(
+      "Ranged Spell Attack: +8 to hit, range 30 ft., one creature. Hit: 13 (3d8) necrotic damage.",
+    )!;
+    expect(r.attackType).toBe('ranged');
+    expect(r.attackBonus).toBe(8);
+    expect(r.damage).toEqual([{ formula: '3d8', type: 'necrotic' }]);
+    expect(r.range?.normal).toBe(30);
+  });
+});
+
 describe('parseActionDescription — bare-distance reach (Reloaded drops "reach")', () => {
   it('parses reach 5 ft. when keyword "reach" is missing on a melee attack (Volenta Dagger)', () => {
     const r = parseActionDescription(

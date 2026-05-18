@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { compareActor, ActorSnapshot } from './audit-actor.js';
+import { describe, it, expect, vi } from 'vitest';
+import { compareActor, ActorSnapshot, classifyIconUrl } from './audit-actor.js';
+import * as featIcons from './feat-icons.js';
 import type { ReloadedStatblock } from '../parsers/reloaded-statblock.js';
 
 // Minimal-shape helpers — tests construct only the fields each compare function reads.
@@ -942,5 +943,53 @@ describe('compareActor — Phase 11.2 attack→save chain rule', () => {
     const audit = compareActor(actor, sb);
     const saber = audit.actions.find(a => a.name === 'Saber')!;
     expect(saber.divergences.find(d => d.field === 'attack-save.chain')).toBeUndefined();
+  });
+});
+
+describe('classifyIconUrl — actor portrait probe (Arc H AAR 2026-05-17)', () => {
+  // Phase 2 (gap-closure plan): actor.img + tokenImg HEAD-probe.
+  // Per-item validate_icons already worked but the actor-level portrait URL
+  // was never checked. Majesto (phantom URL → 404) and Leo Dilisnya
+  // (compendium-default Specter token → resolves but wrong subject) both
+  // shipped with the Foundry sheet rendering a broken portrait while
+  // `audit-actor actor_only=true validate_icons=true` reported hasImage: true,
+  // brokenIconCount: 0. classifyIconUrl closes that gap.
+
+  it('returns missing for null/undefined/empty URL', async () => {
+    expect(await classifyIconUrl(null)).toEqual({ url: null, status: 'missing' });
+    expect(await classifyIconUrl(undefined)).toEqual({ url: null, status: 'missing' });
+    expect(await classifyIconUrl('')).toEqual({ url: null, status: 'missing' });
+  });
+
+  it('returns trusted for systems/* paths (Foundry-bundled assets — not probable from backend)', async () => {
+    expect(await classifyIconUrl('systems/dnd5e/tokens/undead/Specter.webp'))
+      .toEqual({ url: 'systems/dnd5e/tokens/undead/Specter.webp', status: 'trusted' });
+  });
+
+  it('returns trusted for modules/* paths', async () => {
+    expect(await classifyIconUrl('modules/beneos-module/icons/wand.webp'))
+      .toEqual({ url: 'modules/beneos-module/icons/wand.webp', status: 'trusted' });
+  });
+
+  it('returns valid when validateIconUrl HEAD-probe succeeds', async () => {
+    const spy = vi.spyOn(featIcons, 'validateIconUrl').mockResolvedValue(true);
+    try {
+      const result = await classifyIconUrl('https://assets.forge-vtt.com/xyz/cos-npc-portraits/Leo%20Dilisnya.png');
+      expect(result.status).toBe('valid');
+      expect(result.url).toBe('https://assets.forge-vtt.com/xyz/cos-npc-portraits/Leo%20Dilisnya.png');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('returns broken when validateIconUrl HEAD-probe fails — the Majesto phantom-URL case', async () => {
+    const spy = vi.spyOn(featIcons, 'validateIconUrl').mockResolvedValue(false);
+    try {
+      // Majesto's actor.img pointed at this path; only `majesto_token.webp` actually existed.
+      const result = await classifyIconUrl('https://assets.forge-vtt.com/xyz/cos_tokens/majesto.webp');
+      expect(result.status).toBe('broken');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
