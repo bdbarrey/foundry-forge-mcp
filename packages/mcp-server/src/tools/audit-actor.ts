@@ -20,7 +20,7 @@ import { Logger } from '../logger.js';
 import { ErrorHandler } from '../utils/error-handler.js';
 import { parseReloadedStatblock, ReloadedStatblock, StatblockFeature } from '../parsers/reloaded-statblock.js';
 import { ParsedAction, AbilityKey } from '../parsers/action-description.js';
-import { extractStatblockSection, stripUsageSuffix } from './create-actor.js';
+import { extractStatblockSection, resolveTraitTemplate, stripUsageSuffix } from './create-actor.js';
 import { validateIconUrl } from './feat-icons.js';
 
 export type Severity = 'critical' | 'medium' | 'low';
@@ -188,6 +188,7 @@ export function compareActor(
   compareSkills(actor, sb, skills);
   compareSenses(actor, sb, senses);
   compareTraitsList(actor, sb, traitsList);
+  compareTraitEffects(actor, sb, traitsList);
 
   const features = compareFeatures(actor, sb);
   const actions = compareActions(actor, sb);
@@ -420,6 +421,78 @@ function compareTraitsList(
       status: (custom && custom.trim().length > 0) || valueArr.length > 0 ? 'match' : 'divergence',
       severity: 'low',
       note: 'textual; presence-only check',
+    });
+  }
+}
+
+/**
+ * Phase 2 TRAIT_RULES — verify Midi ActiveEffect `changes[].key` coverage on
+ * traits that match the registered TRAIT_TEMPLATES kinds. Fires only when the
+ * matched item is on the actor (missing-item is handled by compareFeatures).
+ *
+ * The keys are the Midi flag namespace each canonical writer (intent-writer
+ * writeTrait branches) emits. A registered trait whose actor item lacks one
+ * of these keys is mechanically broken — Pack Tactics with no
+ * `flags.midi-qol.advantage.attack.all` is just a description-only feat.
+ */
+export const TRAIT_REGISTRY_KEYS: Record<string, string[]> = {
+  'Pack Tactics': ['flags.midi-qol.advantage.attack.all'],
+  'Sunlight Sensitivity': [
+    'flags.midi-qol.disadvantage.attack.all',
+    'flags.midi-qol.disadvantage.ability.check.all',
+  ],
+  'Sunlight Hypersensitivity': [
+    'flags.midi-qol.OverTime.sunlightHypersensitivity',
+    'flags.midi-qol.disadvantage.attack.all',
+    'flags.midi-qol.disadvantage.ability.check.all',
+  ],
+  'Regeneration': ['flags.midi-qol.OverTime.regeneration'],
+  'Magic Resistance': ['flags.midi-qol.magicResistance.all'],
+};
+
+export function compareTraitEffects(
+  actor: ActorSnapshot,
+  sb: ReloadedStatblock,
+  out: AuditDivergence[],
+): void {
+  const items = actor.items ?? [];
+  if (items.length === 0) return;
+
+  const itemsByLcStem = new Map<string, ActorItemSnapshot>();
+  for (const it of items) {
+    const fullName = String(it.name ?? '');
+    if (!fullName) continue;
+    const stem = stripUsageSuffix(fullName).stem.toLowerCase();
+    if (stem) itemsByLcStem.set(stem, it);
+  }
+
+  for (const trait of sb.traits) {
+    const template = resolveTraitTemplate(trait.name);
+    if (!template) continue;
+    const requiredKeys = TRAIT_REGISTRY_KEYS[template.name];
+    if (!requiredKeys || requiredKeys.length === 0) continue;
+
+    const traitStem = stripUsageSuffix(trait.name).stem.toLowerCase();
+    const item = itemsByLcStem.get(traitStem);
+    if (!item) continue;
+
+    const presentKeys = new Set<string>();
+    for (const eff of item.effects ?? []) {
+      for (const change of eff?.changes ?? []) {
+        if (change?.key) presentKeys.add(String(change.key));
+      }
+    }
+
+    const missing = requiredKeys.filter(k => !presentKeys.has(k));
+    if (missing.length === 0) continue;
+
+    out.push({
+      field: `traits.${template.name}.changes`,
+      reloaded: requiredKeys,
+      foundry: Array.from(presentKeys),
+      status: presentKeys.size === 0 ? 'missing' : 'divergence',
+      severity: 'critical',
+      note: `missing midi flag keys: ${missing.join(', ')}`,
     });
   }
 }

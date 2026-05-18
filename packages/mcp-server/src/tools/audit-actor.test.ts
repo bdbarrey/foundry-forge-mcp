@@ -993,3 +993,119 @@ describe('classifyIconUrl — actor portrait probe (Arc H AAR 2026-05-17)', () =
     }
   });
 });
+
+describe('compareActor — TRAIT_RULES (Midi ActiveEffect changes[] verification)', () => {
+  const baseSystem = {
+    attributes: { hp: { max: 100 }, ac: { flat: 14 } },
+    abilities: {
+      str: { value: 16 }, dex: { value: 14 }, con: { value: 16 },
+      int: { value: 10 }, wis: { value: 12 }, cha: { value: 12 },
+    },
+  };
+
+  it('passes when Pack Tactics feat has the canonical Midi advantage flag', () => {
+    const sb = makeStatblock({
+      traits: [{ name: 'Pack Tactics', description: 'd', parsed: { damage: [] } }],
+    });
+    const actor = makeActor(baseSystem, [{
+      name: 'Pack Tactics',
+      type: 'feat',
+      effects: [{
+        name: 'Pack Tactics',
+        changes: [{ key: 'flags.midi-qol.advantage.attack.all', value: 'findNearby(...)', mode: 0 }],
+      }],
+    }]);
+    const audit = compareActor(actor, sb);
+    expect(audit.traitsList.find(d => d.field === 'traits.Pack Tactics.changes')).toBeUndefined();
+  });
+
+  it('flags Pack Tactics feat missing the Midi flag as critical', () => {
+    const sb = makeStatblock({
+      traits: [{ name: 'Pack Tactics', description: 'd', parsed: { damage: [] } }],
+    });
+    const actor = makeActor(baseSystem, [{
+      name: 'Pack Tactics',
+      type: 'feat',
+      effects: [], // no Midi changes — description-only feat masquerading as the trait
+    }]);
+    const audit = compareActor(actor, sb);
+    const div = audit.traitsList.find(d => d.field === 'traits.Pack Tactics.changes');
+    expect(div).toBeDefined();
+    expect(div!.severity).toBe('critical');
+    expect(div!.status).toBe('missing');
+    expect(div!.note).toContain('flags.midi-qol.advantage.attack.all');
+  });
+
+  it('flags Sunlight Hypersensitivity missing the OverTime damage tick as critical', () => {
+    const sb = makeStatblock({
+      traits: [{ name: 'Sunlight Hypersensitivity', description: 'd', parsed: { damage: [] } }],
+    });
+    // Has disadvantage flags but missing OverTime — Volenta 2026-05-02 bug shape.
+    const actor = makeActor(baseSystem, [{
+      name: 'Sunlight Hypersensitivity',
+      type: 'feat',
+      effects: [{
+        changes: [
+          { key: 'flags.midi-qol.disadvantage.attack.all', value: '1', mode: 0 },
+          { key: 'flags.midi-qol.disadvantage.ability.check.all', value: '1', mode: 0 },
+        ],
+      }],
+    }]);
+    const audit = compareActor(actor, sb);
+    const div = audit.traitsList.find(d => d.field === 'traits.Sunlight Hypersensitivity.changes');
+    expect(div).toBeDefined();
+    expect(div!.severity).toBe('critical');
+    expect(div!.status).toBe('divergence');
+    expect(div!.note).toContain('flags.midi-qol.OverTime.sunlightHypersensitivity');
+  });
+
+  it('passes Magic Resistance with canonical key', () => {
+    const sb = makeStatblock({
+      traits: [{ name: 'Magic Resistance', description: 'd', parsed: { damage: [] } }],
+    });
+    const actor = makeActor(baseSystem, [{
+      name: 'Magic Resistance',
+      type: 'feat',
+      effects: [{ changes: [{ key: 'flags.midi-qol.magicResistance.all', value: '1', mode: 0 }] }],
+    }]);
+    const audit = compareActor(actor, sb);
+    expect(audit.traitsList.find(d => d.field === 'traits.Magic Resistance.changes')).toBeUndefined();
+  });
+
+  it('passes Regeneration with canonical OverTime key', () => {
+    const sb = makeStatblock({
+      traits: [{ name: 'Regeneration', description: 'regains 10 hit points', parsed: { damage: [] } }],
+    });
+    const actor = makeActor(baseSystem, [{
+      name: 'Regeneration',
+      type: 'feat',
+      effects: [{ changes: [{ key: 'flags.midi-qol.OverTime.regeneration', value: 'turn=start,damageRoll=10,...', mode: 0 }] }],
+    }]);
+    const audit = compareActor(actor, sb);
+    expect(audit.traitsList.find(d => d.field === 'traits.Regeneration.changes')).toBeUndefined();
+  });
+
+  it('skips description-only traits (not in registry) — no false positive', () => {
+    const sb = makeStatblock({
+      traits: [{ name: 'Close Quarters Fighter', description: 'narrative only', parsed: { damage: [] } }],
+    });
+    const actor = makeActor(baseSystem, [{
+      name: 'Close Quarters Fighter',
+      type: 'feat',
+      effects: [], // intentionally no Midi changes — description-only is fine
+    }]);
+    const audit = compareActor(actor, sb);
+    expect(audit.traitsList.find(d => d.field?.startsWith('traits.Close Quarters Fighter'))).toBeUndefined();
+  });
+
+  it('does not fire when the matched item is missing (compareFeatures already reports that)', () => {
+    const sb = makeStatblock({
+      traits: [{ name: 'Pack Tactics', description: 'd', parsed: { damage: [] } }],
+    });
+    const actor = makeActor(baseSystem, []); // no items at all
+    const audit = compareActor(actor, sb);
+    expect(audit.traitsList.find(d => d.field === 'traits.Pack Tactics.changes')).toBeUndefined();
+    // missingFromActor is the appropriate signal here.
+    expect(audit.features.missingFromActor).toContain('Pack Tactics');
+  });
+});
