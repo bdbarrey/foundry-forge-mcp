@@ -1635,16 +1635,42 @@ export class AuditActorTools {
       const actor = this.normalizeActorSnapshot(actorRaw, identifier);
 
       if (input.actor_only) {
+        // Arc I AAR 2026-05-19: auto-resolve expected_portrait_canon from
+        // the vault NPC's frontmatter when the caller didn't pass it
+        // explicitly AND icon validation is on. The pre-existing flow
+        // only ran the canon-match check when the caller remembered to
+        // pass the param, which meant DDB-default portraits on canon-
+        // tagged NPCs went undetected (Baba Lysaga sat on the
+        // `2014-cos-baba-lysaga.webp` DDB default for the entire Arc I
+        // session). Vault read is best-effort; if it can't resolve, the
+        // canon check just doesn't fire (status quo).
+        let canon = input.expected_portrait_canon;
+        let canonAutoResolved = false;
+        if (!canon && input.validate_icons) {
+          try {
+            const { readPortraitCanonFromVault } = await import('../utils/vault-reader.js');
+            const lookup = readPortraitCanonFromVault(actor.name);
+            if (lookup && lookup.portraitCanon) {
+              canon = lookup.portraitCanon;
+              canonAutoResolved = true;
+            }
+          } catch (vaultErr: any) {
+            this.logger.warn('Vault portrait_canon auto-lookup failed in audit', {
+              actor: actor.name,
+              error: vaultErr?.message,
+            });
+          }
+        }
+        const snapshot = await this.actorSnapshotSummary(actor, input.validate_icons, canon);
+        if (canonAutoResolved && snapshot && typeof snapshot === 'object') {
+          (snapshot as any).expectedPortraitCanonAutoResolved = canon;
+        }
         return {
           success: true,
           actor: { id: actor.id, name: actor.name },
           mode: 'actor_only',
           actor_only_reason: input.actor_only_reason ?? null,
-          snapshot: await this.actorSnapshotSummary(
-            actor,
-            input.validate_icons,
-            input.expected_portrait_canon,
-          ),
+          snapshot,
         };
       }
 

@@ -15,6 +15,7 @@ import { FoundryClient } from '../foundry-client.js';
 import { Logger } from '../logger.js';
 import { ErrorHandler } from '../utils/error-handler.js';
 import { CreateActorTools } from './create-actor.js';
+import { classifyIconUrl } from './audit-actor.js';
 
 export interface ApplyActorPortraitToolsOptions {
   foundryClient: FoundryClient;
@@ -153,11 +154,50 @@ export class ApplyActorPortraitTools {
 
       // Synthesize a minimal sb for the resolver — only `.name` is read, used
       // to build candidate name variants when `lookup.names` isn't overridden.
-      const portraitResult = await this.createActorTools.resolveAndApplyPortrait(
+      const portraitResult: any = await this.createActorTools.resolveAndApplyPortrait(
         actor,
         { name: actor.name } as any,
         portraitOptions,
       );
+
+      // Arc I AAR 2026-05-19: verify-after-write. The pre-existing flow
+      // returned `success: true` as soon as the update dispatch
+      // completed — but that says nothing about whether the resulting
+      // URL fetches. Lost a session's worth of debugging on Baba Lysaga
+      // / Abbot 2nd Form / Needle Blight whose portraits were never
+      // applied at all (silent skips) and on portraits applied to URLs
+      // that 404'd. Fix: HEAD-probe the resulting img / tokenImg via
+      // the same classifyIconUrl helper that audit-actor uses, surface
+      // status in the response, downgrade success to false on broken
+      // probes so callers can't misread dispatch as state.
+      const applied = portraitResult?.applied === true;
+      if (applied) {
+        const imgUrl: string | null = portraitResult?.portraitUrl ?? null;
+        const tokenUrl: string | null = portraitResult?.tokenUrl ?? null;
+        const imgStatus = await classifyIconUrl(imgUrl);
+        const tokenStatus = await classifyIconUrl(tokenUrl);
+        portraitResult.imgStatus = imgStatus;
+        portraitResult.tokenImgStatus = tokenStatus;
+        const broken: string[] = [];
+        if (imgStatus.status === 'broken' || imgStatus.status === 'missing') {
+          broken.push(`img (${imgStatus.status}): ${imgUrl ?? '<null>'}`);
+        }
+        if (tokenStatus.status === 'broken' || tokenStatus.status === 'missing') {
+          broken.push(`tokenImg (${tokenStatus.status}): ${tokenUrl ?? '<null>'}`);
+        }
+        if (broken.length > 0) {
+          return {
+            success: false,
+            actorId: actor.id,
+            actorName: actor.name,
+            portrait: portraitResult,
+            verification_warning:
+              'Portrait dispatch succeeded but resulting URL(s) failed HEAD-probe. ' +
+              'Actor field WAS written but the asset does not resolve. Fix the URL ' +
+              'or re-run with a corrected path/lookup. Broken: ' + broken.join('; '),
+          };
+        }
+      }
 
       return {
         success: true,

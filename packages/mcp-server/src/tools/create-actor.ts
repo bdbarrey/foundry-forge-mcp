@@ -1045,11 +1045,64 @@ export class CreateActorTools {
       //     lookup against a Forge folder (Beneos cos_tokens by default).
       //     Best-effort: failures don't fail the build — we surface them in
       //     `portraitResult` so the caller can retry / supply an explicit path.
+      //
+      //     Arc I AAR 2026-05-19: when the caller didn't pass `portrait`
+      //     explicitly, attempt to auto-resolve from the vault NPC's
+      //     `portrait_canon` frontmatter. This eliminates the
+      //     forgot-to-apply-portrait failure mode where actors landed
+      //     with DDB compendium defaults (Baba Lysaga's
+      //     `2014-cos-baba-lysaga.webp`) because the agent built the
+      //     actor and then never followed up with apply-actor-portrait.
+      //     Vault read is best-effort; if it fails (no env var, no file,
+      //     no `portrait_canon` field), we fall back to the caller's
+      //     `portrait` arg (which may be undefined, in which case the
+      //     resolver behaves as before).
+      let portraitArg = input.portrait;
+      let portraitAutoCanon: string | null = null;
+      if (!portraitArg) {
+        try {
+          const { readPortraitCanonFromVault } = await import('../utils/vault-reader.js');
+          const lookup = readPortraitCanonFromVault(newActor.name);
+          if (lookup && lookup.portraitCanon) {
+            portraitAutoCanon = lookup.portraitCanon;
+            if (lookup.portraitCanon === 'beneos') {
+              portraitArg = {
+                lookup: {
+                  folder: DEFAULT_BENEOS_TOKEN_FOLDER,
+                  recursive: true,
+                  minScore: PORTRAIT_MATCH_FLOOR,
+                },
+                convention: 'auto',
+              } as any;
+            } else if (lookup.portraitCanon === 'custom') {
+              // Klein-generated custom portrait lives at
+              // cos-npc-portraits/<Display Name>.png (capitalisation +
+              // spaces preserved). Apply as explicit path; the URL is
+              // assembled by Foundry from the Forge asset key.
+              const fileBase = encodeURIComponent(newActor.name);
+              portraitArg = {
+                path: `cos-npc-portraits/${fileBase}.png`,
+                convention: 'single',
+              } as any;
+            }
+            // 'needs-upgrade' → intentionally leave portraitArg undefined
+            // so the compendium-base default stays as the placeholder.
+          }
+        } catch (vaultErr: any) {
+          this.logger.warn('Vault portrait_canon auto-lookup failed; falling back', {
+            actor: newActor.name,
+            error: vaultErr?.message,
+          });
+        }
+      }
       const portraitResult = await this.resolveAndApplyPortrait(
         newActor,
         sb,
-        input.portrait,
+        portraitArg,
       );
+      if (portraitAutoCanon && portraitResult && typeof portraitResult === 'object') {
+        (portraitResult as any).autoResolvedCanon = portraitAutoCanon;
+      }
 
       // 11. Phase 3b extension: opt-in pruning of compendium-base feats not
       //     mentioned in Reloaded. Re-fetches actor items so flags on freshly
