@@ -1644,26 +1644,40 @@ export class AuditActorTools {
         // `2014-cos-baba-lysaga.webp` DDB default for the entire Arc I
         // session). Vault read is best-effort; if it can't resolve, the
         // canon check just doesn't fire (status quo).
+        //
+        // Phase 2 (2026-05-19, same session): vault-reader diagnostic
+        // trace exposed on the snapshot when validate_icons is on. After
+        // shipping the auto-resolve, the canon block STILL failed to
+        // appear and there was no signal as to why — env unset?
+        // dir missing? candidate file not present? Surfacing the diag
+        // through the response means the next misfire is debuggable
+        // from the tool output without needing log access.
         let canon = input.expected_portrait_canon;
         let canonAutoResolved = false;
+        let vaultDiag: any = undefined;
+        let vaultImportError: string | undefined;
         if (!canon && input.validate_icons) {
           try {
-            const { readPortraitCanonFromVault } = await import('../utils/vault-reader.js');
-            const lookup = readPortraitCanonFromVault(actor.name);
-            if (lookup && lookup.portraitCanon) {
-              canon = lookup.portraitCanon;
+            const { readPortraitCanonFromVaultDiag } = await import('../utils/vault-reader.js');
+            const out = readPortraitCanonFromVaultDiag(actor.name);
+            vaultDiag = out.diag;
+            if (out.result && out.result.portraitCanon) {
+              canon = out.result.portraitCanon;
               canonAutoResolved = true;
             }
           } catch (vaultErr: any) {
+            vaultImportError = vaultErr?.message ?? String(vaultErr);
             this.logger.warn('Vault portrait_canon auto-lookup failed in audit', {
               actor: actor.name,
-              error: vaultErr?.message,
+              error: vaultImportError,
             });
           }
         }
         const snapshot = await this.actorSnapshotSummary(actor, input.validate_icons, canon);
-        if (canonAutoResolved && snapshot && typeof snapshot === 'object') {
-          (snapshot as any).expectedPortraitCanonAutoResolved = canon;
+        if (snapshot && typeof snapshot === 'object') {
+          if (canonAutoResolved) (snapshot as any).expectedPortraitCanonAutoResolved = canon;
+          if (vaultDiag) (snapshot as any).vaultReaderDiag = vaultDiag;
+          if (vaultImportError) (snapshot as any).vaultReaderImportError = vaultImportError;
         }
         return {
           success: true,

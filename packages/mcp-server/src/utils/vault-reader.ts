@@ -149,24 +149,68 @@ function parsePortraitCanon(content: string): PortraitCanon | null {
  * is reachable, not to introduce a new failure mode when it isn't.
  */
 export function readPortraitCanonFromVault(npcName: string): VaultNpcLookup | null {
+  const diag = readPortraitCanonFromVaultDiag(npcName);
+  return diag.result;
+}
+
+/**
+ * Diagnostic-bearing variant — returns the same `result` as
+ * `readPortraitCanonFromVault` PLUS a `diag` trace of which resolution
+ * step succeeded, which paths were tried, and why each candidate failed.
+ * Surfaced through audit-actor's snapshot so silent vault-reader misses
+ * (Arc I AAR 2026-05-19 — cos-config.json shipped but auto-canon still
+ * not firing) can be debugged from the tool response instead of needing
+ * server-side log access.
+ */
+export interface VaultNpcLookupDiag {
+  result: VaultNpcLookup | null;
+  diag: {
+    envCosVaultNpcPath: string | null;
+    envObsidianVaultPath: string | null;
+    configVaultPath: string | null;
+    resolvedNpcDir: string | null;
+    dirExists: boolean;
+    candidatesTried: Array<{ filename: string; fullPath: string; existed: boolean; canon: string | null }>;
+  };
+}
+
+export function readPortraitCanonFromVaultDiag(npcName: string): VaultNpcLookupDiag {
+  const envExplicit = process.env.COS_VAULT_NPC_PATH ?? null;
+  const envVault = process.env.OBSIDIAN_VAULT_PATH ?? null;
+  const configVault = loadConfigVaultPath();
   const dir = resolveVaultNpcDir();
-  if (!dir) return null;
+  const diag: VaultNpcLookupDiag['diag'] = {
+    envCosVaultNpcPath: envExplicit && envExplicit.trim() ? envExplicit.trim() : null,
+    envObsidianVaultPath: envVault && envVault.trim() ? envVault.trim() : null,
+    configVaultPath: configVault,
+    resolvedNpcDir: dir,
+    dirExists: false,
+    candidatesTried: [],
+  };
+  if (!dir) return { result: null, diag };
   try {
-    if (!fs.existsSync(dir)) return null;
+    diag.dirExists = fs.existsSync(dir);
   } catch {
-    return null;
+    diag.dirExists = false;
   }
+  if (!diag.dirExists) return { result: null, diag };
   for (const filename of candidateFilenames(npcName)) {
     const filePath = path.join(dir, filename);
+    let existed = false;
+    let canon: PortraitCanon | null = null;
     try {
-      if (!fs.existsSync(filePath)) continue;
-      const content = fs.readFileSync(filePath, { encoding: 'utf-8' });
-      const canon = parsePortraitCanon(content);
-      return { filePath, portraitCanon: canon };
+      existed = fs.existsSync(filePath);
+      if (existed) {
+        const content = fs.readFileSync(filePath, { encoding: 'utf-8' });
+        canon = parsePortraitCanon(content);
+      }
     } catch {
-      // Continue trying remaining candidates rather than fail loudly.
-      continue;
+      existed = false;
+    }
+    diag.candidatesTried.push({ filename, fullPath: filePath, existed, canon });
+    if (existed) {
+      return { result: { filePath, portraitCanon: canon }, diag };
     }
   }
-  return null;
+  return { result: null, diag };
 }
