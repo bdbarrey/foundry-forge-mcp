@@ -27,6 +27,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 
 export type PortraitCanon = 'custom' | 'beneos' | 'needs-upgrade';
 
@@ -37,25 +38,73 @@ export interface VaultNpcLookup {
   portraitCanon: PortraitCanon | null;
 }
 
+// Resolution order for the NPC folder path (first hit wins). Env vars
+// win over the config file so a machine that already has OBSIDIAN_VAULT_PATH
+// set (e.g. the desktop WSL with ~/.hermes/.env) doesn't have to also
+// keep cos-config.json in sync. The config file is the fallback for
+// machines (e.g. the laptop) where env-side configuration is awkward.
+//
+//   1. COS_VAULT_NPC_PATH env var — explicit override, points at the
+//      NPC folder directly.
+//   2. OBSIDIAN_VAULT_PATH env var + standard layout under it
+//      (`<vaultPath>/personal/D&D/Curse of Strahd/03 - Character/NPC`).
+//   3. `cos-config.json` at the foundry-vtt-mcp repo root with
+//      `{ "vaultPath": "..." }`. Per-machine; gitignored. Same standard
+//      layout applies.
+//
+// All-null = no vault available; callers fall back to pre-existing
+// behavior (silent no-op).
+const STANDARD_NPC_SUBPATH = path.join(
+  'personal', 'D&D', 'Curse of Strahd', '03 - Character', 'NPC',
+);
+
+let cachedConfigVaultPath: string | null | undefined = undefined;
+
+function loadConfigVaultPath(): string | null {
+  if (cachedConfigVaultPath !== undefined) return cachedConfigVaultPath;
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    // dist/utils/vault-reader.js → up four to repo root.
+    // src/utils/vault-reader.ts → up four to repo root (ts-node fallback).
+    const candidates = [
+      path.resolve(here, '..', '..', '..', '..', 'cos-config.json'),
+      path.resolve(here, '..', '..', '..', 'cos-config.json'),
+    ];
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        const raw = fs.readFileSync(candidate, 'utf-8');
+        const parsed = JSON.parse(raw);
+        const vp = parsed?.vaultPath;
+        if (typeof vp === 'string' && vp.trim()) {
+          cachedConfigVaultPath = vp.trim();
+          return cachedConfigVaultPath;
+        }
+      }
+    }
+  } catch {
+    // Silent — cos-config.json is optional.
+  }
+  cachedConfigVaultPath = null;
+  return null;
+}
+
 function resolveVaultNpcDir(): string | null {
-  // Explicit override wins.
+  // 1. Explicit override.
   const explicit = process.env.COS_VAULT_NPC_PATH;
   if (explicit && explicit.trim()) {
     return explicit.trim();
   }
-  // Fall back to standard layout under OBSIDIAN_VAULT_PATH.
+  // 2. OBSIDIAN_VAULT_PATH env var.
   const vault = process.env.OBSIDIAN_VAULT_PATH;
-  if (!vault || !vault.trim()) {
-    return null;
+  if (vault && vault.trim()) {
+    return path.join(vault.trim(), STANDARD_NPC_SUBPATH);
   }
-  return path.join(
-    vault.trim(),
-    'personal',
-    'D&D',
-    'Curse of Strahd',
-    '03 - Character',
-    'NPC',
-  );
+  // 3. cos-config.json at repo root (fallback for machines without env).
+  const configVault = loadConfigVaultPath();
+  if (configVault) {
+    return path.join(configVault, STANDARD_NPC_SUBPATH);
+  }
+  return null;
 }
 
 function candidateFilenames(npcName: string): string[] {

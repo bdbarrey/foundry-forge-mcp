@@ -1,0 +1,4 @@
+{
+  "_comment": "Per-machine config for the mcp-server backend. Copy to cos-config.json (gitignored) and fill in your local vault path. Used as fallback when neither COS_VAULT_NPC_PATH nor OBSIDIAN_VAULT_PATH env vars are set. See packages/mcp-server/src/utils/vault-reader.ts for resolution order.",
+  "vaultPath": "C:\\Users\\b_bar\\path\\to\\vault"
+}
