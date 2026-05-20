@@ -15,9 +15,12 @@ node_modules/
 .env.production.local
 
 # Per-machine config for vault path (mcp-server vault-reader fallback).
-# Travels via the .example template; actual cos-config.json is gitignored
-# so each machine can point at its own vault location.
-cos-config.json
+# Tracked in git for this single-user fork; resolution chain in
+# vault-reader.ts puts env vars FIRST so a machine that prefers env-based
+# config (e.g. desktop WSL with OBSIDIAN_VAULT_PATH already in ~/.hermes/.env)
+# silently ignores the committed cos-config.json. Multi-developer
+# scenarios should add `cos-config.json` to .gitignore and use the
+# .example template instead.
 
 # Build Output
 dist/

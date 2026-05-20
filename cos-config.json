@@ -1,0 +1,4 @@
+{
+  "_comment": "Per-machine fallback for the mcp-server vault-reader. Used ONLY when COS_VAULT_NPC_PATH and OBSIDIAN_VAULT_PATH env vars are both absent. Desktop WSL has OBSIDIAN_VAULT_PATH set in ~/.hermes/.env so this file is ignored there. Laptop backend reads this file because its env doesn't have the path. Resolution chain lives in packages/mcp-server/src/utils/vault-reader.ts.",
+  "vaultPath": "C:\\vault"
+}
