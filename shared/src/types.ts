@@ -22,6 +22,13 @@ export interface CharacterInfo {
   name: string;
   type: string;
   img?: string;
+  /**
+   * v0.1.20: prototype token texture URL. Surfaced so audit-actor can detect
+   * portrait_canon divergences (e.g. beneos-tagged NPC whose token texture
+   * still points at a DDB Noble default after a build that used the wrong
+   * compendium base).
+   */
+  tokenImg?: string;
   system: Record<string, unknown>;
   items: CharacterItem[];
   effects: CharacterEffect[];

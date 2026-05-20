@@ -7,6 +7,7 @@ interface CharacterInfo {
   name: string;
   type: string;
   img?: string;
+  folder?: string | null;
   system: Record<string, unknown>;
   items: CharacterItem[];
   effects: CharacterEffect[];
@@ -217,6 +218,31 @@ interface CreatedActorInfo {
   sourcePackId: string;
   sourcePackLabel: string;
   img?: string;
+}
+
+/**
+ * A parsed-action-derived patch spec for addActorItemFromCompendium.
+ * Interpreted by ACTIVITY TYPE on the target item:
+ *   - `attack` activities get bonus / type / damage / range applied
+ *   - `save` activities get damage applied + custom DC/ability written
+ * Top-level `uses` is merged onto the item's system.uses.
+ */
+interface ActionPatchSpec {
+  attackBonus?: number;          // "+7" as a signed number (7 or -2)
+  attackType?: 'melee' | 'ranged';
+  damageParts?: Array<{ formula: string; type: string }>;
+  reach?: number;                // melee reach in feet
+  rangeNormal?: number;          // ranged normal range in feet
+  rangeLong?: number;            // ranged long range in feet
+  onSaveHalf?: boolean;          // set damage.onSave = 'half' on save activities
+  saveAbility?: string;          // dnd5e ability key (e.g. 'dex')
+  saveDc?: number;               // literal DC, overrides derivation
+  uses?: {
+    max?: number | string;
+    recovery?: Array<{ period: string; type?: string; formula?: string }>;
+    value?: number;
+    spent?: number;
+  };
 }
 
 interface CompendiumEntryFull {
@@ -1150,19 +1176,59 @@ export class FoundryDataAccess {
     }
 
     // Build character data structure
+    // v0.1.20: include prototype token texture URL so audit-actor can detect
+    // portrait_canon divergences (a beneos-canon NPC whose token still points
+    // at a DDB Noble default is the kind of regression the actor_only audit
+    // missed all session). actor.img already passes through.
+    const protoTokenSrc = (actor as any).prototypeToken?.texture?.src;
     const characterData: CharacterInfo = {
       id: actor.id || '',
       name: actor.name || '',
       type: actor.type,
       ...(actor.img ? { img: actor.img } : {}),
+      ...(protoTokenSrc ? { tokenImg: protoTokenSrc } : {}),
+      folder: (actor as any).folder?.name || null,
       system: this.sanitizeData((actor as any).system),
       items: actor.items.map(item => {
+        const itemAny = item as any;
+        // Phase 10A visibility patch (v0.1.12): expose item-level effects +
+        // flags so audit-actor can self-verify save→effect linkage and
+        // pipeline tools can read CPR / DDB / Midi flags.
+        //
+        // v0.1.13 fix: Foundry stores `eff.statuses` as a Set (not an Array).
+        // The original v0.1.12 used `Array.isArray(eff.statuses)` which
+        // returns false for Sets, leaving statuses empty in the serialized
+        // response. Live audit on SmokeTest-10A-v4 surfaced this:
+        // itemEffects[0].statuses was `[]` even though the Restrained effect
+        // was present on the item. Spread `[...iter]` works on any iterable
+        // (Set, Array, Map), so guard with `eff.statuses != null` instead.
+        const toArr = (v: any): any[] => {
+          if (v == null) return [];
+          if (Array.isArray(v)) return [...v];
+          if (typeof v[Symbol.iterator] === 'function') return [...v];
+          return [];
+        };
+        const effects = ((item as any).effects?.contents ?? []).map((eff: any) => ({
+          _id: eff._id ?? eff.id,
+          name: eff.name ?? eff.label ?? 'Unknown Effect',
+          ...(eff.img ? { img: eff.img } : {}),
+          ...(eff.icon ? { icon: eff.icon } : {}),
+          disabled: !!eff.disabled,
+          transfer: !!eff.transfer,
+          statuses: toArr(eff.statuses),
+          ...(eff.duration ? { duration: { ...eff.duration } } : {}),
+          ...(toArr(eff.changes).length > 0 ? { changes: toArr(eff.changes).map((c: any) => ({ ...c })) } : {}),
+          ...(eff.origin ? { origin: eff.origin } : {}),
+          ...(eff.flags ? { flags: this.sanitizeData(eff.flags) } : {}),
+        }));
         return {
           id: item.id,
           name: item.name,
           type: item.type,
           ...(item.img ? { img: item.img } : {}),
           system: this.sanitizeData(item.system),
+          ...(effects.length > 0 ? { effects } : {}),
+          ...(itemAny.flags ? { flags: this.sanitizeData(itemAny.flags) } : {}),
         };
       }),
       effects: actor.effects.map(effect => ({
@@ -2797,16 +2863,105 @@ export class FoundryDataAccess {
   }
 
   /**
-   * List all actors with basic information
+   * Build a slash-separated path for a Folder by walking its parent chain.
+   * Returns null if the document has no folder.
    */
-  async listActors(): Promise<Array<{ id: string; name: string; type: string; img?: string }>> {
+  private buildFolderPath(folder: any): string | null {
+    if (!folder) return null;
+    const segments: string[] = [];
+    let cursor: any = folder;
+    let safety = 32;
+    while (cursor && safety-- > 0) {
+      segments.unshift(cursor.name || '');
+      cursor = cursor.folder || null;
+    }
+    return segments.join('/');
+  }
 
-    return game.actors.map(actor => ({
-      id: actor.id || '',
-      name: actor.name || '',
-      type: actor.type,
-      ...(actor.img ? { img: actor.img } : {}),
-    }));
+  /**
+   * List all actors with basic information including folder path
+   */
+  async listActors(): Promise<Array<{ id: string; name: string; type: string; img?: string; folder?: string | null; folderPath?: string | null; folderId?: string | null }>> {
+
+    return game.actors.map(actor => {
+      const folder = (actor as any).folder || null;
+      return {
+        id: actor.id || '',
+        name: actor.name || '',
+        type: actor.type,
+        ...(actor.img ? { img: actor.img } : {}),
+        folder: folder?.name || null,
+        folderPath: this.buildFolderPath(folder),
+        folderId: folder?.id || null,
+      };
+    });
+  }
+
+  /**
+   * List Actor folders as a flat array enriched with path, parent info, and counts.
+   * Optional `subtree` filters to folders whose path starts with the given prefix
+   * (case-insensitive, matched on path segments).
+   */
+  async listActorFolders(options: { subtree?: string } = {}): Promise<Array<{
+    id: string;
+    name: string;
+    path: string;
+    parentPath: string | null;
+    parentId: string | null;
+    depth: number;
+    actorCount: number;
+    childFolderIds: string[];
+  }>> {
+    const allFolders: any[] = ((game.folders?.contents as any[]) || []).filter((f: any) => f.type === 'Actor');
+
+    // Pre-compute paths for all folders
+    const folderPaths = new Map<string, string>();
+    for (const f of allFolders) {
+      folderPaths.set(f.id, this.buildFolderPath(f) || '');
+    }
+
+    // Pre-compute actor counts per folder id
+    const actorCountByFolderId = new Map<string, number>();
+    for (const actor of game.actors) {
+      const fid = (actor as any).folder?.id;
+      if (!fid) continue;
+      actorCountByFolderId.set(fid, (actorCountByFolderId.get(fid) || 0) + 1);
+    }
+
+    // Pre-compute child folder ids per parent id
+    const childIdsByParentId = new Map<string | null, string[]>();
+    for (const f of allFolders) {
+      const parentId = (f as any).folder?.id || null;
+      const list = childIdsByParentId.get(parentId) || [];
+      list.push(f.id);
+      childIdsByParentId.set(parentId, list);
+    }
+
+    let result = allFolders.map((f: any) => {
+      const parentFolder = f.folder || null;
+      const path = folderPaths.get(f.id) || '';
+      return {
+        id: f.id,
+        name: f.name || '',
+        path,
+        parentPath: parentFolder ? (folderPaths.get(parentFolder.id) || null) : null,
+        parentId: parentFolder?.id || null,
+        depth: path ? path.split('/').length - 1 : 0,
+        actorCount: actorCountByFolderId.get(f.id) || 0,
+        childFolderIds: childIdsByParentId.get(f.id) || [],
+      };
+    });
+
+    if (options.subtree) {
+      const needle = options.subtree.toLowerCase().replace(/\/+$/, '');
+      result = result.filter((f: { path: string }) => {
+        const p = f.path.toLowerCase();
+        return p === needle || p.startsWith(needle + '/');
+      });
+    }
+
+    result.sort((a: { path: string }, b: { path: string }) => a.path.localeCompare(b.path));
+    return result;
   }
 
   /**
@@ -2945,9 +3100,35 @@ export class FoundryDataAccess {
         return obj.map(item => this.removeSensitiveFields(item, visited, depth + 1));
       }
 
+      // Handle Maps and Foundry Collections (which extend Map).
+      // These don't expose their entries as own properties, so Object.entries
+      // returns [] — we have to walk .entries() explicitly. This is what
+      // hid D&D 5e's item.system.activities (an ActivityCollection) from
+      // get-character-entity output.
+      if (obj instanceof Map) {
+        const sanitizedMap: any = {};
+        for (const [key, value] of obj.entries()) {
+          if (typeof key !== 'string' && typeof key !== 'number') continue;
+          sanitizedMap[String(key)] = this.removeSensitiveFields(value, visited, depth + 1);
+        }
+        return sanitizedMap;
+      }
+
+      // Sets serialize as {} via Object.entries (no own enumerable properties).
+      // dnd5e 5.x stores activity save.ability as a SetField (Set<string>),
+      // and without this branch every save activity readback shows
+      // ability={} — same shape as an empty Set, so the data looks broken
+      // even when it's correct. Emit the Set's contents as an array so the
+      // shape round-trips through JSON.
+      if (obj instanceof Set) {
+        return Array.from(obj.values()).map((item) =>
+          this.removeSensitiveFields(item, visited, depth + 1),
+        );
+      }
+
       // Create a new sanitized object
       const sanitized: any = {};
-      
+
       for (const [key, value] of Object.entries(obj)) {
         // Skip sensitive and problematic fields entirely
         if (this.isSensitiveOrProblematicField(key)) {
@@ -2957,6 +3138,19 @@ export class FoundryDataAccess {
         // Skip most private properties except essential ones
         if (key.startsWith('_') && !['_id', '_stats', '_source'].includes(key)) {
           continue;
+        }
+
+        // Deprecated dnd5e ability save (actor.system.abilities.X.save) triggers
+        // access warnings and slow getters. dnd5e 5.x activity save
+        // (item.system.activities.X.save = {ability, dc:{calculation,formula}})
+        // must be kept. Discriminator: activity save has a NESTED dc object;
+        // ability save does not. Checking `.ability` alone is unsafe — dnd5e 5.x
+        // ability save also exposes `.ability`, so that match would recurse into
+        // the deprecated proxy and stall on per-ability getters.
+        if (key === 'save' && value !== null && typeof value === 'object') {
+          const dc = (value as any).dc;
+          const looksLikeActivitySave = dc !== null && typeof dc === 'object';
+          if (!looksLikeActivitySave) continue;
         }
 
         // Recursively sanitize the value
@@ -2985,12 +3179,9 @@ export class FoundryDataAccess {
       'constructor', 'prototype', '__proto__', 'valueOf', 'toString'
     ];
 
-    // Skip deprecated ability save properties that trigger warnings
-    const deprecatedKeys = [
-      'save' // Skip the deprecated 'save' property on abilities
-    ];
-
-    return sensitiveKeys.includes(key) || problematicKeys.includes(key) || deprecatedKeys.includes(key);
+    // Deprecated-key handling for `save` is now shape-aware in removeSensitiveFields
+    // and safeJSONStringify — the blanket skip dropped activity save objects too.
+    return sensitiveKeys.includes(key) || problematicKeys.includes(key);
   }
 
   /**
@@ -2999,10 +3190,13 @@ export class FoundryDataAccess {
   private safeJSONStringify(obj: any): string {
     try {
       return JSON.stringify(obj, (key, value) => {
-        // Skip deprecated properties during JSON serialization
+        // Deprecated dnd5e ability save triggers access warnings. Activity save
+        // has a NESTED dc object; ability save does not — that's the safe
+        // discriminator (see removeSensitiveFields for the full reasoning).
         if (key === 'save' && typeof value === 'object' && value !== null) {
-          // If this looks like a deprecated ability save object, skip it
-          return undefined;
+          const dc = (value as any).dc;
+          const looksLikeActivitySave = dc !== null && typeof dc === 'object';
+          if (!looksLikeActivitySave) return undefined;
         }
         return value;
       });
@@ -3302,6 +3496,192 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Create a player-handout journal entry: one image page (Foundry-fetchable URL)
+   * + optional GM-only text page. Pairs with cos-pipeline scene generation, where
+   * the image lives on Forge and the URL is the page src.
+   *
+   * Player visibility intentionally defaults to GM-only — the DM controls reveal
+   * via Foundry's "Show to Players" action; pre-sharing happens by passing
+   * playersCanSee=true.
+   */
+  async createImageJournal(request: {
+    name: string;
+    imageUrl: string;
+    folderName?: string;
+    dmNote?: string;
+    playersCanSee?: boolean;
+  }): Promise<{ id: string; name: string; folderId: string | null; pageCount: number }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', {
+      quantity: 1,
+    });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Journal creation denied: ${permissionCheck.reason}`);
+    }
+
+    if (!request.name) throw new Error('name is required');
+    if (!request.imageUrl) throw new Error('imageUrl is required');
+
+    try {
+      const folderId = request.folderName
+        ? await this.getOrCreateFolder(request.folderName, 'JournalEntry')
+        : null;
+
+      const pages: any[] = [
+        {
+          type: 'image',
+          name: request.name,
+          src: request.imageUrl,
+        },
+      ];
+
+      if (request.dmNote && request.dmNote.trim().length > 0) {
+        pages.push({
+          type: 'text',
+          name: 'DM Notes',
+          text: { content: request.dmNote },
+        });
+      }
+
+      const journalData: any = {
+        name: request.name,
+        pages,
+        ownership: { default: request.playersCanSee ? 2 : 0 },
+        folder: folderId,
+      };
+
+      const journal = await JournalEntry.create(journalData);
+      if (!journal) {
+        throw new Error('JournalEntry.create returned null');
+      }
+
+      const result = {
+        id: journal.id,
+        name: journal.name || request.name,
+        folderId,
+        pageCount: pages.length,
+      };
+
+      this.auditLog('createImageJournal', request, 'success');
+      return result;
+    } catch (error) {
+      this.auditLog('createImageJournal', request, 'failure', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  /**
+   * Drop a Note document on a scene that links to an existing JournalEntry,
+   * so the DM can right-click → "Show Players" at the table to push the
+   * embedded image to player screens. Pairs with createImageJournal.
+   *
+   * pageId selection: caller may pass an explicit pageId; else we pick the
+   * first image page on the entry; else the first page; else null (note
+   * still works, just opens the entry root).
+   *
+   * Coordinates default to scene center if x/y omitted.
+   */
+  async placeSceneJournalNote(request: {
+    journalId: string;
+    sceneId?: string;
+    sceneName?: string;
+    pageId?: string;
+    x?: number;
+    y?: number;
+    label?: string;
+    iconSize?: number;
+    icon?: string;
+  }): Promise<{
+    noteId: string;
+    sceneId: string;
+    sceneName: string;
+    journalId: string;
+    journalName: string;
+    pageId: string | null;
+    x: number;
+    y: number;
+  }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Scene note creation denied: ${permissionCheck.reason}`);
+    }
+
+    if (!request.journalId) throw new Error('journalId is required');
+    if (!request.sceneId && !request.sceneName) {
+      throw new Error('Either sceneId or sceneName is required');
+    }
+
+    try {
+      const journal: any = game.journal.get(request.journalId);
+      if (!journal) {
+        throw new Error(`JournalEntry ${request.journalId} not found`);
+      }
+
+      let scene: any = null;
+      if (request.sceneId) {
+        scene = game.scenes?.get(request.sceneId);
+        if (!scene) throw new Error(`Scene with id ${request.sceneId} not found`);
+      } else if (request.sceneName) {
+        const target = request.sceneName.toLowerCase();
+        scene = game.scenes?.find((s: any) => (s.name || '').toLowerCase() === target);
+        if (!scene) throw new Error(`Scene named "${request.sceneName}" not found`);
+      }
+
+      let pageId: string | null = request.pageId || null;
+      if (!pageId) {
+        const pages: any[] = Array.from(journal.pages?.values?.() || journal.pages || []);
+        const imagePage = pages.find((p: any) => p.type === 'image');
+        pageId = imagePage?.id || pages[0]?.id || null;
+      }
+
+      // Default to true canvas center. scene.dimensions.width/height includes
+      // the 25% padding ring around the playable map; scene.width/height is
+      // just the raw image. Using raw width/height puts the note in the
+      // upper-left quarter of the canvas, not its visual center. Prefer
+      // dimensions and fall back to raw width only as a last resort.
+      const sceneWidth = scene.dimensions?.width || scene.width || 4000;
+      const sceneHeight = scene.dimensions?.height || scene.height || 3000;
+      const x = typeof request.x === 'number' ? request.x : Math.round(sceneWidth / 2);
+      const y = typeof request.y === 'number' ? request.y : Math.round(sceneHeight / 2);
+
+      const noteData: any = {
+        entryId: request.journalId,
+        x,
+        y,
+        text: request.label || journal.name || 'Handout',
+        iconSize: request.iconSize ?? 40,
+        icon: request.icon || 'icons/svg/book.svg',
+        global: false,
+      };
+      if (pageId) noteData.pageId = pageId;
+
+      const created = await scene.createEmbeddedDocuments('Note', [noteData]);
+      const note = Array.isArray(created) ? created[0] : created;
+      if (!note) {
+        throw new Error('Note creation returned no document');
+      }
+
+      this.auditLog('placeSceneJournalNote', request, 'success');
+      return {
+        noteId: note.id,
+        sceneId: scene.id,
+        sceneName: scene.name,
+        journalId: request.journalId,
+        journalName: journal.name,
+        pageId,
+        x,
+        y,
+      };
+    } catch (error) {
+      this.auditLog('placeSceneJournalNote', request, 'failure', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  /**
    * Create actors from compendium entries with custom names
    */
   async createActorFromCompendium(request: ActorCreationRequest): Promise<ActorCreationResult> {
@@ -3573,6 +3953,303 @@ export class FoundryDataAccess {
       this.auditLog('createActorFromCompendiumEntry', request, 'failure', error instanceof Error ? error.message : 'Unknown error');
       throw error;
     }
+  }
+
+  /**
+   * Duplicate an existing actor into a target folder with optional name override
+   */
+  async duplicateActor(request: {
+    sourceActorId?: string;
+    sourceActorName?: string;
+    newName?: string;
+    targetFolder: string;
+  }): Promise<{ success: boolean; actorId: string; actorName: string }> {
+    this.validateFoundryState();
+
+    const { sourceActorId, sourceActorName, newName, targetFolder } = request;
+
+    // Find source actor by ID or name
+    let sourceActor: Actor | undefined;
+    if (sourceActorId) {
+      sourceActor = game.actors.get(sourceActorId);
+    }
+    if (!sourceActor && sourceActorName) {
+      sourceActor = game.actors.find(a =>
+        a.name?.toLowerCase() === sourceActorName.toLowerCase()
+      );
+    }
+    if (!sourceActor) {
+      throw new Error(`Source actor not found: ${sourceActorId || sourceActorName}`);
+    }
+
+    // Get or create target folder
+    const folderId = await this.getOrCreateFolder(targetFolder, 'Actor');
+
+    // Build actor data from source
+    const sourceData = sourceActor.toObject() as any;
+    const actorData = {
+      name: newName || sourceData.name,
+      type: sourceData.type,
+      img: sourceData.img,
+      system: sourceData.system || {},
+      items: sourceData.items || [],
+      effects: sourceData.effects || [],
+      folder: folderId,
+      prototypeToken: sourceData.prototypeToken,
+    };
+
+    const newActor = await Actor.create(actorData);
+    if (!newActor) {
+      throw new Error(`Failed to duplicate actor "${sourceActor.name}"`);
+    }
+
+    this.auditLog('duplicateActor', request, 'success');
+    return {
+      success: true,
+      actorId: newActor.id || '',
+      actorName: newActor.name || '',
+    };
+  }
+
+  /**
+   * Update an existing actor's data using Foundry dot-notation updates
+   */
+  async updateActorData(request: {
+    actorId?: string;
+    actorName?: string;
+    updates: Record<string, any>;
+  }): Promise<{ success: boolean; actorId: string; actorName: string; updatedFields: string[] }> {
+    this.validateFoundryState();
+
+    const { actorId, actorName, updates } = request;
+
+    // Find actor by ID or name
+    let actor: Actor | undefined;
+    if (actorId) {
+      actor = game.actors.get(actorId);
+    }
+    if (!actor && actorName) {
+      actor = game.actors.find(a =>
+        a.name?.toLowerCase() === actorName.toLowerCase()
+      );
+    }
+    if (!actor) {
+      throw new Error(`Actor not found: ${actorId || actorName}`);
+    }
+
+    await actor.update(updates);
+
+    this.auditLog('updateActorData', request, 'success');
+    return {
+      success: true,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      updatedFields: Object.keys(updates),
+    };
+  }
+
+  /**
+   * Resolve an Actor by id or name. Throws if not found.
+   */
+  private resolveActor(request: { actorId?: string; actorName?: string }): Actor {
+    this.validateFoundryState();
+    let actor: Actor | undefined;
+    if (request.actorId) {
+      actor = game.actors.get(request.actorId);
+    }
+    if (!actor && request.actorName) {
+      const target = request.actorName.toLowerCase();
+      actor = game.actors.find(a => a.name?.toLowerCase() === target);
+    }
+    if (!actor) {
+      throw new Error(`Actor not found: ${request.actorId || request.actorName}`);
+    }
+    return actor;
+  }
+
+  /**
+   * Add items (features, spells, equipment) to an actor via createEmbeddedDocuments.
+   */
+  async addActorItems(request: {
+    actorId?: string;
+    actorName?: string;
+    items: Record<string, any>[];
+  }): Promise<{ success: boolean; actorId: string; actorName: string; added: Array<{ _id: string; name: string; type: string }> }> {
+    const actor = this.resolveActor(request);
+    if (!request.items || request.items.length === 0) {
+      throw new Error('items array is empty');
+    }
+    const created = await (actor as any).createEmbeddedDocuments('Item', request.items);
+    const added = (created || []).map((doc: any) => ({
+      _id: doc.id || doc._id,
+      name: doc.name,
+      type: doc.type,
+    }));
+    this.auditLog('addActorItems', { actor: actor.name, count: added.length }, 'success');
+    return {
+      success: true,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      added,
+    };
+  }
+
+  /**
+   * Copy an item from a compendium pack onto an actor in a single in-process
+   * step, applying a server-side patch spec before the item lands.
+   *
+   * Why this exists separately from addActorItems: the MCP-server-side "fetch
+   * full doc → clone in TS → send cloned blob back via addActorItems" round-trip
+   * ballooned the WebRTC wire payload to 10–50KB per item and consistently
+   * tripped Foundry's >10s `createEmbeddedDocuments` cost on copy-patched items,
+   * even though scratch-built 300-byte feat items landed in milliseconds.
+   *
+   * Here, the fetch + clone + patch + embed all happens inside Foundry, so wire
+   * traffic is just the small patchSpec. Matches the drag-drop-from-compendium
+   * code path the Foundry UI uses, which has no such payload problem.
+   *
+   * patchSpec is interpreted by activity TYPE (not id), mirroring how Reloaded
+   * statblocks shape their data: every `attack`-type activity gets
+   * bonus/type/damage/range applied; every `save`-type activity gets damage
+   * applied when the action is save-only. Save DC isn't settable in dnd5e 4.x
+   * (derived from actor at roll time) so we don't try.
+   */
+  async addActorItemFromCompendium(request: {
+    actorId?: string;
+    actorName?: string;
+    packId: string;
+    itemId: string;
+    renameTo?: string;
+    patchSpec?: ActionPatchSpec;
+    flagsPatch?: Record<string, any>;
+  }): Promise<{
+    success: boolean;
+    actorId: string;
+    actorName: string;
+    added: { _id: string; name: string; type: string } | null;
+  }> {
+    const actor = this.resolveActor(request);
+    if (!request.packId) throw new Error('packId is required');
+    if (!request.itemId) throw new Error('itemId is required');
+
+    const pack = game.packs.get(request.packId);
+    if (!pack) throw new Error(`Compendium pack not found: ${request.packId}`);
+    const sourceDoc = await (pack as any).getDocument(request.itemId);
+    if (!sourceDoc) throw new Error(`Item ${request.itemId} not found in pack ${request.packId}`);
+
+    // Foundry-side clone: toObject() gives us a fresh plain-data copy we can
+    // mutate safely. No WebRTC transit of the full doc.
+    const itemData: any = (sourceDoc as any).toObject();
+    delete itemData._id;
+
+    if (request.renameTo) itemData.name = request.renameTo;
+
+    if (request.flagsPatch) {
+      itemData.flags = (foundry.utils as any).mergeObject(itemData.flags ?? {}, request.flagsPatch);
+    }
+
+    // Top-level system patches (uses, etc.) can be applied pre-create safely.
+    // Activity-level patches MUST be applied via a follow-up update — dnd5e
+    // 5.x's createEmbeddedDocuments schema validation rebuilds activities from
+    // the ActivityCollection source and drops mutations made to the toObject()
+    // copy. Symptom without the split: uses land, save DC + damage.parts +
+    // attack bonus don't.
+    if (request.patchSpec) {
+      applyPatchSpecPreCreate(itemData, request.patchSpec);
+    }
+
+    const created = await (actor as any).createEmbeddedDocuments('Item', [itemData]);
+    const doc: any = created?.[0];
+
+    // Walk itemData (plain toObject() output) for activity IDs — doc.system.activities
+    // on a live Foundry Item is an ActivityCollection that sometimes returns empty
+    // under for-of, even though the activities did land in the persisted doc.
+    // itemData is the source-truth here and its activity IDs match the created doc.
+    if (doc && request.patchSpec) {
+      const newDocId: string = doc.id || doc._id;
+      const activityUpdate = buildActivityUpdateFromSourceData(newDocId, itemData, request.patchSpec);
+      if (activityUpdate) {
+        try {
+          await (actor as any).updateEmbeddedDocuments('Item', [activityUpdate]);
+        } catch (err: any) {
+          console.error(
+            `[${this.moduleId}] addActorItemFromCompendium post-create activity update failed`,
+            err,
+          );
+          // Stamp a diagnostic flag so callers can see the update was attempted + failed.
+          try {
+            await (actor as any).updateEmbeddedDocuments('Item', [{
+              _id: newDocId,
+              'flags.foundry-forge-mcp.activityUpdateError': String(err?.message ?? err),
+            }]);
+          } catch { /* nothing more to do */ }
+        }
+      }
+    }
+    this.auditLog(
+      'addActorItemFromCompendium',
+      { actor: actor.name, base: `${request.packId}/${request.itemId}`, renameTo: request.renameTo },
+      doc ? 'success' : 'failure',
+    );
+    return {
+      success: !!doc,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      added: doc ? { _id: doc.id || doc._id, name: doc.name, type: doc.type } : null,
+    };
+  }
+
+  /**
+   * Update existing items on an actor via updateEmbeddedDocuments.
+   * Each entry must include `_id`.
+   */
+  async updateActorItems(request: {
+    actorId?: string;
+    actorName?: string;
+    updates: Record<string, any>[];
+  }): Promise<{ success: boolean; actorId: string; actorName: string; updated: Array<{ _id: string; name: string }> }> {
+    const actor = this.resolveActor(request);
+    if (!request.updates || request.updates.length === 0) {
+      throw new Error('updates array is empty');
+    }
+    for (const u of request.updates) {
+      if (!u._id) throw new Error('each update entry must include `_id`');
+    }
+    const updated = await (actor as any).updateEmbeddedDocuments('Item', request.updates);
+    const report = (updated || []).map((doc: any) => ({
+      _id: doc.id || doc._id,
+      name: doc.name,
+    }));
+    this.auditLog('updateActorItems', { actor: actor.name, count: report.length }, 'success');
+    return {
+      success: true,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      updated: report,
+    };
+  }
+
+  /**
+   * Remove items from an actor via deleteEmbeddedDocuments.
+   */
+  async removeActorItems(request: {
+    actorId?: string;
+    actorName?: string;
+    itemIds: string[];
+  }): Promise<{ success: boolean; actorId: string; actorName: string; removed: string[] }> {
+    const actor = this.resolveActor(request);
+    if (!request.itemIds || request.itemIds.length === 0) {
+      throw new Error('itemIds array is empty');
+    }
+    const deleted = await (actor as any).deleteEmbeddedDocuments('Item', request.itemIds);
+    const removed = (deleted || []).map((doc: any) => doc.id || doc._id).filter(Boolean);
+    this.auditLog('removeActorItems', { actor: actor.name, count: removed.length }, 'success');
+    return {
+      success: true,
+      actorId: actor.id || '',
+      actorName: actor.name || '',
+      removed,
+    };
   }
 
   /**
@@ -4568,7 +5245,7 @@ export class FoundryDataAccess {
 
         // Send socket request to GM
         if (game.socket) {
-          game.socket.emit('module.foundry-mcp-bridge', {
+          game.socket.emit('module.foundry-forge-mcp', {
             type: 'requestMessageUpdate',
             buttonId: buttonId,
             userId: userId,
@@ -4978,7 +5655,7 @@ export class FoundryDataAccess {
         sort: 0,
         parent: null,
         flags: {
-          'foundry-mcp-bridge': {
+          'foundry-forge-mcp': {
             mcpGenerated: true,
             createdAt: new Date().toISOString(),
             questContext: type === 'JournalEntry' ? folderName : undefined
@@ -4998,7 +5675,7 @@ export class FoundryDataAccess {
   /**
    * List all scenes with filtering options
    */
-  async listScenes(options: { filter?: string; include_active_only?: boolean } = {}): Promise<any[]> {
+  async listScenes(options: { filter?: string; include_active_only?: boolean; folder_filter?: string; fields?: string[] } = {}): Promise<any[]> {
     this.validateFoundryState();
 
     try {
@@ -5017,23 +5694,43 @@ export class FoundryDataAccess {
         );
       }
 
-      // Map to consistent format
-      return scenes.map((scene: any) => ({
-        id: scene.id,
-        name: scene.name,
-        active: scene.active,
-        dimensions: {
-          width: scene.dimensions?.width || (scene as any).width || 0,
-          height: scene.dimensions?.height || (scene as any).height || 0
-        },
-        gridSize: scene.grid?.size || 100,
-        background: scene.background?.src || scene.img || '',
-        walls: scene.walls?.size || 0,
-        tokens: scene.tokens?.size || 0,
-        lighting: scene.lights?.size || 0,
-        sounds: scene.sounds?.size || 0,
-        navigation: scene.navigation || false
-      }));
+      // Filter by folder name if provided (case-insensitive exact match)
+      if (options.folder_filter) {
+        const folderLower = options.folder_filter.toLowerCase();
+        scenes = scenes.filter((scene: any) =>
+          (scene.folder?.name || '').toLowerCase() === folderLower
+        );
+      }
+
+      // Field projection: callers pass `fields: ["id","name","folder"]` to slim
+      // the payload (full shape is ~1.5 KB/scene with full background paths; on a
+      // Beneos-loaded CoS world that wedges the WebSocket bridge). Omitted or
+      // empty `fields` returns the full shape for backwards compat.
+      const wantFull = !options.fields || options.fields.length === 0;
+      const wanted = new Set(options.fields || []);
+      const include = (k: string) => wantFull || wanted.has(k);
+
+      return scenes.map((scene: any) => {
+        const out: any = {};
+        if (include('id')) out.id = scene.id;
+        if (include('name')) out.name = scene.name;
+        if (include('active')) out.active = scene.active;
+        if (include('folder')) out.folder = (scene as any).folder?.name || null;
+        if (include('dimensions')) {
+          out.dimensions = {
+            width: scene.dimensions?.width || (scene as any).width || 0,
+            height: scene.dimensions?.height || (scene as any).height || 0,
+          };
+        }
+        if (include('gridSize')) out.gridSize = scene.grid?.size || 100;
+        if (include('background')) out.background = scene.background?.src || scene.img || '';
+        if (include('walls')) out.walls = scene.walls?.size || 0;
+        if (include('tokens')) out.tokens = scene.tokens?.size || 0;
+        if (include('lighting')) out.lighting = scene.lights?.size || 0;
+        if (include('sounds')) out.sounds = scene.sounds?.size || 0;
+        if (include('navigation')) out.navigation = scene.navigation || false;
+        return out;
+      });
     } catch (error) {
       throw new Error(`Failed to list scenes: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -5591,7 +6288,7 @@ export class FoundryDataAccess {
             tokenIds.push(selfToken.id);
             resolvedTargetNames.push(actor.name);
           } else {
-            console.warn(`[foundry-mcp-bridge] No token found on scene for actor "${actor.name}" (self)`);
+            console.warn(`[foundry-forge-mcp] No token found on scene for actor "${actor.name}" (self)`);
           }
           continue;
         }
@@ -5607,14 +6304,14 @@ export class FoundryDataAccess {
           tokenIds.push(targetToken.id);
           resolvedTargetNames.push(targetToken.name || targetToken.actor?.name || targetIdentifier);
         } else {
-          console.warn(`[foundry-mcp-bridge] Target not found: "${targetIdentifier}"`);
+          console.warn(`[foundry-forge-mcp] Target not found: "${targetIdentifier}"`);
         }
       }
 
       // Set targets using Foundry's targeting system
       if (tokenIds.length > 0 && game.user) {
         await (game.user as any).updateTokenTargets(tokenIds);
-        console.log(`[foundry-mcp-bridge] Set targets: ${resolvedTargetNames.join(', ')}`);
+        console.log(`[foundry-forge-mcp] Set targets: ${resolvedTargetNames.join(', ')}`);
       }
     }
 
@@ -5648,34 +6345,34 @@ export class FoundryDataAccess {
 
         // Fire and forget - don't await, as dialogs block the promise
         itemAny.use(useOptions).catch((err: Error) => {
-          console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+          console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
         });
       } else if (typeof itemAny.toChat === 'function') {
         // PF2e and some other systems use toChat
         if (typeof itemAny.toMessage === 'function') {
           itemAny.toMessage(undefined, { create: true }).catch((err: Error) => {
-            console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+            console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
           });
         } else {
           itemAny.toChat().catch((err: Error) => {
-            console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+            console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
           });
         }
       } else if (typeof itemAny.roll === 'function') {
         // Some items have a roll method
         itemAny.roll().catch((err: Error) => {
-          console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+          console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
         });
       } else if (systemId === 'dsa5') {
         // DSA5 specific handling
         if (item.type === 'spell' || item.type === 'liturgy' || item.type === 'ceremony' || item.type === 'ritual') {
           if (typeof itemAny.postItem === 'function') {
             itemAny.postItem().catch((err: Error) => {
-              console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+              console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
             });
           } else if (typeof itemAny.setupEffect === 'function') {
             itemAny.setupEffect().catch((err: Error) => {
-              console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+              console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
             });
           } else {
             // Fallback: create a chat message describing the item
@@ -5689,7 +6386,7 @@ export class FoundryDataAccess {
         } else {
           if (typeof itemAny.postItem === 'function') {
             itemAny.postItem().catch((err: Error) => {
-              console.error(`[foundry-mcp-bridge] Error using item ${item.name}:`, err);
+              console.error(`[foundry-forge-mcp] Error using item ${item.name}:`, err);
             });
           }
         }
@@ -5747,4 +6444,122 @@ export class FoundryDataAccess {
     }
   }
 
+}
+
+/**
+ * Apply top-level system patches that dnd5e accepts at createEmbeddedDocuments
+ * time. Activity-level patches go through buildActivityUpdateFromSpec +
+ * updateEmbeddedDocuments (a post-create step); pre-create activity mutations
+ * are discarded by schema validation that rebuilds the ActivityCollection from
+ * the source document's activities field.
+ */
+function applyPatchSpecPreCreate(item: any, spec: ActionPatchSpec): void {
+  if (!item || typeof item !== 'object') return;
+  if (spec.uses) {
+    item.system = item.system ?? {};
+    item.system.uses = (foundry.utils as any).mergeObject(
+      item.system.uses ?? { spent: 0, max: '', recovery: [], value: 0, label: '' },
+      spec.uses,
+    );
+  }
+}
+
+/**
+ * Build an updateEmbeddedDocuments payload for activity-level patches. Walks
+ * the source data's activities (plain dict from toObject()) since activity IDs
+ * survive createEmbeddedDocuments — no need to read from the live doc, which
+ * exposes activities as an ActivityCollection that has been observed to
+ * iterate inconsistently post-create.
+ *
+ * Returns null when the spec has nothing activity-relevant.
+ */
+function buildActivityUpdateFromSourceData(
+  newDocId: string,
+  sourceData: any,
+  spec: ActionPatchSpec,
+): Record<string, any> | null {
+  const activities = sourceData?.system?.activities;
+  if (!activities || typeof activities !== 'object') return null;
+
+  const entries: Array<[string, any]> = Object.entries(activities);
+  if (entries.length === 0) return null;
+
+  const update: Record<string, any> = { _id: newDocId };
+  let hasPatch = false;
+  const hasAttackActivity = entries.some(([_, a]) => a?.type === 'attack');
+
+  for (const [activityId, activity] of entries) {
+    const type = activity?.type;
+    const base = `system.activities.${activityId}`;
+
+    if (type === 'attack') {
+      if (spec.attackBonus !== undefined) {
+        update[`${base}.attack.bonus`] = (spec.attackBonus >= 0 ? '+' : '') + spec.attackBonus;
+        update[`${base}.attack.flat`] = true;
+        hasPatch = true;
+      }
+      if (spec.attackType) {
+        update[`${base}.attack.type.value`] = spec.attackType;
+        hasPatch = true;
+      }
+      if (spec.damageParts && spec.damageParts.length > 0) {
+        update[`${base}.damage.parts`] = spec.damageParts.map(damagePartPayloadForModule);
+        hasPatch = true;
+      }
+      if (spec.reach !== undefined) {
+        update[`${base}.range.reach`] = spec.reach;
+        update[`${base}.range.units`] = 'ft';
+        hasPatch = true;
+      }
+      if (spec.rangeNormal !== undefined) {
+        update[`${base}.range.value`] = spec.rangeNormal;
+        if (spec.rangeLong !== undefined) update[`${base}.range.long`] = spec.rangeLong;
+        update[`${base}.range.units`] = 'ft';
+        hasPatch = true;
+      }
+    }
+
+    if (type === 'save') {
+      // dnd5e 5.x SaveActivity: save = { ability: SetField, dc: { calculation, formula } }.
+      // calculation="" + formula="<N>" = literal DC override. Write the whole
+      // save object (not dot-path fragments) so the SetField initializes properly.
+      if (spec.saveDc !== undefined || spec.saveAbility) {
+        update[`${base}.save`] = {
+          ability: spec.saveAbility ? [spec.saveAbility] : [],
+          dc: {
+            calculation: spec.saveDc !== undefined ? '' : 'spellcasting',
+            formula: spec.saveDc !== undefined ? String(spec.saveDc) : '',
+          },
+        };
+        hasPatch = true;
+      }
+      if (spec.damageParts && spec.damageParts.length > 0 && !hasAttackActivity) {
+        update[`${base}.damage.parts`] = spec.damageParts.map(damagePartPayloadForModule);
+        if (spec.onSaveHalf) update[`${base}.damage.onSave`] = 'half';
+        hasPatch = true;
+      }
+    }
+
+    if (type === 'damage' && spec.damageParts && spec.damageParts.length > 0) {
+      update[`${base}.damage.parts`] = spec.damageParts.map(damagePartPayloadForModule);
+      hasPatch = true;
+    }
+  }
+
+  // Diagnostic: if we're emitting a non-empty update, stamp a flag so the
+  // caller can confirm the post-create path ran. Without this there's no
+  // way to distinguish "code never executed" from "code executed but
+  // Foundry discarded the patch."
+  if (hasPatch) {
+    update['flags.foundry-forge-mcp.activityUpdateRan'] = true;
+  }
+
+  return hasPatch ? update : null;
+}
+
+function damagePartPayloadForModule(d: { formula: string; type: string }): any {
+  return {
+    custom: { enabled: true, formula: d.formula },
+    types: [d.type],
+  };
 }

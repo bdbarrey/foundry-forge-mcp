@@ -18,7 +18,7 @@ declare const ui: any;
 export class PF2eIndexBuilder implements IndexBuilder {
   private moduleId: string;
 
-  constructor(moduleId: string = 'foundry-mcp-bridge') {
+  constructor(moduleId: string = 'foundry-forge-mcp') {
     this.moduleId = moduleId;
   }
 

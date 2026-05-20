@@ -24,9 +24,11 @@
     "axios": "^1.6.0",
     "better-sqlite3": "^11.0.0",
     "dotenv": "^16.3.0",
-    "ws": "^8.14.0",
+    "form-data": "^4.0.5",
+    "node-html-parser": "^7.1.0",
     "werift": "^0.17.0",
     "winston": "^3.11.0",
+    "ws": "^8.14.0",
     "zod": "^3.22.0"
   },
   "devDependencies": {
@@ -48,5 +50,8 @@
     "foundry-vtt",
     "claude",
     "ai"
-  ]
+  ],
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "^4.60.2"
+  }
 }

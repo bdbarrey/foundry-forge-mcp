@@ -1,8 +1,8 @@
 {
-  "id": "foundry-mcp-bridge",
-  "title": "Foundry MCP Bridge",
-  "description": "Connect Foundry VTT to AI models through MCP protocol. Enable AI-powered actor creation, intelligent compendium search, campaign analysis, and interactive dice roll coordination. Supports Claude, local LLMs, and future AI models with comprehensive GM-only security.",
-  "version": "0.7.0",
+  "id": "foundry-forge-mcp",
+  "title": "Foundry Forge MCP",
+  "description": "Fork of adambdooley/foundry-vtt-mcp adding direct actor image (Forge URL) and embedded-document CRUD (add/update/remove items) for MCP-driven automation. Original module connects Foundry VTT to AI models via MCP; this fork extends the write surface for NPC portrait sync and stat-block patching workflows.",
+  "version": "0.1.20",
   "compatibility": {
     "minimum": "13",
     "verified": "13",
@@ -10,16 +10,20 @@
   },
   "authors": [
     {
-      "name": "Adam Dooley",
+      "name": "Ben Barrey",
+      "url": "https://github.com/bdbarrey"
+    },
+    {
+      "name": "Adam Dooley (original)",
       "email": "adambriandooley@gmail.com",
       "url": "https://github.com/adambdooley"
     }
   ],
-  "url": "https://github.com/adambdooley/foundry-vtt-mcp",
-  "bugs": "https://github.com/adambdooley/foundry-vtt-mcp/issues",
-  "changelog": "https://github.com/adambdooley/foundry-vtt-mcp/releases",
-  "readme": "https://github.com/adambdooley/foundry-vtt-mcp/blob/master/README.md",
-  "license": "https://github.com/adambdooley/foundry-vtt-mcp/blob/master/LICENSE",
+  "url": "https://github.com/bdbarrey/foundry-forge-mcp",
+  "bugs": "https://github.com/bdbarrey/foundry-forge-mcp/issues",
+  "changelog": "https://github.com/bdbarrey/foundry-forge-mcp/releases",
+  "readme": "https://github.com/bdbarrey/foundry-forge-mcp/blob/master/README.md",
+  "license": "https://github.com/bdbarrey/foundry-forge-mcp/blob/master/LICENSE",
   "esmodules": [
     "dist/main.js"
   ],
@@ -35,8 +39,8 @@
     }
   ],
   "socket": true,
-  "manifest": "https://raw.githubusercontent.com/adambdooley/foundry-vtt-mcp/master/packages/foundry-module/module.json",
-  "download": "https://github.com/adambdooley/foundry-vtt-mcp/releases/latest/download/foundry-vtt-mcp.zip",
+  "manifest": "https://github.com/bdbarrey/foundry-forge-mcp/releases/latest/download/module.json",
+  "download": "https://github.com/bdbarrey/foundry-forge-mcp/releases/latest/download/foundry-forge-mcp.zip",
   "protected": false,
   "coreTranslation": false,
   "library": false,

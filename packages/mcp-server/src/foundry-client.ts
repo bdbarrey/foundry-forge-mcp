@@ -55,10 +55,11 @@ export class FoundryClient {
   }
 
   async query(method: string, data?: any): Promise<any> {
-    if (!this.connector.isConnected()) {
-      throw new Error('Foundry VTT module not connected. Please ensure Foundry is running and the MCP Bridge module is enabled.');
-    }
-
+    // v0.1.19: do NOT short-circuit on isConnected here. The connector's
+    // query() now waits up to ~35s for the module's auto-reconnect logic
+    // before failing, and a pre-flight throw at this layer would prevent
+    // that wait from running. The connector raises its own clear error
+    // if the wait still ends in a closed transport.
     this.logger.debug('Sending query to Foundry module', { method, data });
 
     try {
@@ -73,7 +74,7 @@ export class FoundryClient {
   }
 
   ping(): Promise<any> {
-    return this.query('foundry-mcp-bridge.ping');
+    return this.query('foundry-forge-mcp.ping');
   }
 
   getConnectionInfo(): any {

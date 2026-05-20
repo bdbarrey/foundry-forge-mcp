@@ -23,6 +23,41 @@ export class QueryHandlers {
   }
 
   /**
+   * Apply page/pageSize to a list. pageSize=0 (or omitted) returns the full
+   * list with no envelope (preserves backwards compatibility). When pagination
+   * is requested, returns a `{ items, total, page, pageSize, totalPages, hasMore }`
+   * envelope so callers can stream large lists across calls without wedging
+   * the WebSocket bridge on a single oversized payload.
+   */
+  /**
+   * Build a pagination opts object that respects exactOptionalPropertyTypes —
+   * only includes keys when they have real values.
+   */
+  private pageOpts(data: { page?: number; pageSize?: number } = {}): { page?: number; pageSize?: number } {
+    const out: { page?: number; pageSize?: number } = {};
+    if (typeof data.page === 'number') out.page = data.page;
+    if (typeof data.pageSize === 'number') out.pageSize = data.pageSize;
+    return out;
+  }
+
+  private paginate<T>(items: T[], opts: { page?: number; pageSize?: number } = {}): T[] | { items: T[]; total: number; page: number; pageSize: number; totalPages: number; hasMore: boolean } {
+    const pageSize = Math.max(0, Math.floor(opts.pageSize ?? 0));
+    if (pageSize === 0) return items;
+    const total = items.length;
+    const page = Math.max(1, Math.floor(opts.page ?? 1));
+    const start = (page - 1) * pageSize;
+    const slice = items.slice(start, start + pageSize);
+    return {
+      items: slice,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+      hasMore: start + pageSize < total,
+    };
+  }
+
+  /**
    * Register all query handlers in CONFIG.queries
    */
   registerHandlers(): void {
@@ -31,6 +66,7 @@ export class QueryHandlers {
     // Character/Actor queries
     CONFIG.queries[`${modulePrefix}.getCharacterInfo`] = this.handleGetCharacterInfo.bind(this);
     CONFIG.queries[`${modulePrefix}.listActors`] = this.handleListActors.bind(this);
+    CONFIG.queries[`${modulePrefix}.listActorFolders`] = this.handleListActorFolders.bind(this);
 
     // Compendium queries
     CONFIG.queries[`${modulePrefix}.searchCompendium`] = this.handleSearchCompendium.bind(this);
@@ -54,6 +90,8 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.addActorsToScene`] = this.handleAddActorsToScene.bind(this);
     CONFIG.queries[`${modulePrefix}.validateWritePermissions`] = this.handleValidateWritePermissions.bind(this);
     CONFIG.queries[`${modulePrefix}.createJournalEntry`] = this.handleCreateJournalEntry.bind(this);
+    CONFIG.queries[`${modulePrefix}.createImageJournal`] = this.handleCreateImageJournal.bind(this);
+    CONFIG.queries[`${modulePrefix}.placeSceneJournalNote`] = this.handlePlaceSceneJournalNote.bind(this);
     CONFIG.queries[`${modulePrefix}.listJournals`] = this.handleListJournals.bind(this);
     CONFIG.queries[`${modulePrefix}.getJournalContent`] = this.handleGetJournalContent.bind(this);
     CONFIG.queries[`${modulePrefix}.getJournalPageContent`] = this.handleGetJournalPageContent.bind(this);
@@ -91,6 +129,15 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.check-map-status`] = this.handleCheckMapStatus.bind(this);
     CONFIG.queries[`${modulePrefix}.cancel-map-job`] = this.handleCancelMapJob.bind(this);
     CONFIG.queries[`${modulePrefix}.upload-generated-map`] = this.handleUploadGeneratedMap.bind(this);
+
+    // Actor management queries
+    CONFIG.queries[`${modulePrefix}.duplicateActor`] = this.handleDuplicateActor.bind(this);
+    CONFIG.queries[`${modulePrefix}.uploadActorImage`] = this.handleUploadActorImage.bind(this);
+    CONFIG.queries[`${modulePrefix}.updateActorData`] = this.handleUpdateActorData.bind(this);
+    CONFIG.queries[`${modulePrefix}.addActorItems`] = this.handleAddActorItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.addActorItemFromCompendium`] = this.handleAddActorItemFromCompendium.bind(this);
+    CONFIG.queries[`${modulePrefix}.updateActorItems`] = this.handleUpdateActorItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.removeActorItems`] = this.handleRemoveActorItems.bind(this);
 
     // Item usage queries
     CONFIG.queries[`${modulePrefix}.useItem`] = this.handleUseItem.bind(this);
@@ -166,11 +213,13 @@ export class QueryHandlers {
   }
 
   /**
-   * Handle list actors request
+   * Handle list actors request with optional filters:
+   *  - type: actor type (e.g., "npc", "character")
+   *  - folder: case-insensitive exact match against folder name OR full folder path
+   *  - nameContains: case-insensitive substring match against actor name
    */
-  private async handleListActors(data: { type?: string }): Promise<any> {
+  private async handleListActors(data: { type?: string; folder?: string; nameContains?: string; page?: number; pageSize?: number }): Promise<any> {
     try {
-      // SECURITY: Silent GM validation
       const gmCheck = this.validateGMAccess();
       if (!gmCheck.allowed) {
         return { error: 'Access denied', success: false };
@@ -178,16 +227,59 @@ export class QueryHandlers {
 
       this.dataAccess.validateFoundryState();
 
-      const actors = await this.dataAccess.listActors();
-      
-      // Filter by type if specified
+      let actors = await this.dataAccess.listActors();
+
       if (data.type) {
-        return actors.filter(actor => actor.type === data.type);
+        actors = actors.filter(actor => actor.type === data.type);
       }
 
-      return actors;
+      if (data.folder) {
+        const needle = data.folder.toLowerCase().replace(/\/+$/, '');
+        actors = actors.filter(actor => {
+          const name = (actor.folder || '').toLowerCase();
+          const path = (actor.folderPath || '').toLowerCase();
+          if (name === needle || path === needle) return true;
+          // Treat folder filter as a path prefix so "02 - My Actors" matches everything inside
+          return path.startsWith(needle + '/');
+        });
+      }
+
+      if (data.nameContains) {
+        const needle = data.nameContains.toLowerCase();
+        actors = actors.filter(actor => actor.name.toLowerCase().includes(needle));
+      }
+
+      return this.paginate(actors, this.pageOpts(data));
     } catch (error) {
       throw new Error(`Failed to list actors: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Handle list actor folders request — returns the actor folder tree as a flat array.
+   * Optional `subtree` filters to a path prefix (case-insensitive segment match).
+   */
+  private async handleListActorFolders(data: { subtree?: string; page?: number; pageSize?: number } = {}): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      const opts: { subtree?: string } = {};
+      if (data?.subtree) opts.subtree = data.subtree;
+      const folders = await this.dataAccess.listActorFolders(opts);
+      const paged = this.paginate(folders, this.pageOpts(data));
+      // Backwards-compat shape: unpaginated path returns { folders, total }.
+      // Paginated path returns { folders, total, page, pageSize, totalPages, hasMore }.
+      if (Array.isArray(paged)) {
+        return { folders: paged, total: paged.length };
+      }
+      return { folders: paged.items, total: paged.total, page: paged.page, pageSize: paged.pageSize, totalPages: paged.totalPages, hasMore: paged.hasMore };
+    } catch (error) {
+      throw new Error(`Failed to list actor folders: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -508,9 +600,65 @@ export class QueryHandlers {
   }
 
   /**
+   * Handle player-handout image journal creation
+   */
+  async handleCreateImageJournal(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      if (!data.name) throw new Error('name is required');
+      if (!data.imageUrl) throw new Error('imageUrl is required');
+
+      return await this.dataAccess.createImageJournal({
+        name: data.name,
+        imageUrl: data.imageUrl,
+        folderName: data.folderName,
+        dmNote: data.dmNote,
+        playersCanSee: data.playersCanSee,
+      });
+    } catch (error) {
+      throw new Error(`Failed to create image journal: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Handle place-scene-journal-note request: drop a Note linking journalId on a scene
+   */
+  async handlePlaceSceneJournalNote(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      if (!data.journalId) throw new Error('journalId is required');
+      if (!data.sceneId && !data.sceneName) {
+        throw new Error('Either sceneId or sceneName is required');
+      }
+
+      return await this.dataAccess.placeSceneJournalNote({
+        journalId: data.journalId,
+        sceneId: data.sceneId,
+        sceneName: data.sceneName,
+        pageId: data.pageId,
+        x: data.x,
+        y: data.y,
+        label: data.label,
+        iconSize: data.iconSize,
+        icon: data.icon,
+      });
+    } catch (error) {
+      throw new Error(`Failed to place scene journal note: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
    * Handle list journals request
    */
-  async handleListJournals(): Promise<any> {
+  async handleListJournals(data: { nameContains?: string; page?: number; pageSize?: number } = {}): Promise<any> {
     try {
       // SECURITY: Silent GM validation
       const gmCheck = this.validateGMAccess();
@@ -519,7 +667,14 @@ export class QueryHandlers {
       }
 
       this.dataAccess.validateFoundryState();
-      return await this.dataAccess.listJournals();
+      let journals = await this.dataAccess.listJournals();
+
+      if (data?.nameContains) {
+        const needle = data.nameContains.toLowerCase();
+        journals = journals.filter(j => (j.name || '').toLowerCase().includes(needle));
+      }
+
+      return this.paginate(journals, this.pageOpts(data));
     } catch (error) {
       throw new Error(`Failed to list journals: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -844,7 +999,8 @@ export class QueryHandlers {
       }
 
       this.dataAccess.validateFoundryState();
-      return await this.dataAccess.listScenes(data);
+      const scenes = await this.dataAccess.listScenes(data || {});
+      return this.paginate(scenes, this.pageOpts(data));
     } catch (error) {
       throw new Error(`Failed to list scenes: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -1121,6 +1277,213 @@ export class QueryHandlers {
         error: error.message || 'Failed to upload generated map',
         success: false
       };
+    }
+  }
+
+  // ===== ACTOR MANAGEMENT HANDLERS =====
+
+  /**
+   * Handle duplicating an actor into a target folder
+   */
+  private async handleDuplicateActor(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      return await this.dataAccess.duplicateActor({
+        sourceActorId: data.sourceActorId,
+        sourceActorName: data.sourceActorName,
+        newName: data.newName,
+        targetFolder: data.targetFolder,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to duplicate actor:`, error);
+      return { error: error.message || 'Failed to duplicate actor', success: false };
+    }
+  }
+
+  /**
+   * Handle uploading an image for an actor (base64 → FilePicker)
+   * If actorId is provided, also updates the actor's portrait and token image
+   */
+  private async handleUploadActorImage(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      if (!data.filename || typeof data.filename !== 'string') {
+        throw new Error('Filename is required and must be a string');
+      }
+      if (!data.imageData || typeof data.imageData !== 'string') {
+        throw new Error('Image data is required and must be a base64 string');
+      }
+
+      // Validate filename for security (prevent path traversal)
+      const safeFilename = data.filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+      if (!safeFilename.endsWith('.png') && !safeFilename.endsWith('.jpg') && !safeFilename.endsWith('.jpeg') && !safeFilename.endsWith('.webp')) {
+        throw new Error('Only PNG, JPEG, and WebP images are supported');
+      }
+
+      // Convert base64 to Blob
+      const byteCharacters = atob(data.imageData);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const mimeType = safeFilename.endsWith('.png') ? 'image/png' : safeFilename.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
+      const blob = new Blob([byteArray], { type: mimeType });
+      const file = new File([blob], safeFilename, { type: mimeType });
+
+      // Upload to world-specific npc-portraits folder
+      const worldId = (game as any).world?.id || 'unknown-world';
+      const uploadPath = `worlds/${worldId}/npc-portraits`;
+      try {
+        const FilePickerAPI = (globalThis as any).foundry?.applications?.apps?.FilePicker?.implementation || (globalThis as any).FilePicker;
+        await FilePickerAPI.createDirectory('data', uploadPath, { bucket: null });
+      } catch (dirError: any) {
+        if (!dirError.message?.includes('EEXIST') && !dirError.message?.includes('already exists')) {
+          console.warn(`[${MODULE_ID}] Directory creation warning:`, dirError.message);
+        }
+      }
+
+      const FilePickerAPI = (globalThis as any).foundry?.applications?.apps?.FilePicker?.implementation || (globalThis as any).FilePicker;
+      const response = await FilePickerAPI.upload('data', uploadPath, file, {}, { notify: false });
+
+      const imagePath = response.path;
+
+      // If actorId provided, update the actor's portrait and token image
+      if (data.actorId) {
+        const actor = game.actors.get(data.actorId);
+        if (actor) {
+          await actor.update({
+            img: imagePath,
+            'prototypeToken.texture.src': imagePath,
+          });
+        }
+      }
+
+      return {
+        success: true,
+        path: imagePath,
+        filename: safeFilename,
+        actorUpdated: !!data.actorId,
+        message: `Image uploaded to ${imagePath}${data.actorId ? ' and applied to actor' : ''}`,
+      };
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to upload actor image:`, error);
+      return { error: error.message || 'Failed to upload actor image', success: false };
+    }
+  }
+
+  /**
+   * Handle updating actor data with Foundry dot-notation updates
+   */
+  private async handleUpdateActorData(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      return await this.dataAccess.updateActorData({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        updates: data.updates,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to update actor data:`, error);
+      return { error: error.message || 'Failed to update actor data', success: false };
+    }
+  }
+
+  /**
+   * Handle adding items (features, spells, equipment) to an actor
+   */
+  private async handleAddActorItems(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      return await this.dataAccess.addActorItems({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        items: data.items,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to add actor items:`, error);
+      return { error: error.message || 'Failed to add actor items', success: false };
+    }
+  }
+
+  /**
+   * Handle copy-patch-add of a compendium item onto an actor in one step.
+   * Avoids the WebRTC payload bloat of fetching+cloning item docs server-side
+   * (see data-access.ts:addActorItemFromCompendium for full rationale).
+   */
+  private async handleAddActorItemFromCompendium(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      return await this.dataAccess.addActorItemFromCompendium({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        packId: data.packId,
+        itemId: data.itemId,
+        renameTo: data.renameTo,
+        patchSpec: data.patchSpec,
+        flagsPatch: data.flagsPatch,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to add actor item from compendium:`, error);
+      return { error: error.message || 'Failed to add actor item from compendium', success: false };
+    }
+  }
+
+  /**
+   * Handle updating items on an actor
+   */
+  private async handleUpdateActorItems(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      return await this.dataAccess.updateActorItems({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        updates: data.updates,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to update actor items:`, error);
+      return { error: error.message || 'Failed to update actor items', success: false };
+    }
+  }
+
+  /**
+   * Handle removing items from an actor
+   */
+  private async handleRemoveActorItems(data: any): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+      return await this.dataAccess.removeActorItems({
+        actorId: data.actorId,
+        actorName: data.actorName,
+        itemIds: data.itemIds,
+      });
+    } catch (error: any) {
+      console.error(`[${MODULE_ID}] Failed to remove actor items:`, error);
+      return { error: error.message || 'Failed to remove actor items', success: false };
     }
   }
 

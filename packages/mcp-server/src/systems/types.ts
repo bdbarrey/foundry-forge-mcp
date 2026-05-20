@@ -126,7 +126,7 @@ export interface SystemAdapter {
 
   /**
    * Extract character statistics from actor data
-   * Used by get-character and list-characters tools
+   * Used by get-character and list-actors tools
    * @param actorData - Raw Foundry actor data
    */
   extractCharacterStats(actorData: any): any;

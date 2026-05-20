@@ -1,8 +1,19 @@
 import { z } from 'zod';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { getFoundryDataDir, getDefaultComfyUIDir } from './utils/platform.js';
 
-dotenv.config();
+// Load env in priority order (first hit wins — dotenv doesn't overwrite existing vars):
+//   1. ~/.hermes/.env (BenOS shared secrets on desktop WSL)
+//   2. project-root .env (laptop Claude Desktop)
+//   3. project-root .env.example (fallback/template)
+import { homedir } from 'os';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(__dirname, '..', '..', '..');
+dotenv.config({ path: path.join(homedir(), '.hermes', '.env') });
+dotenv.config({ path: path.resolve(projectRoot, '.env') });
+dotenv.config({ path: path.resolve(projectRoot, '.env.example') });
 
 const ConfigSchema = z.object({
   logLevel: z.enum(['error', 'warn', 'info', 'debug']).default('info'),

@@ -23,6 +23,7 @@ import { SceneTools } from './tools/scene.js';
 import { ActorCreationTools } from './tools/actor-creation.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
+import { HandoutTools } from './tools/handout-creation.js';
 
 import { DiceRollTools } from './tools/dice-roll.js';
 
@@ -34,11 +35,33 @@ import { MapGenerationTools } from './tools/map-generation.js';
 
 import { TokenManipulationTools } from './tools/token-manipulation.js';
 
+
+import { FoldersTools } from './tools/folders.js';
+
+import { CreateActorTools } from './tools/create-actor.js';
+
+import { AuditActorTools } from './tools/audit-actor.js';
+
+import { ApplyActorPortraitTools } from './tools/apply-actor-portrait.js';
+
+import { LinkActorPhasesTools } from './tools/link-actor-phases.js';
+
+import { ApplyFeatIconsTools } from './tools/apply-feat-icons.js';
+
+import { ParseReloadedSourceTools } from './tools/parse-reloaded-source.js';
+
+import { ForgeAssetsClient } from './forge-assets-client.js';
+
 import { DSA5CharacterCreator } from './systems/dsa5/character-creator.js';
 
-const CONTROL_HOST = '127.0.0.1';
+// Listen address for the control channel. Defaults to 127.0.0.1 so the backend
+// is unreachable from the network. Override FOUNDRY_MCP_BACKEND_BIND to a
+// routable address (e.g. the host's Tailscale IP, or 0.0.0.0 to bind all
+// interfaces) to let a wrapper on another machine drive this backend.
+// SECURITY: the control channel has no auth — only expose it on a trusted net.
+const CONTROL_HOST = process.env.FOUNDRY_MCP_BACKEND_BIND || '127.0.0.1';
 
-const CONTROL_PORT = 31414;
+const CONTROL_PORT = parseInt(process.env.FOUNDRY_MCP_BACKEND_PORT || '31414', 10);
 
 const LOCK_FILE = path.join(os.tmpdir(), 'foundry-mcp-backend.lock');
 
@@ -899,7 +922,7 @@ async function processMapGenerationInBackend(jobId: string, jobQueue: any, comfy
 
     let uploadResult: any;
     try {
-      uploadResult = await foundryClient.query('foundry-mcp-bridge.upload-generated-map', {
+      uploadResult = await foundryClient.query('foundry-forge-mcp.upload-generated-map', {
         filename: filename,
         imageData: base64Image
       });
@@ -1070,6 +1093,8 @@ async function startBackend(): Promise<void> {
 
   const questCreationTools = new QuestCreationTools({ foundryClient, logger });
 
+  const handoutTools = new HandoutTools({ foundryClient, logger });
+
   const diceRollTools = new DiceRollTools({ foundryClient, logger });
 
   const campaignManagementTools = new CampaignManagementTools(foundryClient, logger);
@@ -1077,6 +1102,41 @@ async function startBackend(): Promise<void> {
   const ownershipTools = new OwnershipTools({ foundryClient, logger });
 
   const tokenManipulationTools = new TokenManipulationTools({ foundryClient, logger });
+
+  const foldersTools = new FoldersTools({ foundryClient, logger });
+
+  // Initialize Forge Assets client BEFORE tools that need it (CreateActorTools'
+  // Phase 5 portrait wire-up reads from this folder; npcPortraitTools below
+  // also depends on it).
+  let forgeAssetsClient: ForgeAssetsClient | null = null;
+  const forgeApiKey = process.env.FORGE_ASSETS_API_KEY;
+  if (forgeApiKey) {
+    forgeAssetsClient = new ForgeAssetsClient({
+      logger,
+      config: { apiKey: forgeApiKey },
+    });
+    logger.info('Forge Assets client initialized');
+  } else {
+    logger.warn('FORGE_ASSETS_API_KEY not set — Forge browse/upload disabled (Phase 5 portrait lookup will skip)');
+  }
+
+  const createActorTools = new CreateActorTools({ foundryClient, logger, forgeAssetsClient });
+
+  const auditActorTools = new AuditActorTools({ foundryClient, logger });
+
+  // apply-actor-portrait delegates to createActorTools' resolver, so it must
+  // be constructed AFTER createActorTools.
+  const applyActorPortraitTools = new ApplyActorPortraitTools({
+    foundryClient, logger, createActorTools,
+  });
+
+  const linkActorPhasesTools = new LinkActorPhasesTools({ foundryClient, logger });
+
+  const applyFeatIconsTools = new ApplyFeatIconsTools({ foundryClient, logger });
+
+  // parse-reloaded-source is a pure parser — no Foundry deps, just markdown → ActorIntent.
+  // Arc H gap-closure plan Phase 0+ (2026-05-17).
+  const parseReloadedSourceTools = new ParseReloadedSourceTools({ logger });
 
   // Initialize mapgen-style backend components for map generation
   let mapGenerationJobQueue: any = null;
@@ -1301,6 +1361,8 @@ async function startBackend(): Promise<void> {
 
     ...questCreationTools.getToolDefinitions(),
 
+    ...handoutTools.getToolDefinitions(),
+
     ...diceRollTools.getToolDefinitions(),
 
     ...campaignManagementTools.getToolDefinitions(),
@@ -1310,6 +1372,21 @@ async function startBackend(): Promise<void> {
     ...tokenManipulationTools.getToolDefinitions(),
 
     ...mapGenerationTools.getToolDefinitions(),
+
+
+    ...foldersTools.getToolDefinitions(),
+
+    ...createActorTools.getToolDefinitions(),
+
+    ...auditActorTools.getToolDefinitions(),
+
+    ...applyActorPortraitTools.getToolDefinitions(),
+
+    ...linkActorPhasesTools.getToolDefinitions(),
+
+    ...applyFeatIconsTools.getToolDefinitions(),
+
+    ...parseReloadedSourceTools.getToolDefinitions(),
 
   ];
 
@@ -1405,9 +1482,75 @@ async function startBackend(): Promise<void> {
 
                   break;
 
-                case 'list-characters':
+                case 'list-actors':
 
-                  result = await characterTools.handleListCharacters(args);
+                  result = await characterTools.handleListActors(args);
+
+                  break;
+
+                case 'list-folders':
+
+                  result = await foldersTools.handleListFolders(args);
+
+                  break;
+
+                case 'create-actor':
+
+                  result = await createActorTools.handleCreateActor(args);
+
+                  break;
+
+                case 'create-actors':
+
+                  result = await createActorTools.handleCreateActorsBatch(args);
+
+                  break;
+
+                case 'infer-base-monster':
+
+                  result = await createActorTools.handleInferBaseMonster(args);
+
+                  break;
+
+                case 'infer-base-action':
+
+                  result = await createActorTools.handleInferBaseAction(args);
+
+                  break;
+
+                case 'audit-actor':
+
+                  result = await auditActorTools.handleAuditActor(args);
+
+                  break;
+
+                case 'apply-actor-portrait':
+
+                  result = await applyActorPortraitTools.handleApplyActorPortrait(args);
+
+                  break;
+
+                case 'link-actor-phases':
+
+                  result = await linkActorPhasesTools.handleLinkActorPhases(args);
+
+                  break;
+
+                case 'link-phase-chain':
+
+                  result = await linkActorPhasesTools.handleLinkPhaseChain(args);
+
+                  break;
+
+                case 'apply-feat-icons':
+
+                  result = await applyFeatIconsTools.handleApplyFeatIcons(args);
+
+                  break;
+
+                case 'parse-reloaded-source':
+
+                  result = await parseReloadedSourceTools.handleParseReloadedSource(args);
 
                   break;
 
@@ -1483,6 +1626,48 @@ async function startBackend(): Promise<void> {
 
                   break;
 
+                case 'duplicate-actor':
+
+                  result = await actorCreationTools.handleDuplicateActor(args);
+
+                  break;
+
+                case 'upload-actor-image':
+
+                  result = await actorCreationTools.handleUploadActorImage(args);
+
+                  break;
+
+                case 'update-actor':
+
+                  result = await actorCreationTools.handleUpdateActor(args);
+
+                  break;
+
+                case 'set-actor-image':
+
+                  result = await actorCreationTools.handleSetActorImage(args);
+
+                  break;
+
+                case 'add-actor-items':
+
+                  result = await actorCreationTools.handleAddActorItems(args);
+
+                  break;
+
+                case 'update-actor-items':
+
+                  result = await actorCreationTools.handleUpdateActorItems(args);
+
+                  break;
+
+                case 'remove-actor-items':
+
+                  result = await actorCreationTools.handleRemoveActorItems(args);
+
+                  break;
+
                 // DSA5 character creation tools
 
                 case 'create-dsa5-character-from-archetype':
@@ -1526,6 +1711,20 @@ async function startBackend(): Promise<void> {
                 case 'search-journals':
 
                   result = await questCreationTools.handleSearchJournals(args);
+
+                  break;
+
+                // Handout tools (image-page journal + scene-note placement)
+
+                case 'create-handout-journal':
+
+                  result = await handoutTools.handleCreateHandoutJournal(args);
+
+                  break;
+
+                case 'place-scene-journal-note':
+
+                  result = await handoutTools.handlePlaceSceneJournalNote(args);
 
                   break;
 

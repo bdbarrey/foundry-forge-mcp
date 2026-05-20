@@ -61,6 +61,10 @@ export class FoundryConnector {
 
       // Handle OPTIONS preflight
       if (req.method === 'OPTIONS') {
+        // Chrome Private Network Access: allow HTTPS pages to reach private/loopback addresses
+        if (req.headers['access-control-request-private-network'] === 'true') {
+          res.setHeader('Access-Control-Allow-Private-Network', 'true');
+        }
         res.writeHead(204);
         res.end();
         return;
@@ -83,7 +87,7 @@ export class FoundryConnector {
 
     // Start WebRTC signaling server
     await new Promise<void>((resolve, reject) => {
-      this.webrtcSignalingServer.listen(WEBRTC_PORT, '0.0.0.0', () => {
+      this.webrtcSignalingServer.listen(WEBRTC_PORT, '::', () => {
         this.logger.info(`WebRTC signaling server listening on port ${WEBRTC_PORT}`);
         console.error(`[WebRTC] Server started on 0.0.0.0:${WEBRTC_PORT}`);
         resolve();
@@ -349,14 +353,66 @@ export class FoundryConnector {
     }
   }
 
-  async query(method: string, data?: any): Promise<any> {
-    // Check connection based on active connection type
-    const isConnected = this.activeConnectionType === 'webrtc'
-      ? (this.webrtcPeer && this.webrtcPeer.getIsConnected())
-      : (this.foundrySocket && this.foundrySocket.readyState === WebSocket.OPEN);
+  /**
+   * Per-query timeout, in ms. Bumped from 10s → 60s in v0.1.18 — list-scenes
+   * on Beneos-loaded CoS worlds can take 15+ seconds to build + serialize, and
+   * the old 10s timeout would fire mid-write, leaving Foundry to flush a giant
+   * orphan response that pressured the WS buffer and dropped the socket.
+   */
+  private static readonly QUERY_TIMEOUT_MS = 60000;
 
-    if (!isConnected) {
-      throw new Error('Not connected to Foundry VTT module');
+  /**
+   * v0.1.19: how long to wait for the Foundry module's auto-reconnect logic
+   * to bring the WebSocket back before failing a query. The module-side
+   * (socket-bridge.ts → scheduleReconnect) uses exponential backoff capped at
+   * 30s, so 35s here covers a full reconnect cycle. Observed in production:
+   * sustained moderate-payload reads (20+ audit-actor calls in sequence) can
+   * occasionally drop the socket without warning; the module reconnects on
+   * its own, but the next mcp-server query that arrives during the gap used
+   * to throw immediately. Waiting briefly lets transient disconnects heal
+   * transparently — agent workflows don't have to be babysat with refreshes.
+   */
+  private static readonly WAIT_FOR_RECONNECT_MS = 35000;
+  private static readonly RECONNECT_POLL_INTERVAL_MS = 250;
+
+  /**
+   * Returns true if the active transport is reporting a healthy connection.
+   * Centralised so query() and waitForReconnect() agree on what "connected"
+   * means across both WebSocket and WebRTC paths.
+   */
+  private isTransportConnected(): boolean {
+    if (this.activeConnectionType === 'webrtc') {
+      return !!(this.webrtcPeer && this.webrtcPeer.getIsConnected());
+    }
+    return !!(this.foundrySocket && this.foundrySocket.readyState === WebSocket.OPEN);
+  }
+
+  /**
+   * Wait up to `timeoutMs` for the transport to become connected again,
+   * polling at RECONNECT_POLL_INTERVAL_MS. Returns the final connected state.
+   */
+  private async waitForReconnect(timeoutMs: number): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (this.isTransportConnected()) return true;
+      await new Promise(r => setTimeout(r, FoundryConnector.RECONNECT_POLL_INTERVAL_MS));
+    }
+    return this.isTransportConnected();
+  }
+
+  async query(method: string, data?: any): Promise<any> {
+    // v0.1.19: if disconnected on arrival, give the Foundry-side
+    // scheduleReconnect a chance to reach us before failing. Survives
+    // transient WS drops from buffer pressure on sustained reads.
+    if (!this.isTransportConnected()) {
+      this.logger.info('Query arrived while disconnected; waiting for module auto-reconnect', { method });
+      const waitStart = Date.now();
+      const reconnected = await this.waitForReconnect(FoundryConnector.WAIT_FOR_RECONNECT_MS);
+      const waitedMs = Date.now() - waitStart;
+      if (!reconnected) {
+        throw new Error(`Foundry VTT module not connected (waited ${Math.round(waitedMs / 1000)}s for auto-reconnect; module may be down or browser tab closed)`);
+      }
+      this.logger.info('Module reconnected; resuming query', { method, waitedMs });
     }
 
     const queryId = `query-${++this.queryIdCounter}`;
@@ -365,8 +421,19 @@ export class FoundryConnector {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingQueries.delete(queryId);
+        // Tell Foundry to abandon the work and skip sending the response.
+        // Without this, a slow query keeps computing past the timeout and the
+        // eventual response (potentially hundreds of KB) lands on a deleted
+        // pending-query slot and pressures the WS buffer, sometimes hard
+        // enough to drop the socket entirely.
+        try {
+          this.sendToFoundry({ type: 'mcp-cancel', id: queryId });
+        } catch {
+          // If the socket is already gone, the cancel can't be delivered;
+          // nothing useful to do here — the close handler will reject pending.
+        }
         reject(new Error(`Query timeout: ${method}`));
-      }, 10000); // 10 second timeout
+      }, FoundryConnector.QUERY_TIMEOUT_MS);
 
       this.pendingQueries.set(queryId, { resolve, reject, timeout });
 

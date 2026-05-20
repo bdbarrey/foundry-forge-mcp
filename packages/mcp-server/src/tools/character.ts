@@ -71,14 +71,30 @@ export class CharacterTools {
         },
       },
       {
-        name: 'list-characters',
-        description: 'List all available characters with basic information',
+        name: 'list-actors',
+        description: 'List actors in the world (PCs, NPCs, monsters, vehicles, groups). Supports filtering by type, folder (name OR full slash-path; matches the folder and any subfolders), and name substring. Returns id, name, type, folder name, full folderPath, and folderId. Use this for programmatic discovery instead of opening Foundry visually. For large worlds (Beneos packs), scope with `folder` or `nameContains` to avoid wedging the bridge on an oversized payload.',
         inputSchema: {
           type: 'object',
           properties: {
             type: {
               type: 'string',
-              description: 'Optional filter by character type (e.g., "character", "npc")',
+              description: 'Optional filter by actor type (e.g., "character", "npc", "vehicle", "group")',
+            },
+            folder: {
+              type: 'string',
+              description: 'Optional folder filter. Accepts a folder name ("Monsters") or full path ("02 - My Actors/Monsters"). Matches the folder and everything beneath it. Case-insensitive.',
+            },
+            nameContains: {
+              type: 'string',
+              description: 'Optional case-insensitive substring filter on actor name.',
+            },
+            page: {
+              type: 'number',
+              description: 'Page number (1-indexed). Required when pageSize > 0.',
+            },
+            pageSize: {
+              type: 'number',
+              description: 'Page size. Omit or 0 = return all matching actors (legacy behavior). Set >0 to paginate; the response uses the `{actors, total, page, pageSize, totalPages, hasMore}` envelope.',
             },
           },
         },
@@ -157,7 +173,7 @@ export class CharacterTools {
     this.logger.info('Getting character information', { identifier });
 
     try {
-      const characterData = await this.foundryClient.query('foundry-mcp-bridge.getCharacterInfo', {
+      const characterData = await this.foundryClient.query('foundry-forge-mcp.getCharacterInfo', {
         characterName: identifier,
       });
 
@@ -187,7 +203,7 @@ export class CharacterTools {
 
     try {
       // First get the character
-      const characterData = await this.foundryClient.query('foundry-mcp-bridge.getCharacterInfo', {
+      const characterData = await this.foundryClient.query('foundry-forge-mcp.getCharacterInfo', {
         characterName: characterIdentifier,
       });
 
@@ -284,35 +300,72 @@ export class CharacterTools {
     }
   }
 
-  async handleListCharacters(args: any): Promise<any> {
+  async handleListActors(args: any): Promise<any> {
     const schema = z.object({
       type: z.string().optional(),
+      folder: z.string().optional(),
+      nameContains: z.string().optional(),
+      page: z.number().optional(),
+      pageSize: z.number().optional(),
     });
 
-    const { type } = schema.parse(args);
+    const { type, folder, nameContains, page, pageSize } = schema.parse(args);
 
-    this.logger.info('Listing characters', { type });
+    this.logger.info('Listing actors', { type, folder, nameContains, page, pageSize });
 
     try {
-      const actors = await this.foundryClient.query('foundry-mcp-bridge.listActors', { type });
+      const queryArgs: { type?: string; folder?: string; nameContains?: string; page?: number; pageSize?: number } = {};
+      if (type) queryArgs.type = type;
+      if (folder) queryArgs.folder = folder;
+      if (nameContains) queryArgs.nameContains = nameContains;
+      if (typeof page === 'number' && page > 0) queryArgs.page = page;
+      if (typeof pageSize === 'number' && pageSize > 0) queryArgs.pageSize = pageSize;
 
-      this.logger.debug('Successfully retrieved character list', { count: actors.length });
+      const result = await this.foundryClient.query('foundry-forge-mcp.listActors', queryArgs);
 
-      // Format the response for Claude
+      // Module returns either a raw array (unpaginated, backwards-compat) or
+      // an envelope { items, total, page, pageSize, totalPages, hasMore }.
+      const isEnvelope = result && typeof result === 'object' && !Array.isArray(result) && Array.isArray(result.items);
+      const actorList: any[] = isEnvelope ? result.items : (Array.isArray(result) ? result : []);
+
+      this.logger.debug('Successfully retrieved actor list', { count: actorList.length, paginated: isEnvelope });
+
+      const filtersApplied: string[] = [];
+      if (type) filtersApplied.push(`type=${type}`);
+      if (folder) filtersApplied.push(`folder=${folder}`);
+      if (nameContains) filtersApplied.push(`nameContains=${nameContains}`);
+
+      const slimActors = actorList.map((actor: any) => ({
+        id: actor.id,
+        name: actor.name,
+        type: actor.type,
+        folder: actor.folder ?? null,
+        folderPath: actor.folderPath ?? null,
+        folderId: actor.folderId ?? null,
+        hasImage: !!actor.img,
+      }));
+
+      if (isEnvelope) {
+        return {
+          actors: slimActors,
+          total: result.total,
+          page: result.page,
+          pageSize: result.pageSize,
+          totalPages: result.totalPages,
+          hasMore: result.hasMore,
+          filtersApplied: filtersApplied.length ? filtersApplied.join(', ') : 'none',
+        };
+      }
+
       return {
-        characters: actors.map((actor: any) => ({
-          id: actor.id,
-          name: actor.name,
-          type: actor.type,
-          hasImage: !!actor.img,
-        })),
-        total: actors.length,
-        filtered: type ? `Filtered by type: ${type}` : 'All characters',
+        actors: slimActors,
+        total: slimActors.length,
+        filtersApplied: filtersApplied.length ? filtersApplied.join(', ') : 'none',
       };
 
     } catch (error) {
-      this.logger.error('Failed to list characters', error);
-      throw new Error(`Failed to list characters: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      this.logger.error('Failed to list actors', error);
+      throw new Error(`Failed to list actors: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -331,7 +384,7 @@ export class CharacterTools {
     this.logger.info('Using item', { actorIdentifier, itemIdentifier, targets, consume, spellLevel, skipDialog });
 
     try {
-      const result = await this.foundryClient.query('foundry-mcp-bridge.useItem', {
+      const result = await this.foundryClient.query('foundry-forge-mcp.useItem', {
         actorIdentifier,
         itemIdentifier,
         targets,
@@ -370,7 +423,7 @@ export class CharacterTools {
     this.logger.info('Searching character items', { characterIdentifier, query, type, category, limit });
 
     try {
-      const result = await this.foundryClient.query('foundry-mcp-bridge.searchCharacterItems', {
+      const result = await this.foundryClient.query('foundry-forge-mcp.searchCharacterItems', {
         characterIdentifier,
         query,
         type,
