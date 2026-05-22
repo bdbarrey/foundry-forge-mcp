@@ -1678,6 +1678,14 @@ export class AuditActorTools {
           if (canonAutoResolved) (snapshot as any).expectedPortraitCanonAutoResolved = canon;
           if (vaultDiag) (snapshot as any).vaultReaderDiag = vaultDiag;
           if (vaultImportError) (snapshot as any).vaultReaderImportError = vaultImportError;
+          // Unconditional deploy signal — present in EVERY actor_only +
+          // validate_icons response from this build onward. If you don't
+          // see this field, the laptop is on stale dist regardless of
+          // what `git log` says. Lets us distinguish "code shipped but
+          // vault-reader misfired" from "code didn't reach the laptop."
+          if (input.validate_icons) {
+            (snapshot as any)._auditBuildSignal = '2026-05-19-vault-diag';
+          }
         }
         return {
           success: true,
