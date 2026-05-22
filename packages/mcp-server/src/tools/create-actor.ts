@@ -297,6 +297,19 @@ export class CreateActorTools {
       // → portrait — except where the caller already set those at the top level
       // (top-level fields win, so partial overrides are possible).
       actor_intent: ActorIntentSchema.optional(),
+      // Arc I AAR 2026-05-19 / 2026-05-22 follow-up: duplicate-name pre-check.
+      // create-actor pre-2026-05-22 silently spawned a second actor when one
+      // with the same name already existed in `Foundry MCP Creatures`, leaving
+      // strays from earlier failed builds undetected (Arc I had a
+      // TMa7ZixWbZsFb8z1 Baba Lysaga Witch Mother HP=120 stub orphaned for
+      // hours). Default behavior now refuses with a clear error naming the
+      // existing actor id so the user can delete the stray manually and retry.
+      // No `replace: true` shortcut today — the module-side deleteActor query
+      // doesn't exist; manual cleanup keeps the human-confirmation step that
+      // matches the standing "user does this manually" pattern in
+      // workflow-arc-generation.md (Phase B step 5 stray-handling note).
+      // When module-side delete ships, a `replace` flag can be added here
+      // for one-shot overwrite — TODO.
     }).refine(
       // Valid input shapes:
       //   A. reloaded_source (or file_path+creature_name) — has statblock or prose
@@ -430,6 +443,13 @@ export class CreateActorTools {
       this.logger.info('Using compendium base', base);
 
       // 4. Spawn via compendium
+      //    Duplicate-actor pre-check (Arc I AAR shipped 2026-05-22).
+      //    Mode A spawns directly via createActorFromCompendium rather than
+      //    through spawnFromCompendium, so the duplicate check has to be
+      //    explicit here. Refuses with the existing actor id named so the
+      //    user can decide whether to delete the stray or treat the existing
+      //    one as the build target.
+      await this.ensureNoDuplicateInStaging(sb.name);
       const spawn: any = await this.foundryClient.query('foundry-forge-mcp.createActorFromCompendium', {
         packId: base.packId,
         itemId: base.itemId,
@@ -1119,6 +1139,35 @@ export class CreateActorTools {
         );
       }
 
+      // 12. Arc I AAR 2026-05-19: auto-apply feat icon retrofit. Workflow
+      //     Phase C step 6 calls it out as required — caller was forgetting
+      //     on every build, leaving scratch-built feats (Hair Blades,
+      //     Devouring Flies, Skilled Casting, Swampwalk, etc.) on the
+      //     generic `feature.svg` / `activity/save.svg` placeholders.
+      //     Mirrors the auto-portrait pattern at step 10. Best-effort —
+      //     a failure here doesn't sink the build but is surfaced on the
+      //     `featIcons` result for the caller's audit.
+      let featIconsResult: any = undefined;
+      try {
+        const { ApplyFeatIconsTools } = await import('./apply-feat-icons.js');
+        const featIconsTool = new ApplyFeatIconsTools({
+          foundryClient: this.foundryClient,
+          logger: this.logger,
+        });
+        featIconsResult = await featIconsTool.handleApplyFeatIcons({
+          actorId: newActor.id,
+          // includeFallback=true so the generic-feature fallback IS applied
+          // for any feat the themed resolver can't match. Better generic
+          // theme than the dnd5e default star.
+          includeFallback: true,
+        });
+      } catch (featErr: any) {
+        featIconsResult = { error: featErr?.message ?? String(featErr) };
+        this.logger.warn('Auto apply-feat-icons failed; actor build still committed', {
+          actorId: newActor.id, error: featErr?.message,
+        });
+      }
+
       return {
         success: true,
         actorId: newActor.id,
@@ -1152,6 +1201,7 @@ export class CreateActorTools {
         actionSyncFailures,
         portrait: portraitResult,
         prune: pruneResult,
+        featIcons: featIconsResult,
         flagsStamped: ['foundry-forge-mcp.source', 'foundry-forge-mcp.reloadedName']
           .concat(input.file_path ? ['foundry-forge-mcp.reloadedPath'] : []),
         notes: [
@@ -1355,6 +1405,9 @@ export class CreateActorTools {
     base: { packId: string; itemId: string },
     actorName: string | undefined,
   ): Promise<{ id: string; name: string }> {
+    if (actorName) {
+      await this.ensureNoDuplicateInStaging(actorName);
+    }
     const params: any = {
       packId: base.packId,
       itemId: base.itemId,
@@ -1371,6 +1424,63 @@ export class CreateActorTools {
     const actor = spawn.actors[0] as { id: string; name: string };
     this.logger.info('Actor spawned from compendium', { id: actor.id, name: actor.name });
     return actor;
+  }
+
+  /**
+   * Arc I AAR 2026-05-19 / shipped 2026-05-22 — duplicate-actor refusal.
+   *
+   * Before any spawn into the `Foundry MCP Creatures` staging folder,
+   * verify no actor with the same name already exists. If one does,
+   * throw with the existing actor's id so the caller can delete the
+   * stray manually and retry. Matches the standing "user manually
+   * promotes / deletes" pattern in workflow-arc-generation.md Phase B
+   * step 5.
+   *
+   * Why exact-name (case-insensitive) match: nameContains substring would
+   * trip on legitimate sibling names like "Baba Lysaga" vs "Baba Lysaga,
+   * Witch Mother" (the multi-form pattern). Use nameContains as the
+   * server-side filter for efficiency, then exact-equal client-side.
+   *
+   * Pre-existing failure mode this closes: Arc I had a stray
+   * `Baba Lysaga, Witch Mother` (id TMa7ZixWbZsFb8z1, HP 120, unpruned
+   * base Quarterstaff + Summon Swarms of Insects) sitting alongside the
+   * real one (HP 135, clean) for hours. The stray came from an earlier
+   * failed create-actor call where the spawn succeeded but the
+   * downstream patch failed — the user only noticed during cleanup.
+   */
+  private async ensureNoDuplicateInStaging(name: string): Promise<void> {
+    const STAGING_FOLDER = 'Foundry MCP Creatures';
+    let existing: any[];
+    try {
+      const result: any = await this.foundryClient.query(
+        'foundry-forge-mcp.listActors',
+        { folder: STAGING_FOLDER, nameContains: name },
+      );
+      const items = Array.isArray(result)
+        ? result
+        : (Array.isArray(result?.items) ? result.items : []);
+      existing = items.filter((a: any) =>
+        typeof a?.name === 'string' && a.name.toLowerCase() === name.toLowerCase()
+      );
+    } catch (err: any) {
+      // Best-effort — a listActors failure here shouldn't sink the build.
+      // Better to spawn-and-risk-duplicate than block on a transient
+      // bridge hiccup.
+      this.logger.warn('Duplicate-name pre-check failed; proceeding with spawn', {
+        name, error: err?.message,
+      });
+      return;
+    }
+    if (existing.length === 0) return;
+    const existingIds = existing.map((a: any) => a.id ?? a._id).filter(Boolean);
+    throw new Error(
+      `Actor "${name}" already exists in "${STAGING_FOLDER}" ` +
+      `(id${existing.length > 1 ? 's' : ''}: ${existingIds.join(', ')}). ` +
+      `Delete the stray manually in Foundry and retry. Duplicates from ` +
+      `earlier failed builds are the most common cause — verify the ` +
+      `existing actor's HP/items match the Reloaded source before ` +
+      `keeping it; an HP/item mismatch signals an aborted build.`,
+    );
   }
 
   /**
