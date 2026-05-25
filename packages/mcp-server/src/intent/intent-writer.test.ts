@@ -836,4 +836,22 @@ describe('writeActivityUpdate — synthesize attack activity when source has non
     const newActivity = u[newActivityKey!];
     expect(newActivity.midiProperties).toBeUndefined();
   });
+
+  // 2026-05-25: OA gate. Midi-QOL initializes flags["midi-qol"].actions on a
+  // token only when ≥1 weapon is equipped at combat-tracker entry; without
+  // it, Gambit's Premades Opportunity Attack auto-prompt silently skips the
+  // actor. Every writeActivityUpdate emit is for an item the NPC uses in
+  // combat, so equipping must be the default. Verified empirically against
+  // Volenta + Vampire Spawn 2026-05-25.
+  it('always emits system.equipped: true on the weapon patch', () => {
+    const baseActivities = {
+      atkExisting1: {
+        type: 'attack',
+        attack: { bonus: '', flat: false },
+      },
+    };
+    idCounter = 0;
+    const u = writeActivityUpdate('item-1', baseActivities, attackOnlyIntent(), { genActivityId: detIdGen });
+    expect(u['system.equipped']).toBe(true);
+  });
 });

@@ -177,12 +177,20 @@ describe('buildItemActivityUpdate', () => {
     expect(update['system.activities.attackId.attack.bonus']).toBeUndefined();
   });
 
-  it('returns only _id (no activity keys) when parsed has neither attack nor save nor damage', () => {
+  it('returns only _id + system.equipped (no activity keys) when parsed has neither attack nor save nor damage', () => {
+    // 2026-05-25: writeActivityUpdate now unconditionally emits
+    // system.equipped: true for the OA gate (see intent-writer.ts). The
+    // original intent of this test was "no activity-related keys written";
+    // that still holds — system.equipped is a top-level item field, not an
+    // activities entry.
     const parsed: ParsedAction = { damage: [] };
     const activities = { saveId: { type: 'save' } };
     const update = buildItemActivityUpdate('itemD', activities, parsed);
 
-    expect(Object.keys(update)).toEqual(['_id']);
+    expect(Object.keys(update).sort()).toEqual(['_id', 'system.equipped']);
+    expect(update['system.equipped']).toBe(true);
+    // No activity keys.
+    expect(Object.keys(update).filter(k => k.startsWith('system.activities.'))).toEqual([]);
   });
 });
 

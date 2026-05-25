@@ -449,6 +449,14 @@ export function writeActivityUpdate(
   opts: { genActivityId?: () => string } = {},
 ): Record<string, any> {
   const u: Record<string, any> = { _id: itemId };
+  // OA gate: Midi-QOL initializes flags["midi-qol"].actions only when ≥1
+  // weapon is equipped at the moment a token enters the combat tracker.
+  // Without that flag, Gambit's Premades Opportunity Attack auto-prompt
+  // silently skips the actor for the entire encounter. Every patch this
+  // function emits is for an action the NPC actively uses in combat —
+  // equipping is the whole point. Field is silently ignored on non-weapon
+  // item types so no per-type branching needed.
+  u['system.equipped'] = true;
 
   const attackIntent = intent.activities.find(a => a.kind === 'attack');
   const saveIntent = intent.activities.find(a => a.kind === 'save');

@@ -170,6 +170,49 @@ export async function classifyIconUrl(
 }
 
 /**
+ * 2026-05-25 — detect unequipped weapons that will break Midi-QOL's
+ * Opportunity Attack auto-prompt (via Gambit's Premades).
+ *
+ * Midi-QOL initializes flags["midi-qol"].actions on a token only when the
+ * underlying actor has ≥1 weapon equipped at the moment the token enters
+ * the combat tracker. Without that flag, Gambit's OA detection silently
+ * skips the actor for the entire encounter. The bug is recoverable only
+ * by deleting the token and re-dragging from the Actors directory after
+ * equipping the weapon — in-place re-equip on an already-tracked token
+ * does NOT re-trigger flag initialization.
+ *
+ * Discovered 2026-05-25 debugging Volenta + Vampire Spawn vs. Goyra.
+ *
+ * - `unequippedWeapons`: every weapon-typed item with `system.equipped !== true`.
+ * - `unequippedWeaponCount`: convenience count.
+ * - `noMeleeEquipped`: load-bearing. True when at least one melee weapon
+ *   exists (range.reach > 0) but NONE of them are equipped. This is the
+ *   condition that actually breaks OA in combat — a ranged-only equipped
+ *   weapon doesn't satisfy the Midi gate.
+ */
+export interface UnequippedWeaponInfo {
+  unequippedWeapons: Array<{ id: string; name: string }>;
+  unequippedWeaponCount: number;
+  noMeleeEquipped: boolean;
+}
+
+export function detectUnequippedWeapons(items: any[]): UnequippedWeaponInfo {
+  const unequippedWeapons = items
+    .filter((it: any) => it.type === 'weapon' && it.system?.equipped !== true)
+    .map((it: any) => ({ id: it.id ?? it._id, name: it.name }));
+  const meleeWeapons = items.filter(
+    (it: any) => it.type === 'weapon' && (it.system?.range?.reach ?? 0) > 0,
+  );
+  const noMeleeEquipped = meleeWeapons.length > 0
+    && meleeWeapons.every((it: any) => it.system?.equipped !== true);
+  return {
+    unequippedWeapons,
+    unequippedWeaponCount: unequippedWeapons.length,
+    noMeleeEquipped,
+  };
+}
+
+/**
  * Arc H gap closure 2026-05-18 — verify an actor portrait URL matches the
  * canon pattern declared on the NPC's vault profile. Returns:
  *   - 'match' when the URL matches the expected pattern for the canon tag.
@@ -1687,12 +1730,28 @@ export class AuditActorTools {
             (snapshot as any)._auditBuildSignal = '2026-05-19-vault-diag';
           }
         }
+        // 2026-05-25: actor_only mode doesn't run buildGuidance, so surface
+        // the unequipped-weapon warning directly when the snapshot flags it.
+        // Load-bearing — the re-drag step is invisible from the snapshot data
+        // alone and the user will assume `update-actor-items` was enough.
+        const actorOnlyGuidance: string[] = [];
+        if (snapshot && (snapshot as any).unequippedWeaponCount > 0) {
+          const count = (snapshot as any).unequippedWeaponCount;
+          const noMelee = (snapshot as any).noMeleeEquipped;
+          actorOnlyGuidance.push(
+            `${count} unequipped weapon(s) detected${noMelee ? ' — NO MELEE EQUIPPED, blocks Opportunity Attack auto-prompt in combat' : ''}. ` +
+            `Patching system.equipped on the actor is NOT sufficient for tokens already placed on a scene — ` +
+            `Midi-QOL initializes flags["midi-qol"].actions on token-creation only. After patching the actor, ` +
+            `DELETE any pre-existing token(s) from active scenes and re-drag from the actor directory.`
+          );
+        }
         return {
           success: true,
           actor: { id: actor.id, name: actor.name },
           mode: 'actor_only',
           actor_only_reason: input.actor_only_reason ?? null,
           snapshot,
+          ...(actorOnlyGuidance.length > 0 ? { guidance: actorOnlyGuidance } : {}),
         };
       }
 
@@ -1767,6 +1826,11 @@ export class AuditActorTools {
       name: it.name,
       type: it.type,
       img: it.img ?? null,
+      // 2026-05-25: weapons must ship equipped or Midi-QOL never initializes
+      // flags["midi-qol"].actions on the token at combat-tracker entry, which
+      // silently disables Gambit's Premades Opportunity Attack auto-prompt.
+      // `null` for non-weapons (field has no semantic meaning there).
+      equipped: it.type === 'weapon' ? (it.system?.equipped === true) : null,
     }));
 
     let iconStatus: Array<{ id: any; name: any; img: string | null; status: string }> | undefined;
@@ -1833,6 +1897,10 @@ export class AuditActorTools {
       }
     }
 
+    // 2026-05-25: unequipped-weapon gate (see detectUnequippedWeapons doc).
+    const { unequippedWeapons, unequippedWeaponCount, noMeleeEquipped } =
+      detectUnequippedWeapons(items);
+
     return {
       hp: { max: sys.attributes?.hp?.max, value: sys.attributes?.hp?.value },
       ac: { flat: sys.attributes?.ac?.flat, value: sys.attributes?.ac?.value, calc: sys.attributes?.ac?.calc },
@@ -1846,6 +1914,9 @@ export class AuditActorTools {
       items: itemsList,
       ...(iconStatus ? { iconStatus, brokenIconCount } : {}),
       ...(portraitIcon ? { portraitIcon } : {}),
+      unequippedWeapons,
+      unequippedWeaponCount,
+      noMeleeEquipped,
       // v0.1.20: portrait + token texture URLs. These are what the
       // portrait_canon-aware tools (apply_npc_portrait_to_foundry,
       // sync_npc_portrait) read or set. Surfacing them in the snapshot lets
@@ -1876,6 +1947,18 @@ export class AuditActorTools {
     const missingActions = audit.actions.filter(a => a.status === 'missing-item').map(a => a.name);
     if (missingActions.length > 0) {
       out.push(`Missing action items: ${missingActions.join(', ')}`);
+    }
+    // 2026-05-25: surface the unequipped-weapon gate when the snapshot
+    // detected it. Same load-bearing guidance as actor_only mode — the
+    // re-drag step is invisible from the data alone.
+    const snap = (audit as any).snapshot;
+    if (snap && snap.unequippedWeaponCount > 0) {
+      out.push(
+        `${snap.unequippedWeaponCount} unequipped weapon(s) detected${snap.noMeleeEquipped ? ' — NO MELEE EQUIPPED, blocks Opportunity Attack auto-prompt in combat' : ''}. ` +
+        `Patching system.equipped on the actor is NOT sufficient for tokens already placed on a scene — ` +
+        `Midi-QOL initializes flags["midi-qol"].actions on token-creation only. After patching the actor, ` +
+        `DELETE any pre-existing token(s) from active scenes and re-drag from the actor directory.`
+      );
     }
     return out;
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { compareActor, ActorSnapshot, classifyIconUrl, checkPortraitCanonMatch } from './audit-actor.js';
+import { compareActor, ActorSnapshot, classifyIconUrl, checkPortraitCanonMatch, detectUnequippedWeapons } from './audit-actor.js';
 import * as featIcons from './feat-icons.js';
 import type { ReloadedStatblock } from '../parsers/reloaded-statblock.js';
 
@@ -1327,5 +1327,76 @@ describe('checkPortraitCanonMatch — Arc H portrait canon-tag rule', () => {
     expect(checkPortraitCanonMatch(null, 'custom')).toBe('skipped');
     expect(checkPortraitCanonMatch('', 'beneos')).toBe('skipped');
     expect(checkPortraitCanonMatch('   ', 'custom')).toBe('skipped');
+  });
+});
+
+// 2026-05-25: OA-gate detector. Tokens entering combat without ≥1 equipped
+// melee weapon never get flags["midi-qol"].actions, breaking Gambit's
+// Premades Opportunity Attack auto-prompt for the entire encounter. The
+// pure helper isolates the rule so we can unit-test it without spinning up
+// the full snapshot pipeline.
+describe('detectUnequippedWeapons', () => {
+  it('surfaces unequipped weapons by id and name', () => {
+    const result = detectUnequippedWeapons([
+      { id: 'w1', name: 'Dagger', type: 'weapon', system: { equipped: false, range: { reach: 5 } } },
+      { id: 'w2', name: 'Hail of Daggers', type: 'weapon', system: { equipped: false, range: { reach: 5 } } },
+    ]);
+    expect(result.unequippedWeaponCount).toBe(2);
+    expect(result.unequippedWeapons).toEqual([
+      { id: 'w1', name: 'Dagger' },
+      { id: 'w2', name: 'Hail of Daggers' },
+    ]);
+  });
+
+  it('sets noMeleeEquipped=true when every melee weapon is unequipped (Volenta case)', () => {
+    const result = detectUnequippedWeapons([
+      { id: 'w1', name: 'Dagger', type: 'weapon', system: { equipped: false, range: { reach: 5 } } },
+      { id: 'w2', name: 'Hail of Daggers', type: 'weapon', system: { equipped: false, range: { reach: 5 } } },
+    ]);
+    expect(result.noMeleeEquipped).toBe(true);
+  });
+
+  it('sets noMeleeEquipped=false when at least one melee weapon is equipped (Izek case)', () => {
+    const result = detectUnequippedWeapons([
+      { id: 'w1', name: 'Battleaxe', type: 'weapon', system: { equipped: true, range: { reach: 5 } } },
+      { id: 'w2', name: 'Hurl Flame', type: 'weapon', system: { equipped: false, range: { reach: 0 } } },
+    ]);
+    expect(result.unequippedWeaponCount).toBe(1);
+    expect(result.noMeleeEquipped).toBe(false);
+  });
+
+  it('sets noMeleeEquipped=false when the actor has zero melee weapons', () => {
+    // Pure-ranged actor; OA isn't a concern by RAW. Don't false-alarm.
+    const result = detectUnequippedWeapons([
+      { id: 'w1', name: 'Longbow', type: 'weapon', system: { equipped: true, range: { reach: 0, value: 150 } } },
+    ]);
+    expect(result.unequippedWeaponCount).toBe(0);
+    expect(result.noMeleeEquipped).toBe(false);
+  });
+
+  it('does not flag non-weapon items lacking equipped (Volenta 2nd Form Spit Blood)', () => {
+    const result = detectUnequippedWeapons([
+      { id: 'c1', name: 'Spit Blood', type: 'consumable', system: { equipped: false } },
+      { id: 'f1', name: 'Multiattack', type: 'feat', system: {} },
+      { id: 'w1', name: 'Claws', type: 'weapon', system: { equipped: true, range: { reach: 5 } } },
+    ]);
+    expect(result.unequippedWeaponCount).toBe(0);
+    expect(result.unequippedWeapons).toEqual([]);
+    expect(result.noMeleeEquipped).toBe(false);
+  });
+
+  it('handles _id fallback (Foundry serialized form)', () => {
+    const result = detectUnequippedWeapons([
+      { _id: 'serializedId', name: 'Claw', type: 'weapon', system: { equipped: false, range: { reach: 5 } } },
+    ]);
+    expect(result.unequippedWeapons[0]?.id).toBe('serializedId');
+  });
+
+  it('treats missing system.equipped as unequipped', () => {
+    const result = detectUnequippedWeapons([
+      { id: 'w1', name: 'Dagger', type: 'weapon', system: { range: { reach: 5 } } },
+    ]);
+    expect(result.unequippedWeaponCount).toBe(1);
+    expect(result.noMeleeEquipped).toBe(true);
   });
 });
