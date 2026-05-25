@@ -1168,6 +1168,45 @@ export class CreateActorTools {
         });
       }
 
+      // 13. 2026-05-25: bulletproof equipped-weapon sweep. The intent-writer
+      //     fix (writeActivityUpdate emits system.equipped: true) covers
+      //     every weapon that goes through the activity patch loop, but
+      //     items spawned from the compendium base with no Reloaded action
+      //     match (and that survive prune) keep whatever equipped value the
+      //     base shipped with. Tokens entering combat with zero equipped
+      //     melee weapons never get flags["midi-qol"].actions initialized,
+      //     which silently disables Gambit's Premades Opportunity Attack
+      //     auto-prompt for the entire encounter (confirmed 2026-05-25 on
+      //     Volenta + Vampire Spawn). This sweep is the belt-and-suspenders
+      //     guarantee — re-read the actor, force-equip every weapon item
+      //     not already equipped. Best-effort: failure surfaces on the
+      //     `equippedWeaponSweep` field but does not sink the build.
+      let equippedWeaponSweep: any = undefined;
+      try {
+        const finalActor: any = await this.foundryClient.query(
+          'foundry-forge-mcp.getCharacterInfo',
+          { characterName: newActor.id },
+        );
+        const finalItems = finalActor?.items ?? finalActor?.character?.items ?? [];
+        const toEquip = finalItems
+          .filter((it: any) => it.type === 'weapon' && it.system?.equipped !== true)
+          .map((it: any) => ({ _id: it.id ?? it._id, name: it.name }));
+        if (toEquip.length > 0) {
+          await this.foundryClient.query('foundry-forge-mcp.updateActorItems', {
+            actorId: newActor.id,
+            updates: toEquip.map((w: any) => ({ _id: w._id, 'system.equipped': true })),
+          });
+          equippedWeaponSweep = { patched: toEquip };
+        } else {
+          equippedWeaponSweep = { patched: [] };
+        }
+      } catch (sweepErr: any) {
+        equippedWeaponSweep = { error: sweepErr?.message ?? String(sweepErr) };
+        this.logger.warn('Post-spawn equipped-weapon sweep failed; actor build still committed', {
+          actorId: newActor.id, error: sweepErr?.message,
+        });
+      }
+
       return {
         success: true,
         actorId: newActor.id,
@@ -1202,6 +1241,7 @@ export class CreateActorTools {
         portrait: portraitResult,
         prune: pruneResult,
         featIcons: featIconsResult,
+        equippedWeaponSweep,
         flagsStamped: ['foundry-forge-mcp.source', 'foundry-forge-mcp.reloadedName']
           .concat(input.file_path ? ['foundry-forge-mcp.reloadedPath'] : []),
         notes: [
