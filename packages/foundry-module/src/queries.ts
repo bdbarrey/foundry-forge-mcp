@@ -781,10 +781,15 @@ export class QueryHandlers {
         throw new Error('content, flags, or pageName is required');
       }
 
-      const updateRequest: { journalId: string; content: string; pageId?: string | undefined; newPageName?: string | undefined; flags?: Record<string, any> | undefined; pageName?: string | undefined } = {
+      const updateRequest: { journalId: string; content?: string | undefined; pageId?: string | undefined; newPageName?: string | undefined; flags?: Record<string, any> | undefined; pageName?: string | undefined } = {
         journalId: data.journalId,
-        content: data.content ?? '',
       };
+      // Only forward content when the caller actually provided it. Defaulting
+      // to '' would silently wipe text.content on a flags-only / rename-only
+      // update — caught when SimpleQuest's move-to-category move + auto-mark
+      // flag-write blanked St. Andral's Feast's table + objective list
+      // (2026-05-28).
+      if (data.content !== undefined) updateRequest.content = data.content;
       if (data.pageId) updateRequest.pageId = data.pageId;
       if (data.newPageName) updateRequest.newPageName = data.newPageName;
       if (data.flags) updateRequest.flags = data.flags;

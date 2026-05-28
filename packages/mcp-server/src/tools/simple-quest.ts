@@ -518,10 +518,12 @@ export class SimpleQuestTools {
         },
       };
 
-      // Build the bridge call. Content gets rewritten when objectives OR the
-      // header change. Header is preserved byte-for-byte on objective-only
-      // operations (we don't round-trip through buildHeaderTable), so a DM
-      // who hand-edited their header HTML keeps it.
+      // Build the bridge call. Content is ALWAYS recomposed and sent — even
+      // when the operation only touches flags (rename, mark-complete on
+      // already-complete page, etc.) — because the queries.ts handler defaults
+      // a missing `content` to '' and silently wipes text.content. Composing
+      // from preserved header + current objectives is a safe no-op when the
+      // operation didn't intend to change content.
       const objectivesAffected =
         req.operation === 'set-objectives' ||
         req.operation === 'add-objective' ||
@@ -530,19 +532,16 @@ export class SimpleQuestTools {
         req.operation === 'uncheck-objective' ||
         req.operation === 'mark-complete' ||
         req.operation === 'mark-incomplete';
-      const contentNeedsRewrite = objectivesAffected || headerExplicitlyChanged;
+      const newObjectivesHtml = objectivesAffected
+        ? objectivesToHtml(newObjectives)
+        : currentObjectivesHtml;
 
       const updatePayload: any = {
         journalId: match.journalId,
         pageId: match.pageId,
         flags: flagsPatch,
+        content: composeQuestContent(newHeaderHtml, newObjectivesHtml),
       };
-      if (contentNeedsRewrite) {
-        const newObjectivesHtml = objectivesAffected
-          ? objectivesToHtml(newObjectives)
-          : currentObjectivesHtml;
-        updatePayload.content = composeQuestContent(newHeaderHtml, newObjectivesHtml);
-      }
       if (newName !== undefined) {
         updatePayload.pageName = newName;
       }
@@ -682,9 +681,13 @@ export class SimpleQuestTools {
           },
         };
 
+        // Pass content alongside flags — queries.ts pads missing content to
+        // empty string and wipes the page, so we MUST round-trip the current
+        // content unchanged.
         const flagResult = await this.foundryClient.query('foundry-forge-mcp.updateJournalContent', {
           journalId: newJournalId,
           pageId: newPageId,
+          content: current?.content || '',
           flags: flagsPatch,
         });
         if (!flagResult || flagResult.error) {
