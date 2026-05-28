@@ -2,7 +2,7 @@
   "id": "foundry-forge-mcp",
   "title": "Foundry Forge MCP",
   "description": "Fork of adambdooley/foundry-vtt-mcp adding direct actor image (Forge URL) and embedded-document CRUD (add/update/remove items) for MCP-driven automation. Original module connects Foundry VTT to AI models via MCP; this fork extends the write surface for NPC portrait sync and stat-block patching workflows.",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "compatibility": {
     "minimum": "13",
     "verified": "13",
