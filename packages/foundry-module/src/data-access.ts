@@ -3440,7 +3440,7 @@ export class FoundryDataAccess {
   /**
    * Get a specific journal page's content by ID
    */
-  async getJournalPageContent(journalId: string, pageId: string): Promise<{ id: string; name: string; type: string; content: string } | null> {
+  async getJournalPageContent(journalId: string, pageId: string): Promise<{ id: string; name: string; type: string; content: string; src?: string; flags?: Record<string, any>; system?: Record<string, any> } | null> {
     this.validateFoundryState();
 
     const journal = game.journal.get(journalId);
@@ -3453,11 +3453,20 @@ export class FoundryDataAccess {
       return null;
     }
 
+    // Foundry stores flags + system on every Document. Expose both so module-driven
+    // pages (e.g. SimpleQuest, which stores image URL + meta + objectives[] in
+    // flags['simple-quest']) can be inspected and updated faithfully.
+    const flags = (page as any).flags ? JSON.parse(JSON.stringify((page as any).flags)) : {};
+    const system = (page as any).system ? JSON.parse(JSON.stringify((page as any).system)) : {};
+
     return {
       id: page.id || '',
       name: page.name || '',
       type: page.type || 'text',
-      content: page.type === 'text' ? (page.text?.content || '') : (page.src || ''),
+      content: page.type === 'text' ? ((page as any).text?.content || '') : ((page as any).src || ''),
+      src: (page as any).src || undefined,
+      flags,
+      system,
     };
   }
 
