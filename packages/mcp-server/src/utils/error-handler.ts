@@ -145,8 +145,12 @@ export class ErrorHandler {
   formatErrorMessage(mcpError: MCPError, toolName: string): string {
     const typeEmoji = this.getErrorEmoji(mcpError.type);
     const recoveryText = mcpError.recoverable ? '🔄 **This can be fixed**' : '⚠️ **System error**';
-    
+
     let message = `${typeEmoji} **${mcpError.message}**\n\n${recoveryText}`;
+
+    if (mcpError.details && mcpError.details !== mcpError.message) {
+      message += `\n\n**Details:** ${mcpError.details}`;
+    }
 
     if (mcpError.suggestions && mcpError.suggestions.length > 0) {
       message += '\n\n**Suggestions:**\n';
