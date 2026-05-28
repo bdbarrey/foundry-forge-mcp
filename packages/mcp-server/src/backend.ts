@@ -23,6 +23,7 @@ import { SceneTools } from './tools/scene.js';
 import { ActorCreationTools } from './tools/actor-creation.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
+import { SimpleQuestTools } from './tools/simple-quest.js';
 import { HandoutTools } from './tools/handout-creation.js';
 
 import { DiceRollTools } from './tools/dice-roll.js';
@@ -1093,6 +1094,8 @@ async function startBackend(): Promise<void> {
 
   const questCreationTools = new QuestCreationTools({ foundryClient, logger });
 
+  const simpleQuestTools = new SimpleQuestTools({ foundryClient, logger });
+
   const handoutTools = new HandoutTools({ foundryClient, logger });
 
   const diceRollTools = new DiceRollTools({ foundryClient, logger });
@@ -1360,6 +1363,8 @@ async function startBackend(): Promise<void> {
     ...dsa5CharacterCreator.getToolDefinitions(),
 
     ...questCreationTools.getToolDefinitions(),
+
+    ...simpleQuestTools.getToolDefinitions(),
 
     ...handoutTools.getToolDefinitions(),
 
@@ -1711,6 +1716,14 @@ async function startBackend(): Promise<void> {
                 case 'search-journals':
 
                   result = await questCreationTools.handleSearchJournals(args);
+
+                  break;
+
+                // SimpleQuest (theripper93) integration
+
+                case 'update-simple-quest':
+
+                  result = await simpleQuestTools.handleUpdateSimpleQuest(args);
 
                   break;
 

@@ -742,7 +742,7 @@ export class QueryHandlers {
   /**
    * Handle update journal content request
    */
-  async handleUpdateJournalContent(data: { journalId: string; content: string; pageId?: string; newPageName?: string }): Promise<any> {
+  async handleUpdateJournalContent(data: { journalId: string; content?: string; pageId?: string; newPageName?: string; flags?: Record<string, any>; pageName?: string }): Promise<any> {
     try {
       // SECURITY: Silent GM validation
       const gmCheck = this.validateGMAccess();
@@ -755,16 +755,20 @@ export class QueryHandlers {
       if (!data.journalId) {
         throw new Error('journalId is required');
       }
-      if (!data.content) {
-        throw new Error('content is required');
+      // content is required UNLESS flags or pageName is being updated alone
+      // (SimpleQuest objective-toggle is a pure flags update — no content change).
+      if (data.content === undefined && !data.flags && data.pageName === undefined) {
+        throw new Error('content, flags, or pageName is required');
       }
 
-      const updateRequest: { journalId: string; content: string; pageId?: string | undefined; newPageName?: string | undefined } = {
+      const updateRequest: { journalId: string; content: string; pageId?: string | undefined; newPageName?: string | undefined; flags?: Record<string, any> | undefined; pageName?: string | undefined } = {
         journalId: data.journalId,
-        content: data.content,
+        content: data.content ?? '',
       };
       if (data.pageId) updateRequest.pageId = data.pageId;
       if (data.newPageName) updateRequest.newPageName = data.newPageName;
+      if (data.flags) updateRequest.flags = data.flags;
+      if (data.pageName !== undefined) updateRequest.pageName = data.pageName;
 
       return await this.dataAccess.updateJournalContent(updateRequest);
     } catch (error) {

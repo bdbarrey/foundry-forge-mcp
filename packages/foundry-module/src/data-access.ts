@@ -3476,7 +3476,7 @@ export class FoundryDataAccess {
    * - With pageId: update that specific page
    * - With newPageName (no pageId): create a new page
    */
-  async updateJournalContent(request: { journalId: string; content: string; pageId?: string | undefined; newPageName?: string | undefined }): Promise<{ success: boolean; pageId?: string | undefined; pageName?: string | undefined }> {
+  async updateJournalContent(request: { journalId: string; content?: string | undefined; pageId?: string | undefined; newPageName?: string | undefined; flags?: Record<string, any> | undefined; pageName?: string | undefined }): Promise<{ success: boolean; pageId?: string | undefined; pageName?: string | undefined }> {
     this.validateFoundryState();
 
     // Use permission system for journal updates - treating as createActor permission level
@@ -3497,27 +3497,35 @@ export class FoundryDataAccess {
 
       // Mode 1: Create a new page
       if (request.newPageName) {
-        const created = await journal.createEmbeddedDocuments('JournalEntryPage', [{
+        const createPayload: any = {
           type: 'text',
           name: request.newPageName,
-          text: {
-            content: request.content,
-          },
-        }]);
+          text: { content: request.content ?? '' },
+        };
+        if (request.flags) createPayload.flags = request.flags;
+        const created = await journal.createEmbeddedDocuments('JournalEntryPage', [createPayload]);
         const newPage = created?.[0];
         this.auditLog('updateJournalContent', request, 'success');
         return { success: true, pageId: newPage?.id || '', pageName: request.newPageName };
       }
 
-      // Mode 2: Update a specific page by ID
+      // Mode 2: Update a specific page by ID. Supports optional page rename
+      // (pageName) and flags merge — required for module-driven pages like
+      // SimpleQuest where checkboxes + completion live in flags['simple-quest'].
+      // content is optional: omit to do a flags-only or rename-only update.
       if (request.pageId) {
         const page = journal.pages.get(request.pageId);
         if (!page) {
           throw new Error(`Page not found: ${request.pageId}`);
         }
-        await page.update({
-          'text.content': request.content,
-        });
+        const updatePayload: any = {};
+        if (request.content !== undefined) updatePayload['text.content'] = request.content;
+        if (request.pageName !== undefined) updatePayload.name = request.pageName;
+        if (request.flags) updatePayload.flags = request.flags;
+        if (Object.keys(updatePayload).length === 0) {
+          throw new Error('No fields to update (provide content, pageName, or flags)');
+        }
+        await page.update(updatePayload);
         this.auditLog('updateJournalContent', request, 'success');
         return { success: true, pageId: page.id, pageName: page.name };
       }
@@ -3528,7 +3536,7 @@ export class FoundryDataAccess {
       if (firstPage) {
         // Update existing page
         await firstPage.update({
-          'text.content': request.content,
+          'text.content': request.content ?? '',
         });
         this.auditLog('updateJournalContent', request, 'success');
         return { success: true, pageId: firstPage.id, pageName: firstPage.name };
@@ -3538,7 +3546,7 @@ export class FoundryDataAccess {
           type: 'text',
           name: 'Quest Details',
           text: {
-            content: request.content,
+            content: request.content ?? '',
           },
         }]);
         const newPage = created?.[0];
