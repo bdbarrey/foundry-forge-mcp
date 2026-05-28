@@ -50,7 +50,12 @@ const KNOWN_CATEGORIES = [
 ] as const;
 
 function objectiveKey(text: string): string {
-  return text.replace(/\s+/g, '');
+  // Strip whitespace AND dots/brackets — Foundry's Document.update() treats
+  // dot-keys as nested data paths (so "St. Andral" → {St: {Andral: 0}}). The
+  // real SimpleQuest data we observed only contains alphanumerics + apostrophe
+  // ("DetermineDoru'sfate"), which suggests this is also TheRipper93's
+  // approach. Apostrophes are Foundry-safe and preserved.
+  return text.replace(/[\s.\[\]]+/g, '');
 }
 
 function questSlug(name: string): string {
@@ -322,11 +327,33 @@ export class SimpleQuestTools {
         [slug]: newCompleted,
       };
 
+      // Foundry's Document.update merges nested objects. For set-objectives
+      // (which fully replaces the checkbox/secret maps), we need to explicitly
+      // delete any orphaned keys from the previous objective list. Foundry's
+      // delete syntax is `-=<key>` set to null. We only do this when the
+      // operation rewrites the whole list — otherwise targeted edits would
+      // wipe other objectives.
+      const isFullRewrite = req.operation === 'set-objectives';
+      const finalCheckboxes: Record<string, any> = { ...newCheckboxes };
+      const finalSecret: Record<string, any> = { ...newSecret };
+      if (isFullRewrite) {
+        for (const oldKey of Object.keys(currentCheckboxes)) {
+          if (!(oldKey in newCheckboxes) && !/[.\[\]]/.test(oldKey)) {
+            finalCheckboxes[`-=${oldKey}`] = null;
+          }
+        }
+        for (const oldKey of Object.keys(currentSecret)) {
+          if (!(oldKey in newSecret) && !/[.\[\]]/.test(oldKey)) {
+            finalSecret[`-=${oldKey}`] = null;
+          }
+        }
+      }
+
       const flagsPatch: Record<string, any> = {
         'simple-quest': {
           ...currentFlags,
-          checkboxes: newCheckboxes,
-          secret: newSecret,
+          checkboxes: finalCheckboxes,
+          secret: finalSecret,
           completed: newCompleted,
           completedSubquests,
           lastUpdated: Date.now(),
