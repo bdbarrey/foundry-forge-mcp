@@ -240,7 +240,7 @@ export class QuestCreationTools {
       const questContent = this.generateQuestContent(request);
 
       // Create journal entry via Foundry client
-      const result = await this.foundryClient.query('foundry-mcp-bridge.createJournalEntry', {
+      const result = await this.foundryClient.query('foundry-forge-mcp.createJournalEntry', {
         name: request.questTitle,
         content: questContent,
         folderName: request.folderName,
@@ -279,7 +279,7 @@ export class QuestCreationTools {
       const request = requestSchema.parse(args);
 
       // Get journal content first
-      const journalResult = await this.foundryClient.query('foundry-mcp-bridge.getJournalContent', {
+      const journalResult = await this.foundryClient.query('foundry-forge-mcp.getJournalContent', {
         journalId: request.journalId
       });
 
@@ -291,7 +291,7 @@ export class QuestCreationTools {
       const updatedContent = this.addNPCLinkToJournal(journalResult.content, request.npcName, request.relationship);
 
       // Update journal with NPC link
-      const updateResult = await this.foundryClient.query('foundry-mcp-bridge.updateJournalContent', {
+      const updateResult = await this.foundryClient.query('foundry-forge-mcp.updateJournalContent', {
         journalId: request.journalId,
         content: updatedContent
       });
@@ -334,7 +334,7 @@ export class QuestCreationTools {
       // If creating a new page, skip the read-modify-write cycle
       if (request.newPageName) {
         const formattedContent = this.formatNewPageContent(request.newContent, request.updateType);
-        const result = await this.foundryClient.query('foundry-mcp-bridge.updateJournalContent', {
+        const result = await this.foundryClient.query('foundry-forge-mcp.updateJournalContent', {
           journalId: request.journalId,
           content: formattedContent,
           newPageName: request.newPageName,
@@ -357,7 +357,7 @@ export class QuestCreationTools {
       // Get current journal content (for the target page)
       let currentContent: string;
       if (request.pageId) {
-        const pageResult = await this.foundryClient.query('foundry-mcp-bridge.getJournalPageContent', {
+        const pageResult = await this.foundryClient.query('foundry-forge-mcp.getJournalPageContent', {
           journalId: request.journalId,
           pageId: request.pageId,
         });
@@ -366,7 +366,7 @@ export class QuestCreationTools {
         }
         currentContent = pageResult.content;
       } else {
-        const currentJournal = await this.foundryClient.query('foundry-mcp-bridge.getJournalContent', {
+        const currentJournal = await this.foundryClient.query('foundry-forge-mcp.getJournalContent', {
           journalId: request.journalId
         });
         if (!currentJournal || currentJournal.error) {
@@ -394,7 +394,7 @@ export class QuestCreationTools {
       }
 
       // Update the journal
-      const result = await this.foundryClient.query('foundry-mcp-bridge.updateJournalContent', {
+      const result = await this.foundryClient.query('foundry-forge-mcp.updateJournalContent', {
         journalId: request.journalId,
         content: updatedContent,
         pageId: request.pageId,
@@ -415,13 +415,13 @@ export class QuestCreationTools {
       // Verify the update by reading the content back
       let verifyContent: string;
       if (request.pageId) {
-        const verifyResult = await this.foundryClient.query('foundry-mcp-bridge.getJournalPageContent', {
+        const verifyResult = await this.foundryClient.query('foundry-forge-mcp.getJournalPageContent', {
           journalId: request.journalId,
           pageId: request.pageId,
         });
         verifyContent = verifyResult?.content || '';
       } else {
-        const verifyResult = await this.foundryClient.query('foundry-mcp-bridge.getJournalContent', {
+        const verifyResult = await this.foundryClient.query('foundry-forge-mcp.getJournalContent', {
           journalId: request.journalId
         });
         verifyContent = verifyResult?.content || '';
@@ -475,7 +475,7 @@ export class QuestCreationTools {
 
       // Mode: Read a specific page
       if (request.journalId && request.pageId) {
-        const pageResult = await this.foundryClient.query('foundry-mcp-bridge.getJournalPageContent', {
+        const pageResult = await this.foundryClient.query('foundry-forge-mcp.getJournalPageContent', {
           journalId: request.journalId,
           pageId: request.pageId,
         });
@@ -494,7 +494,7 @@ export class QuestCreationTools {
 
       // Mode: Read a specific journal (first page + page manifest)
       if (request.journalId) {
-        const journalContent = await this.foundryClient.query('foundry-mcp-bridge.getJournalContent', {
+        const journalContent = await this.foundryClient.query('foundry-forge-mcp.getJournalContent', {
           journalId: request.journalId,
         });
 
@@ -518,7 +518,7 @@ export class QuestCreationTools {
       const bridgeArgs: any = {};
       if (request.folder) bridgeArgs.folder = request.folder;
       if (request.nameContains) bridgeArgs.nameContains = request.nameContains;
-      const journals = await this.foundryClient.query('foundry-mcp-bridge.listJournals', bridgeArgs);
+      const journals = await this.foundryClient.query('foundry-forge-mcp.listJournals', bridgeArgs);
 
       if (!journals || journals.error) {
         throw new Error(`Failed to retrieve journals${journals?.error ? `: ${journals.error}` : ''}`);
@@ -537,7 +537,7 @@ export class QuestCreationTools {
       if (request.includeContent) {
         for (const journal of filteredJournals) {
           try {
-            const content = await this.foundryClient.query('foundry-mcp-bridge.getJournalContent', {
+            const content = await this.foundryClient.query('foundry-forge-mcp.getJournalContent', {
               journalId: journal.id
             });
             journal.contentPreview = content?.content?.substring(0, 150) + '...' || '';
@@ -573,7 +573,7 @@ export class QuestCreationTools {
       const request = requestSchema.parse(args);
 
       // Get all journals (now includes page metadata)
-      const journals = await this.foundryClient.query('foundry-mcp-bridge.listJournals', {});
+      const journals = await this.foundryClient.query('foundry-forge-mcp.listJournals', {});
 
       if (!journals || journals.error) {
         throw new Error('Failed to retrieve journals');
@@ -606,7 +606,7 @@ export class QuestCreationTools {
           for (const page of pages) {
             if (page.type !== 'text') continue;
             try {
-              const pageContent = await this.foundryClient.query('foundry-mcp-bridge.getJournalPageContent', {
+              const pageContent = await this.foundryClient.query('foundry-forge-mcp.getJournalPageContent', {
                 journalId: journal.id,
                 pageId: page.id,
               });
