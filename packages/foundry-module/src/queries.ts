@@ -96,6 +96,7 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.getJournalContent`] = this.handleGetJournalContent.bind(this);
     CONFIG.queries[`${modulePrefix}.getJournalPageContent`] = this.handleGetJournalPageContent.bind(this);
     CONFIG.queries[`${modulePrefix}.updateJournalContent`] = this.handleUpdateJournalContent.bind(this);
+    CONFIG.queries[`${modulePrefix}.moveJournalPage`] = this.handleMoveJournalPage.bind(this);
 
     // Phase 4: Dice roll queries
     CONFIG.queries[`${modulePrefix}.request-player-rolls`] = this.handleRequestPlayerRolls.bind(this);
@@ -742,6 +743,25 @@ export class QueryHandlers {
   /**
    * Handle update journal content request
    */
+  async handleMoveJournalPage(data: { sourceJournalId: string; sourcePageId: string; targetJournalId: string }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data.sourceJournalId) throw new Error('sourceJournalId is required');
+      if (!data.sourcePageId) throw new Error('sourcePageId is required');
+      if (!data.targetJournalId) throw new Error('targetJournalId is required');
+
+      return await this.dataAccess.moveJournalPage(data);
+    } catch (error) {
+      throw new Error(`Failed to move journal page: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
   async handleUpdateJournalContent(data: { journalId: string; content?: string; pageId?: string; newPageName?: string; flags?: Record<string, any>; pageName?: string }): Promise<any> {
     try {
       // SECURITY: Silent GM validation

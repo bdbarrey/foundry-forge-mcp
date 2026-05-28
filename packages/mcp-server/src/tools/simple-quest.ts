@@ -211,13 +211,16 @@ export class SimpleQuestTools {
                 'rename',
                 'set-header',
                 'clear-header',
+                'move-to-category',
               ],
               description:
                 'Operation: set-objectives replaces the full list; add/remove-objective edit one ' +
                 'entry; check/uncheck-objective toggle a checkbox; mark-complete/incomplete sets ' +
                 'overall completion + all checkboxes; rename changes the quest title; set-header ' +
                 'sets/replaces the image + meta block at the top of the quest page; clear-header ' +
-                'removes the image+meta block while leaving objectives intact.',
+                'removes the image+meta block while leaving objectives intact; move-to-category ' +
+                'moves the quest page to a different category JournalEntry (e.g. Main Story → ' +
+                'Completed). The page gets a new pageId after the move.',
             },
             objectives: {
               type: 'array',
@@ -278,6 +281,20 @@ export class SimpleQuestTools {
                 'For set-header (and optionally set-objectives): SimpleQuest mask number (1-5, ' +
                 'default 4). Selects the ornate border style applied to the image.',
             },
+            targetCategory: {
+              type: 'string',
+              description:
+                'For move-to-category: the destination category name ("Main Story", "Side Quests", ' +
+                '"Completed", "Failed", "Achievements", or a custom category like "The Curse of ' +
+                'Strahd"). Must match an existing JournalEntry inside the Quests folder.',
+            },
+            autoMarkOnMove: {
+              type: 'boolean',
+              description:
+                'For move-to-category: when targetCategory is "Completed", also set the completed ' +
+                'flag + all checkboxes to 1; when targetCategory is "Failed", set completed=false. ' +
+                'Default true. Set false to leave checkbox/completion state untouched.',
+            },
           },
           required: ['questName', 'operation'],
         },
@@ -302,6 +319,7 @@ export class SimpleQuestTools {
             'rename',
             'set-header',
             'clear-header',
+            'move-to-category',
           ]),
           objectives: z.array(z.string().min(1)).optional(),
           secretObjectives: z.array(z.string().min(1)).optional(),
@@ -313,6 +331,8 @@ export class SimpleQuestTools {
             .array(z.object({ label: z.string().min(1), value: z.string().min(1) }))
             .optional(),
           headerMaskNumber: z.number().int().min(1).max(20).optional(),
+          targetCategory: z.string().min(1).optional(),
+          autoMarkOnMove: z.boolean().optional(),
         })
         .superRefine((data, ctx) => {
           const op = data.operation;
@@ -328,12 +348,23 @@ export class SimpleQuestTools {
           if (op === 'set-header' && !data.headerImageUrl) {
             ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'set-header requires headerImageUrl' });
           }
+          if (op === 'move-to-category' && !data.targetCategory) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'move-to-category requires targetCategory' });
+          }
         });
 
       const req = schema.parse(args);
 
       // Locate the page
       const match = await this.findQuestPage(req.questName, req.category);
+
+      // move-to-category is a separate flow: it physically moves the page
+      // document between parent JournalEntries (delete+create on Foundry side
+      // via the bridge moveJournalPage call). After the move we may patch
+      // flags on the new page.
+      if (req.operation === 'move-to-category') {
+        return await this.handleMoveToCategory(req, match);
+      }
 
       // Read current state
       const current = await this.foundryClient.query('foundry-forge-mcp.getJournalPageContent', {
@@ -581,6 +612,96 @@ export class SimpleQuestTools {
     }
     const m = matches[0]!;
     return { questName: m.pageName, category: m.category, journalId: m.journalId, pageId: m.pageId };
+  }
+
+  /**
+   * Move a quest page to a different category JournalEntry. Resolves target
+   * by category name within the Quests folder, calls the bridge moveJournalPage,
+   * then optionally patches completion flags on the new page (Completed → set
+   * all checkboxes + completed:true; Failed → completed:false).
+   */
+  private async handleMoveToCategory(
+    req: any,
+    match: { questName: string; category: string; journalId: string; pageId: string },
+  ): Promise<any> {
+    const target = req.targetCategory as string;
+    if (target.toLowerCase() === match.category.toLowerCase()) {
+      throw new Error(`Quest "${match.questName}" is already in category "${match.category}".`);
+    }
+
+    // Resolve target journal id by category name in the Quests folder.
+    const journals = await this.foundryClient.query('foundry-forge-mcp.listJournals', { folder: 'Quests' });
+    const list: any[] = Array.isArray(journals) ? journals : journals?.items || [];
+    const targetJournal = list.find((j) => (j.name || '').toLowerCase() === target.toLowerCase());
+    if (!targetJournal) {
+      throw new Error(
+        `No category JournalEntry named "${target}" in the Quests folder. Existing categories: ${list.map((j) => j.name).join(', ')}.`,
+      );
+    }
+
+    // Perform the move.
+    const moveResult = await this.foundryClient.query('foundry-forge-mcp.moveJournalPage', {
+      sourceJournalId: match.journalId,
+      sourcePageId: match.pageId,
+      targetJournalId: targetJournal.id,
+    });
+    if (!moveResult || moveResult.error || moveResult.success === false) {
+      throw new Error(`Move failed: ${moveResult?.error || 'unknown'}`);
+    }
+    const newPageId = moveResult.newPageId as string;
+    const newJournalId = moveResult.newJournalId as string;
+
+    // Auto-mark based on target. Default true; user can opt out.
+    const autoMark = req.autoMarkOnMove !== false;
+    let flagsTouched = false;
+    if (autoMark) {
+      const targetLower = target.toLowerCase();
+      const isCompleted = targetLower === 'completed';
+      const isFailed = targetLower === 'failed';
+      if (isCompleted || isFailed) {
+        // Read the just-moved page to compute its checkbox keys.
+        const current = await this.foundryClient.query('foundry-forge-mcp.getJournalPageContent', {
+          journalId: newJournalId,
+          pageId: newPageId,
+        });
+        const { objectivesHtml } = splitQuestContent(current?.content || '');
+        const objectives = parseObjectives(objectivesHtml);
+        const currentFlags = (current?.flags && current.flags['simple-quest']) || {};
+
+        const newCheckboxes: Record<string, 0 | 1> = {};
+        for (const o of objectives) newCheckboxes[objectiveKey(o)] = isCompleted ? 1 : 0;
+
+        const slug = questSlug(match.questName);
+        const flagsPatch: Record<string, any> = {
+          'simple-quest': {
+            ...currentFlags,
+            checkboxes: newCheckboxes,
+            completed: isCompleted,
+            completedSubquests: { ...(currentFlags.completedSubquests || {}), [slug]: isCompleted },
+            lastUpdated: Date.now(),
+          },
+        };
+
+        const flagResult = await this.foundryClient.query('foundry-forge-mcp.updateJournalContent', {
+          journalId: newJournalId,
+          pageId: newPageId,
+          flags: flagsPatch,
+        });
+        if (!flagResult || flagResult.error) {
+          throw new Error(`Move succeeded but auto-mark flag write failed: ${flagResult?.error || 'unknown'}`);
+        }
+        flagsTouched = true;
+      }
+    }
+
+    return {
+      success: true,
+      questName: match.questName,
+      operation: 'move-to-category',
+      from: { category: match.category, journalId: match.journalId, pageId: match.pageId },
+      to: { category: targetJournal.name, journalId: newJournalId, pageId: newPageId },
+      autoMarkApplied: flagsTouched,
+    };
   }
 
   private findObjectiveIndex(objectives: string[], text: string): number {

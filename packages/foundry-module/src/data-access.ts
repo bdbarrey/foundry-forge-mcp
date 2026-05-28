@@ -3561,6 +3561,56 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Move a JournalEntryPage from one parent JournalEntry to another. Used by
+   * SimpleQuest's move-to-category operation (e.g. "St. Andral's Feast" from
+   * the "Main Story" entry to "Completed"). Foundry has no in-place parent
+   * change for embedded documents, so the move is delete-on-source + create-
+   * on-target; the new page gets a fresh ID. Preserves name, type, text,
+   * src, flags, system, ownership, sort.
+   */
+  async moveJournalPage(request: {
+    sourceJournalId: string;
+    sourcePageId: string;
+    targetJournalId: string;
+  }): Promise<{ success: boolean; newPageId: string; newJournalId: string }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', {
+      quantity: 1,
+    });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Journal page move denied: ${permissionCheck.reason}`);
+    }
+
+    const sourceJournal = game.journal.get(request.sourceJournalId);
+    if (!sourceJournal) throw new Error(`Source journal not found: ${request.sourceJournalId}`);
+    const targetJournal = game.journal.get(request.targetJournalId);
+    if (!targetJournal) throw new Error(`Target journal not found: ${request.targetJournalId}`);
+
+    const sourcePage = sourceJournal.pages.get(request.sourcePageId);
+    if (!sourcePage) throw new Error(`Source page not found: ${request.sourcePageId}`);
+
+    try {
+      // toObject() captures the document data. Strip _id so the target
+      // journal assigns a fresh one.
+      const pageData: any = (sourcePage as any).toObject ? (sourcePage as any).toObject() : JSON.parse(JSON.stringify(sourcePage));
+      delete pageData._id;
+
+      const created = await targetJournal.createEmbeddedDocuments('JournalEntryPage', [pageData]);
+      const newPage = created?.[0];
+      if (!newPage) throw new Error('Failed to create page on target journal');
+
+      await sourcePage.delete();
+
+      this.auditLog('moveJournalPage', request, 'success');
+      return { success: true, newPageId: newPage.id, newJournalId: targetJournal.id };
+    } catch (error) {
+      this.auditLog('moveJournalPage', request, 'failure', error instanceof Error ? error.message : 'Unknown error');
+      throw error;
+    }
+  }
+
+  /**
    * Create a player-handout journal entry: one image page (Foundry-fetchable URL)
    * + optional GM-only text page. Pairs with cos-pipeline scene generation, where
    * the image lives on Forge and the URL is the page src.
