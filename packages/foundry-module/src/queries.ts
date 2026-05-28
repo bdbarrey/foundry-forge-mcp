@@ -592,6 +592,7 @@ export class QueryHandlers {
       return await this.dataAccess.createJournalEntry({
         name: data.name,
         content: data.content,
+        folderName: data.folderName,
         additionalPages: data.additionalPages,
       });
     } catch (error) {
@@ -658,7 +659,7 @@ export class QueryHandlers {
   /**
    * Handle list journals request
    */
-  async handleListJournals(data: { nameContains?: string; page?: number; pageSize?: number } = {}): Promise<any> {
+  async handleListJournals(data: { nameContains?: string; folder?: string; page?: number; pageSize?: number } = {}): Promise<any> {
     try {
       // SECURITY: Silent GM validation
       const gmCheck = this.validateGMAccess();
@@ -672,6 +673,15 @@ export class QueryHandlers {
       if (data?.nameContains) {
         const needle = data.nameContains.toLowerCase();
         journals = journals.filter(j => (j.name || '').toLowerCase().includes(needle));
+      }
+
+      if (data?.folder) {
+        const folderNeedle = data.folder.toLowerCase();
+        journals = journals.filter(j => {
+          const path = (j.folderPath || '').toLowerCase();
+          const name = (j.folder || '').toLowerCase();
+          return path === folderNeedle || name === folderNeedle || path.startsWith(folderNeedle + '/');
+        });
       }
 
       return this.paginate(journals, this.pageOpts(data));

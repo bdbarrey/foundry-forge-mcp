@@ -3338,20 +3338,68 @@ export class FoundryDataAccess {
   /**
    * List all journal entries with page metadata
    */
-  async listJournals(): Promise<Array<{ id: string; name: string; type: string; pageCount: number; pages: Array<{ id: string; name: string; type: string }> }>> {
+  async listJournals(): Promise<Array<{ id: string; name: string; type: string; folder: string; folderId: string; folderPath: string; pageCount: number; pages: Array<{ id: string; name: string; type: string }> }>> {
     this.validateFoundryState();
 
-    return game.journal.map((journal: any) => ({
-      id: journal.id || '',
-      name: journal.name || '',
-      type: 'JournalEntry',
-      pageCount: journal.pages?.size || 0,
-      pages: journal.pages?.map((page: any) => ({
-        id: page.id || '',
-        name: page.name || '',
-        type: page.type || 'text',
-      })) || [],
-    }));
+    const results: Array<{ id: string; name: string; type: string; folder: string; folderId: string; folderPath: string; pageCount: number; pages: Array<{ id: string; name: string; type: string }> }> = [];
+    const skipped: Array<{ id: string; name: string; error: string }> = [];
+
+    for (const journal of game.journal) {
+      try {
+        const pages: Array<{ id: string; name: string; type: string }> = [];
+        if (journal.pages) {
+          for (const page of journal.pages) {
+            try {
+              pages.push({
+                id: (page as any).id || '',
+                name: (page as any).name || '',
+                type: (page as any).type || 'text',
+              });
+            } catch (pageErr) {
+              const pageName = (page as any)?.name || '<unknown>';
+              console.warn(`[${this.moduleId}] listJournals: skipping page "${pageName}" in journal "${(journal as any).name}": ${pageErr instanceof Error ? pageErr.message : String(pageErr)}`);
+            }
+          }
+        }
+
+        const folder = (journal as any).folder;
+        const folderName = folder?.name || '';
+        const folderId = folder?.id || '';
+        let folderPath = folderName;
+        if (folder) {
+          const segments: string[] = [folderName];
+          let parent = folder.folder;
+          while (parent) {
+            segments.unshift(parent.name);
+            parent = parent.folder;
+          }
+          folderPath = segments.join('/');
+        }
+
+        results.push({
+          id: (journal as any).id || '',
+          name: (journal as any).name || '',
+          type: 'JournalEntry',
+          folder: folderName,
+          folderId,
+          folderPath,
+          pageCount: (journal as any).pages?.size || pages.length,
+          pages,
+        });
+      } catch (journalErr) {
+        const journalName = (journal as any)?.name || '<unknown>';
+        const journalId = (journal as any)?.id || '<no-id>';
+        const msg = journalErr instanceof Error ? journalErr.message : String(journalErr);
+        skipped.push({ id: journalId, name: journalName, error: msg });
+        console.warn(`[${this.moduleId}] listJournals: skipping journal "${journalName}" (${journalId}): ${msg}`);
+      }
+    }
+
+    if (skipped.length > 0) {
+      console.warn(`[${this.moduleId}] listJournals: skipped ${skipped.length} malformed journal(s)`, skipped);
+    }
+
+    return results;
   }
 
   /**
@@ -5623,50 +5671,70 @@ export class FoundryDataAccess {
   /**
    * Get or create a folder for organizing MCP-generated content
    */
-  private async getOrCreateFolder(folderName: string, type: 'Actor' | 'JournalEntry'): Promise<string | null> {
+  private async getOrCreateFolder(folderPath: string, type: 'Actor' | 'JournalEntry'): Promise<string | null> {
     try {
-      // Look for existing folder
-      const existingFolder = game.folders?.find((f: any) => 
-        f.name === folderName && f.type === type
-      );
-      
-      if (existingFolder) {
-        return existingFolder.id;
-      }
+      // Support slash-path like "Quests/Arc D - St Andral's Feast" — walk segments, creating each as needed.
+      const segments = folderPath.split('/').map(s => s.trim()).filter(Boolean);
+      if (segments.length === 0) return null;
 
-      // Create appropriate descriptions
-      let description = '';
-      if (type === 'Actor') {
-        if (folderName === 'Foundry MCP Creatures') {
-          description = 'Creatures and monsters created via Foundry MCP Bridge';
+      let parentId: string | null = null;
+      let lastFolderId: string | null = null;
+
+      for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i] as string;
+        const isLeaf = i === segments.length - 1;
+
+        // Match by name + type + parent (slash-aware lookup)
+        const existing = game.folders?.find((f: any) =>
+          f.name === segment &&
+          f.type === type &&
+          ((f.folder?.id || null) === parentId)
+        );
+
+        if (existing) {
+          parentId = existing.id;
+          lastFolderId = existing.id;
+          continue;
+        }
+
+        // Build description for new folder
+        let description = '';
+        if (type === 'Actor') {
+          description = segment === 'Foundry MCP Creatures'
+            ? 'Creatures and monsters created via Foundry MCP Bridge'
+            : `NPCs and creatures related to: ${segment}`;
         } else {
-          description = `NPCs and creatures related to: ${folderName}`;
+          description = `Quest and content for: ${segment}`;
         }
-      } else {
-        description = `Quest and content for: ${folderName}`;
+
+        const folderData: any = {
+          name: segment,
+          type,
+          description,
+          color: type === 'Actor' ? '#4a90e2' : '#f39c12',
+          sort: 0,
+          folder: parentId,
+          flags: {
+            'foundry-forge-mcp': {
+              mcpGenerated: true,
+              createdAt: new Date().toISOString(),
+              questContext: type === 'JournalEntry' && isLeaf ? segment : undefined,
+            },
+          },
+        };
+
+        const created = await Folder.create(folderData);
+        if (!created) {
+          console.warn(`[${this.moduleId}] Failed to create folder segment "${segment}" in path "${folderPath}"`);
+          return lastFolderId;
+        }
+        parentId = created.id;
+        lastFolderId = created.id;
       }
 
-      // Create new folder
-      const folderData = {
-        name: folderName,
-        type: type,
-        description: description,
-        color: type === 'Actor' ? '#4a90e2' : '#f39c12', // Blue for actors, orange for journals
-        sort: 0,
-        parent: null,
-        flags: {
-          'foundry-forge-mcp': {
-            mcpGenerated: true,
-            createdAt: new Date().toISOString(),
-            questContext: type === 'JournalEntry' ? folderName : undefined
-          }
-        }
-      };
-
-      const folder = await Folder.create(folderData);
-      return folder?.id || null;
+      return lastFolderId;
     } catch (error) {
-      console.warn(`[${this.moduleId}] Failed to create folder "${folderName}":`, error);
+      console.warn(`[${this.moduleId}] Failed to create folder "${folderPath}":`, error);
       // Return null so items are created without folders rather than failing
       return null;
     }

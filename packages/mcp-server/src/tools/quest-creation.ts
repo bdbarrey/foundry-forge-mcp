@@ -83,6 +83,10 @@ export class QuestCreationTools {
               type: 'string',
               description: 'Quest rewards description (optional)'
             },
+            folderName: {
+              type: 'string',
+              description: 'Optional folder to place the quest in. Accepts a flat name ("Quests") or slash-path ("Quests/Arc D"); intermediate folders are created if missing. For SimpleQuest module compatibility, pass the folder name SimpleQuest reads from (default: "Quests"). If omitted, falls back to creating a folder named after the quest title (legacy behavior).'
+            },
             additionalPages: {
               type: 'array',
               items: {
@@ -155,13 +159,21 @@ export class QuestCreationTools {
       },
       {
         name: 'list-journals',
-        description: 'List all journal entries, or read a specific journal/page. Without parameters: lists all journals with their pages (id, name, type). With journalId: reads the journal\'s first text page content and shows all available pages. With journalId + pageId: reads a specific page\'s full content.',
+        description: 'List journal entries, or read a specific journal/page. Returns id, name, type, folder, folderId, folderPath, pageCount, pages[]. Without parameters: lists all journals. With journalId: reads the first text page + page manifest. With journalId + pageId: reads a specific page. Use `folder` to scope to a folder (matches name or full slash-path) — e.g. SimpleQuest uses a "Quests" folder by convention.',
         inputSchema: {
           type: 'object',
           properties: {
             filterQuests: {
               type: 'boolean',
-              description: 'Only show journals that appear to be quest-related (default: false)'
+              description: 'Only show journals that appear to be quest-related by name heuristic (default: false). Independent of `folder` filtering.'
+            },
+            folder: {
+              type: 'string',
+              description: 'Optional folder filter. Accepts a folder name ("Quests") or full slash-path ("Quests/Arc D"). Matches the folder and everything beneath it. Case-insensitive.'
+            },
+            nameContains: {
+              type: 'string',
+              description: 'Optional case-insensitive substring filter on journal name.'
             },
             includeContent: {
               type: 'boolean',
@@ -215,6 +227,7 @@ export class QuestCreationTools {
         questGiver: z.string().optional(),
         npcName: z.string().optional(),
         rewards: z.string().optional(),
+        folderName: z.string().optional(),
         additionalPages: z.array(z.object({
           name: z.string().min(1),
           content: z.string().min(1),
@@ -230,6 +243,7 @@ export class QuestCreationTools {
       const result = await this.foundryClient.query('foundry-mcp-bridge.createJournalEntry', {
         name: request.questTitle,
         content: questContent,
+        folderName: request.folderName,
         additionalPages: request.additionalPages,
       });
 
@@ -452,7 +466,9 @@ export class QuestCreationTools {
         filterQuests: z.boolean().optional().default(false),
         includeContent: z.boolean().optional().default(false),
         journalId: z.string().optional(),
-        pageId: z.string().optional()
+        pageId: z.string().optional(),
+        folder: z.string().optional(),
+        nameContains: z.string().optional()
       });
 
       const request = requestSchema.parse(args);
@@ -498,11 +514,14 @@ export class QuestCreationTools {
         };
       }
 
-      // Mode: List all journals
-      const journals = await this.foundryClient.query('foundry-mcp-bridge.listJournals', {});
+      // Mode: List all journals (bridge handles folder + nameContains server-side)
+      const bridgeArgs: any = {};
+      if (request.folder) bridgeArgs.folder = request.folder;
+      if (request.nameContains) bridgeArgs.nameContains = request.nameContains;
+      const journals = await this.foundryClient.query('foundry-mcp-bridge.listJournals', bridgeArgs);
 
       if (!journals || journals.error) {
-        throw new Error('Failed to retrieve journals');
+        throw new Error(`Failed to retrieve journals${journals?.error ? `: ${journals.error}` : ''}`);
       }
 
       let filteredJournals = journals;
