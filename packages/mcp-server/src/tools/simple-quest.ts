@@ -96,6 +96,62 @@ function parseObjectives(html: string): string[] {
   return items;
 }
 
+export interface QuestHeader {
+  imageUrl: string;
+  meta: { label: string; value: string }[];
+  maskNumber: number;
+}
+
+/**
+ * SimpleQuest header table — populated CoS Reloaded quests embed an image +
+ * meta-fields block at the top of text.content as a <table>. The right cell
+ * shows <strong>Label:</strong> Value pairs. The image gets a webkit-mask
+ * for the ornate border (mask1.webp..mask5.webp).
+ */
+function buildHeaderTable(h: QuestHeader): string {
+  const maskPath = `modules/simple-quest/assets/mask/mask${h.maskNumber}.webp`;
+  const metaCell = h.meta.length
+    ? h.meta
+        .map((m) => `<p><strong>${escapeHtml(m.label)}: </strong>${escapeHtml(m.value)}</p>`)
+        .join('')
+    : '';
+  return (
+    `<table style="width:100%;border:none;background:transparent">` +
+    `<tbody>` +
+    `<tr style="background:transparent">` +
+    `<td style="width:50%;padding:0;margin:0">` +
+    `<img style="-webkit-mask-size:100% 100%;-webkit-mask-image:url('${maskPath}');object-fit:cover;border:none;border-radius:5px;width:100%;aspect-ratio:1/1" src="${h.imageUrl}" />` +
+    `</td>` +
+    `<td style="padding:2rem;font-size:1.5rem">${metaCell}</td>` +
+    `</tr>` +
+    `<tr style="background:transparent"><td colspan="2"><p></p></td></tr>` +
+    `</tbody>` +
+    `</table>`
+  );
+}
+
+/**
+ * Split current text.content into (header table HTML if present, objective
+ * list HTML if present). Preserves the existing header byte-for-byte so we
+ * never round-trip through buildHeaderTable when the caller hasn't asked to
+ * change it.
+ */
+function splitQuestContent(html: string): { headerHtml: string; objectivesHtml: string } {
+  if (!html) return { headerHtml: '', objectivesHtml: '' };
+  // Match the FIRST top-level <table>...</table> as the header.
+  const tableRe = /<table[^>]*>[\s\S]*?<\/table>/i;
+  const m = html.match(tableRe);
+  if (!m) return { headerHtml: '', objectivesHtml: html };
+  const headerHtml = m[0];
+  const remaining = html.slice(0, m.index!) + html.slice(m.index! + headerHtml.length);
+  return { headerHtml, objectivesHtml: remaining.trim() };
+}
+
+function composeQuestContent(headerHtml: string, objectivesHtml: string): string {
+  if (headerHtml && objectivesHtml) return `${headerHtml}${objectivesHtml}`;
+  return headerHtml || objectivesHtml || '';
+}
+
 function decodeEntities(s: string): string {
   return s
     .replace(/&amp;/g, '&')
@@ -153,11 +209,15 @@ export class SimpleQuestTools {
                 'mark-complete',
                 'mark-incomplete',
                 'rename',
+                'set-header',
+                'clear-header',
               ],
               description:
                 'Operation: set-objectives replaces the full list; add/remove-objective edit one ' +
                 'entry; check/uncheck-objective toggle a checkbox; mark-complete/incomplete sets ' +
-                'overall completion + all checkboxes; rename changes the quest title.',
+                'overall completion + all checkboxes; rename changes the quest title; set-header ' +
+                'sets/replaces the image + meta block at the top of the quest page; clear-header ' +
+                'removes the image+meta block while leaving objectives intact.',
             },
             objectives: {
               type: 'array',
@@ -190,6 +250,34 @@ export class SimpleQuestTools {
               type: 'string',
               description: 'For rename: the new quest title.',
             },
+            headerImageUrl: {
+              type: 'string',
+              description:
+                'For set-header (and optionally set-objectives): direct URL to the quest header ' +
+                'image. Forge CDN URL (https://assets.forge-vtt.com/...) renders inline without ' +
+                're-upload. Aspect ratio is forced to 1:1 by SimpleQuest, so 1024x1024 PNGs work best.',
+            },
+            headerMeta: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  label: { type: 'string' },
+                  value: { type: 'string' },
+                },
+                required: ['label', 'value'],
+              },
+              description:
+                'For set-header (and optionally set-objectives): array of {label, value} pairs ' +
+                'rendered as "<strong>Label:</strong> Value" in the right cell of the header. ' +
+                'Common labels: Region, Government, Religion, Quest Giver, Reward.',
+            },
+            headerMaskNumber: {
+              type: 'number',
+              description:
+                'For set-header (and optionally set-objectives): SimpleQuest mask number (1-5, ' +
+                'default 4). Selects the ornate border style applied to the image.',
+            },
           },
           required: ['questName', 'operation'],
         },
@@ -212,12 +300,19 @@ export class SimpleQuestTools {
             'mark-complete',
             'mark-incomplete',
             'rename',
+            'set-header',
+            'clear-header',
           ]),
           objectives: z.array(z.string().min(1)).optional(),
           secretObjectives: z.array(z.string().min(1)).optional(),
           objectiveText: z.string().optional(),
           secret: z.boolean().optional(),
           newName: z.string().optional(),
+          headerImageUrl: z.string().url().optional(),
+          headerMeta: z
+            .array(z.object({ label: z.string().min(1), value: z.string().min(1) }))
+            .optional(),
+          headerMaskNumber: z.number().int().min(1).max(20).optional(),
         })
         .superRefine((data, ctx) => {
           const op = data.operation;
@@ -229,6 +324,9 @@ export class SimpleQuestTools {
           }
           if (op === 'rename' && !data.newName) {
             ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'rename requires newName' });
+          }
+          if (op === 'set-header' && !data.headerImageUrl) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'set-header requires headerImageUrl' });
           }
         });
 
@@ -246,7 +344,11 @@ export class SimpleQuestTools {
         throw new Error(`Could not read current page: ${current?.error || 'no data'}`);
       }
 
-      const currentObjectives = parseObjectives(current.content || '');
+      // Split current content into (header, objectives) so we can preserve
+      // the header on operations that only touch objectives, and vice versa.
+      const { headerHtml: currentHeaderHtml, objectivesHtml: currentObjectivesHtml } =
+        splitQuestContent(current.content || '');
+      const currentObjectives = parseObjectives(currentObjectivesHtml);
       const currentFlags = (current.flags && current.flags['simple-quest']) || {};
       const currentCheckboxes: Record<string, 0 | 1> = { ...(currentFlags.checkboxes || {}) };
       const currentSecret: Record<string, boolean> = { ...(currentFlags.secret || {}) };
@@ -257,6 +359,8 @@ export class SimpleQuestTools {
       let newSecret = { ...currentSecret };
       let newCompleted = currentFlags.completed === true;
       let newName: string | undefined;
+      let newHeaderHtml: string = currentHeaderHtml;
+      let headerExplicitlyChanged = false;
 
       switch (req.operation) {
         case 'set-objectives': {
@@ -270,6 +374,15 @@ export class SimpleQuestTools {
             newSecret[k] = secretSet.has(o);
           }
           newCompleted = false;
+          // Optional: also set/replace the header in the same call.
+          if (req.headerImageUrl) {
+            newHeaderHtml = buildHeaderTable({
+              imageUrl: req.headerImageUrl,
+              meta: req.headerMeta ?? [],
+              maskNumber: req.headerMaskNumber ?? 4,
+            });
+            headerExplicitlyChanged = true;
+          }
           break;
         }
         case 'add-objective': {
@@ -317,6 +430,20 @@ export class SimpleQuestTools {
           newName = req.newName!;
           break;
         }
+        case 'set-header': {
+          newHeaderHtml = buildHeaderTable({
+            imageUrl: req.headerImageUrl!,
+            meta: req.headerMeta ?? [],
+            maskNumber: req.headerMaskNumber ?? 4,
+          });
+          headerExplicitlyChanged = true;
+          break;
+        }
+        case 'clear-header': {
+          newHeaderHtml = '';
+          headerExplicitlyChanged = true;
+          break;
+        }
       }
 
       // Build the merged flags update. SimpleQuest's completedSubquests is
@@ -360,15 +487,30 @@ export class SimpleQuestTools {
         },
       };
 
-      // Build the bridge call. Content only changes when objectives change.
-      const objectivesChanged = req.operation !== 'rename';
+      // Build the bridge call. Content gets rewritten when objectives OR the
+      // header change. Header is preserved byte-for-byte on objective-only
+      // operations (we don't round-trip through buildHeaderTable), so a DM
+      // who hand-edited their header HTML keeps it.
+      const objectivesAffected =
+        req.operation === 'set-objectives' ||
+        req.operation === 'add-objective' ||
+        req.operation === 'remove-objective' ||
+        req.operation === 'check-objective' ||
+        req.operation === 'uncheck-objective' ||
+        req.operation === 'mark-complete' ||
+        req.operation === 'mark-incomplete';
+      const contentNeedsRewrite = objectivesAffected || headerExplicitlyChanged;
+
       const updatePayload: any = {
         journalId: match.journalId,
         pageId: match.pageId,
         flags: flagsPatch,
       };
-      if (objectivesChanged) {
-        updatePayload.content = objectivesToHtml(newObjectives);
+      if (contentNeedsRewrite) {
+        const newObjectivesHtml = objectivesAffected
+          ? objectivesToHtml(newObjectives)
+          : currentObjectivesHtml;
+        updatePayload.content = composeQuestContent(newHeaderHtml, newObjectivesHtml);
       }
       if (newName !== undefined) {
         updatePayload.pageName = newName;
@@ -389,6 +531,8 @@ export class SimpleQuestTools {
         objectives: newObjectives,
         checkboxes: newCheckboxes,
         completed: newCompleted,
+        headerPresent: Boolean(newHeaderHtml),
+        headerChanged: headerExplicitlyChanged,
       };
     } catch (error) {
       this.errorHandler.handleToolError(error, 'update-simple-quest', 'simple-quest update');
