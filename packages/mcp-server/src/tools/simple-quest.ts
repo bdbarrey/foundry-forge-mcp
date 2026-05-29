@@ -273,7 +273,9 @@ export class SimpleQuestTools {
               description:
                 'For set-header (and optionally set-objectives): array of {label, value} pairs ' +
                 'rendered as "<strong>Label:</strong> Value" in the right cell of the header. ' +
-                'Common labels: Region, Government, Religion, Quest Giver, Reward.',
+                'Use LOCATION / AUTHORITY context that orients players to the place and its ' +
+                'overarching laws — typically Region + Government (+ Religion where relevant). ' +
+                'Do NOT use quest-mechanic labels like "Quest Giver" or "Reward".',
             },
             headerMaskNumber: {
               type: 'number',
