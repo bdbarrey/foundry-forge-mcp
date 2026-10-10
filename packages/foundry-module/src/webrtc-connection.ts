@@ -1,5 +1,10 @@
 import { MODULE_ID, CONNECTION_STATES } from './constants.js';
 
+// Send-side flow control: pause once this much is queued in the data channel,
+// resume when it drains below the low-water mark.
+const BUFFER_HIGH_WATER = 1024 * 1024;
+const BUFFER_LOW_WATER = 256 * 1024;
+
 export interface WebRTCConfig {
   serverHost: string;
   serverPort: number;
@@ -19,10 +24,18 @@ export class WebRTCConnection {
   private dataChannel: RTCDataChannel | null = null;
   private connectionState: string = CONNECTION_STATES.DISCONNECTED;
   private messageHandler: ((message: any) => Promise<void>) | null = null;
+  private disconnectHandler: (() => void) | null = null;
+  // Serialises sends so chunks of one message are never interleaved with
+  // backpressure waits from another.
+  private sendQueue: Promise<void> = Promise.resolve();
 
   constructor(private config: WebRTCConfig) {}
 
-  async connect(onMessage: (message: any) => Promise<void>): Promise<void> {
+  /**
+   * @param onDisconnect fired once when an established connection drops
+   *   (data channel closed, ICE/peer failure) so the caller can reconnect.
+   */
+  async connect(onMessage: (message: any) => Promise<void>, onDisconnect?: () => void): Promise<void> {
     if (this.connectionState === CONNECTION_STATES.CONNECTED ||
         this.connectionState === CONNECTION_STATES.CONNECTING) {
       return;
@@ -30,6 +43,7 @@ export class WebRTCConnection {
 
     this.connectionState = CONNECTION_STATES.CONNECTING;
     this.messageHandler = onMessage;
+    this.disconnectHandler = onDisconnect ?? null;
     this.log('Starting WebRTC connection...');
 
     try {
@@ -38,11 +52,13 @@ export class WebRTCConnection {
         iceServers: this.config.stunServers.map(url => ({ urls: url }))
       });
 
-      // Step 2: Create data channel
+      // Step 2: Create data channel. Fully reliable (no maxRetransmits):
+      // a partially reliable channel silently drops chunks of large
+      // responses once the server falls behind.
       this.dataChannel = this.peerConnection.createDataChannel('foundry-mcp', {
-        ordered: true,
-        maxRetransmits: 10
+        ordered: true
       });
+      this.dataChannel.bufferedAmountLowThreshold = BUFFER_LOW_WATER;
 
       this.setupDataChannelHandlers();
       this.setupPeerConnectionHandlers();
@@ -76,7 +92,7 @@ export class WebRTCConnection {
 
     this.dataChannel.onclose = () => {
       this.log('WebRTC data channel closed');
-      this.connectionState = CONNECTION_STATES.DISCONNECTED;
+      this.handleDrop();
     };
 
     this.dataChannel.onerror = (error) => {
@@ -102,15 +118,30 @@ export class WebRTCConnection {
       const state = this.peerConnection?.iceConnectionState;
       this.log(`ICE connection state: ${state}`);
 
-      if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-        this.connectionState = CONNECTION_STATES.DISCONNECTED;
+      // 'disconnected' can recover on its own; only treat hard failures as a drop.
+      if (state === 'failed' || state === 'closed') {
+        this.handleDrop();
       }
     };
 
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection?.connectionState;
       this.log(`Peer connection state: ${state}`);
+      if (state === 'failed' || state === 'closed') {
+        this.handleDrop();
+      }
     };
+  }
+
+  /** Tear down after an unexpected drop and notify the owner exactly once. */
+  private handleDrop(): void {
+    const wasUp = this.connectionState !== CONNECTION_STATES.DISCONNECTED;
+    this.connectionState = CONNECTION_STATES.DISCONNECTED;
+    if (!wasUp) return;
+    const notify = this.disconnectHandler;
+    this.disconnectHandler = null;
+    try { this.peerConnection?.close(); } catch {}
+    notify?.();
   }
 
   private async waitForIceGathering(): Promise<void> {
@@ -180,6 +211,8 @@ export class WebRTCConnection {
   }
 
   disconnect(): void {
+    // Deliberate disconnect: don't trigger the reconnect callback.
+    this.disconnectHandler = null;
     if (this.dataChannel) {
       this.dataChannel.close();
       this.dataChannel = null;
@@ -194,7 +227,37 @@ export class WebRTCConnection {
     this.log('WebRTC connection closed');
   }
 
-  sendMessage(message: any): void {
+  /**
+   * Queue a message for sending. Resolves once every frame is handed to the
+   * data channel; rejects if the channel closes first.
+   */
+  sendMessage(message: any): Promise<void> {
+    const job = this.sendQueue.then(() => this.sendNow(message));
+    this.sendQueue = job.catch(() => {}); // a failed send must not block later ones
+    return job;
+  }
+
+  /** Wait until the channel's send buffer has drained below the low-water mark. */
+  private async waitForBuffer(): Promise<void> {
+    const dc = this.dataChannel;
+    if (!dc || dc.bufferedAmount <= BUFFER_HIGH_WATER) return;
+    await new Promise<void>((resolve, reject) => {
+      const done = () => {
+        dc.removeEventListener('bufferedamountlow', done);
+        dc.removeEventListener('close', closed);
+        resolve();
+      };
+      const closed = () => {
+        dc.removeEventListener('bufferedamountlow', done);
+        dc.removeEventListener('close', closed);
+        reject(new Error('Data channel closed while sending'));
+      };
+      dc.addEventListener('bufferedamountlow', done);
+      dc.addEventListener('close', closed);
+    });
+  }
+
+  private async sendNow(message: any): Promise<void> {
     if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
       this.log('Cannot send message - data channel not open');
       return;
@@ -241,6 +304,10 @@ export class WebRTCConnection {
             );
           }
 
+          await this.waitForBuffer();
+          if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+            throw new Error(`Data channel closed after ${i}/${totalChunks} chunks`);
+          }
           this.dataChannel.send(chunkJson);
           this.log(`Sent chunk ${i + 1}/${totalChunks} (${chunkJson.length} bytes)`);
         }
@@ -248,6 +315,7 @@ export class WebRTCConnection {
         this.log(`Successfully sent all ${totalChunks} chunks for ${message.type}`);
       } else {
         // Send as single message
+        await this.waitForBuffer();
         this.dataChannel.send(json);
         this.log(`Sent WebRTC message: ${message.type} (${size} bytes)`);
       }

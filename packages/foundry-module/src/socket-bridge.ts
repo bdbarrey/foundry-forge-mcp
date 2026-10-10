@@ -87,7 +87,13 @@ export class SocketBridge {
     this.webrtc = new WebRTCConnection(webrtcConfig);
 
     try {
-      await this.webrtc.connect(this.handleMessage.bind(this));
+      await this.webrtc.connect(this.handleMessage.bind(this), () => {
+        // Established link dropped (e.g. the MCP backend restarted): reconnect.
+        this.log('WebRTC link dropped - reconnecting');
+        this.webrtc = null;
+        this.connectionState = CONNECTION_STATES.DISCONNECTED;
+        this.scheduleReconnect();
+      });
       this.connectionState = CONNECTION_STATES.CONNECTED;
       this.reconnectAttempts = 0;
       this.log('Connected via WebRTC');
@@ -468,9 +474,11 @@ export class SocketBridge {
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      this.log(`Max reconnection attempts reached (${this.maxReconnectAttempts})`);
-      return;
+    // Never give up: the MCP server comes and goes with the Claude app, and a
+    // GM shouldn't have to reload Foundry to pick it back up. After the
+    // configured fast attempts, keep polling at the 30s backoff cap.
+    if (this.reconnectAttempts === this.maxReconnectAttempts) {
+      this.log(`MCP server still unavailable after ${this.maxReconnectAttempts} attempts; retrying every 30s`);
     }
 
     if (this.reconnectTimer) {
@@ -480,7 +488,9 @@ export class SocketBridge {
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000); // Exponential backoff, max 30s
     this.reconnectAttempts++;
 
-    this.log(`Scheduling reconnection attempt ${this.reconnectAttempts} in ${delay}ms`);
+    if (this.reconnectAttempts <= this.maxReconnectAttempts) {
+      this.log(`Scheduling reconnection attempt ${this.reconnectAttempts} in ${delay}ms`);
+    }
     this.connectionState = CONNECTION_STATES.RECONNECTING;
 
     this.reconnectTimer = setTimeout(async () => {
@@ -500,7 +510,9 @@ export class SocketBridge {
 
     try {
       if (this.activeConnectionType === 'webrtc' && this.webrtc) {
-        this.webrtc.sendMessage(message);
+        this.webrtc.sendMessage(message).catch((error) => {
+          this.log(`Failed to send message: ${error}`);
+        });
       } else if (this.activeConnectionType === 'websocket' && this.ws) {
         this.ws.send(JSON.stringify(message));
       } else {

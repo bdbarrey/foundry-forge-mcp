@@ -64,6 +64,8 @@ const CONTROL_HOST = process.env.FOUNDRY_MCP_BACKEND_BIND || '127.0.0.1';
 
 const CONTROL_PORT = parseInt(process.env.FOUNDRY_MCP_BACKEND_PORT || '31414', 10);
 
+const IDLE_SHUTDOWN_MS = parseInt(process.env.FOUNDRY_MCP_BACKEND_IDLE_MS || String(5 * 60 * 1000), 10);
+
 const LOCK_FILE = path.join(os.tmpdir(), 'foundry-mcp-backend.lock');
 
 function getBundledPythonPath(): string {
@@ -157,6 +159,17 @@ function acquireLock(): boolean {
           const lockData = fs.readFileSync(LOCK_FILE, 'utf8');
 
           const lockPid = parseInt(lockData.trim(), 10);
+
+          // An empty lock means another backend created it and hasn't written
+          // its PID yet (simultaneous startup). Only treat it as stale once
+          // it is old enough that its creator clearly died mid-acquire.
+          if (Number.isNaN(lockPid)) {
+
+            const ageMs = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+
+            if (ageMs < 10000) return false;
+
+          }
 
           try {
 
@@ -1429,9 +1442,57 @@ async function startBackend(): Promise<void> {
 
   // Control channel (TCP JSON-lines)
 
+  // The backend is shared by every wrapper (Claude Desktop, Claude Code, other
+  // devices) and wrappers no longer kill it on exit. Instead it shuts itself
+  // down once no wrapper has been connected for IDLE_SHUTDOWN_MS, so a wrapper
+  // restarting mid-session never drops the Foundry module's WebRTC link.
+  let controlClients = 0;
+
+  let idleTimer: NodeJS.Timeout | null = null;
+
+  const armIdleShutdown = () => {
+
+    if (idleTimer) clearTimeout(idleTimer);
+
+    idleTimer = setTimeout(() => {
+
+      logger.info('No wrapper connected; shutting down idle backend', { idleMs: IDLE_SHUTDOWN_MS });
+
+      foundryClient.disconnect();
+
+      releaseLock();
+
+      process.exit(0);
+
+    }, IDLE_SHUTDOWN_MS);
+
+  };
+
+  armIdleShutdown();
+
   const server = net.createServer((socket) => {
 
     socket.setEncoding('utf8');
+
+    controlClients++;
+
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+
+    // Without this, a client resetting the connection (ECONNRESET) is an
+    // unhandled 'error' event and crashes the whole backend.
+    socket.on('error', (err) => {
+
+      logger.warn('Control channel client error', { error: err.message });
+
+    });
+
+    socket.on('close', () => {
+
+      controlClients = Math.max(0, controlClients - 1);
+
+      if (controlClients === 0) armIdleShutdown();
+
+    });
 
     let buffer = '';
 
@@ -1918,17 +1979,16 @@ async function startBackend(): Promise<void> {
 }
 
 // Check lock BEFORE any async operations
-// If another instance is running, wait forever silently (don't exit)
-// This prevents Claude Desktop from seeing a "server closed" error
 const hasLock = acquireLock();
 
 (async function main() {
 
   if (!hasLock) {
-    // Another backend is running - wait forever without doing anything
-    // This keeps the process alive so Claude doesn't see an error
-    await new Promise(() => {}); // Never resolves
-    return;
+    // Another backend already owns the lock. Exit quietly; the wrapper that
+    // spawned us keeps retrying and connects to the running backend. (An
+    // unresolved promise does not keep Node alive, so the old "wait forever"
+    // exited with code 0 anyway, which used to make the wrapper exit too.)
+    process.exit(0);
   }
 
   process.on('exit', releaseLock);

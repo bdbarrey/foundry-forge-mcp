@@ -52,6 +52,11 @@ export class ComfyUIClient {
   private clientId: string;
   private logStream?: fss.WriteStream | undefined;
   private ws?: WebSocket;
+  // Reconnect backoff for the progress WebSocket. ComfyUI is often not running
+  // (desktop GPU offline), so retry slowly and only log the first failure.
+  private wsRetryDelayMs = 5000;
+  private wsDownLogged = false;
+  private wsShuttingDown = false;
   private progressCallbacks: Map<string, (progress: { currentStep: number; totalSteps: number }) => void> = new Map();
 
   constructor(options: { logger: Logger; config?: Partial<ComfyUIConfig> }) {
@@ -94,6 +99,8 @@ export class ComfyUIClient {
 
       this.ws.on('open', () => {
         this.logger.info('ComfyUI WebSocket connected', { clientId: this.clientId });
+        this.wsRetryDelayMs = 5000;
+        this.wsDownLogged = false;
       });
 
       this.ws.on('message', (data: WebSocket.Data) => {
@@ -106,12 +113,17 @@ export class ComfyUIClient {
       });
 
       this.ws.on('error', (error) => {
-        this.logger.warn('ComfyUI WebSocket error', { error: error.message });
+        if (!this.wsDownLogged) {
+          this.logger.warn('ComfyUI WebSocket unavailable; retrying quietly with backoff', { error: error.message });
+          this.wsDownLogged = true;
+        }
       });
 
       this.ws.on('close', () => {
-        this.logger.info('ComfyUI WebSocket closed, reconnecting in 5s...');
-        setTimeout(() => this.connectWebSocket(), 5000);
+        if (this.wsShuttingDown) return;
+        const delay = this.wsRetryDelayMs;
+        this.wsRetryDelayMs = Math.min(this.wsRetryDelayMs * 2, 5 * 60 * 1000);
+        setTimeout(() => this.connectWebSocket(), delay).unref();
       });
     } catch (error) {
       this.logger.error('Failed to connect WebSocket', { error });
@@ -640,6 +652,8 @@ export class ComfyUIClient {
   }
 
   async shutdown(): Promise<void> {
+    this.wsShuttingDown = true;
+    this.ws?.close();
     if (this.process && !this.process.killed) {
       await this.stopService();
     }

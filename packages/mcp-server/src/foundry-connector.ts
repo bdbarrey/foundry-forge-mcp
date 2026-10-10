@@ -51,8 +51,9 @@ export class FoundryConnector {
       res.end();
     });
 
-    // Create SEPARATE HTTP server for WebRTC signaling (port 31416)
-    const WEBRTC_PORT = 31416;
+    // Create SEPARATE HTTP server for WebRTC signaling (port 31416). The
+    // Foundry module always signals to 31416; the override is for tests.
+    const WEBRTC_PORT = parseInt(process.env.FOUNDRY_WEBRTC_PORT || '31416', 10);
     this.webrtcSignalingServer = createServer(async (req, res) => {
       // Set CORS headers for all requests
       res.setHeader('Access-Control-Allow-Origin', '*');

@@ -10,7 +10,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 
 import { config } from './config.js';
 
-import { spawn, ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 
 import * as net from 'net';
 
@@ -54,7 +54,7 @@ class BackendClient {
 
   private logFile = path.join(os.tmpdir(), 'foundry-mcp-server', 'wrapper.log');
 
-  private backendProcess: ChildProcess | null = null;
+  private backendLogFile = path.join(os.tmpdir(), 'foundry-mcp-server', 'backend-stdio.log');
 
 
 
@@ -226,61 +226,34 @@ class BackendClient {
 
       this.log('startBackend(): spawning', { path: backendPath });
 
+      // The backend is shared by every wrapper, so it runs detached and outlives
+      // the wrapper that happened to start it; it shuts itself down once idle.
+      // Its output goes to a file because a pipe would break when we exit.
+      let out: number | 'ignore' = 'ignore';
+
+      try { out = fs.openSync(this.backendLogFile, 'a'); } catch {}
+
       const child = spawn(process.execPath, [backendPath!], {
 
-        detached: false,  // Stay attached to monitor backend
+        detached: true,
 
-        stdio: ['ignore', 'pipe', 'pipe']  // Capture stdout+stderr for diagnostics
+        windowsHide: true,
 
-      });
-
-
-
-      // Store reference for cleanup
-
-      this.backendProcess = child;
-
-
-
-      // Forward child stdout+stderr into wrapper log so crashes are diagnosable
-
-      child.stdout?.on('data', (buf: Buffer) => {
-
-        try { this.log('backend stdout', { out: buf.toString().slice(0, 2048) }); } catch {}
+        stdio: ['ignore', out, out]
 
       });
 
-      child.stderr?.on('data', (buf: Buffer) => {
-
-        try { this.log('backend stderr', { err: buf.toString().slice(0, 2048) }); } catch {}
-
-      });
-
-
-
-      // Monitor backend exit - if it exits cleanly (code 0), this wrapper should also exit
+      if (typeof out === 'number') { try { fs.closeSync(out); } catch {} }
 
       child.on('exit', (code) => {
 
-        this.backendProcess = null;  // Clear reference when backend exits
-
-        if (code === 0) {
-
-          this.log('startBackend(): backend exited cleanly (likely lock failure), exiting wrapper');
-
-          process.exit(0);  // Exit wrapper when backend fails to acquire lock
-
-        } else if (code !== null) {
-
-          this.log('startBackend(): backend exited unexpectedly', { exitCode: code });
-
-        }
+        // Code 0 right after spawn means another backend already holds the
+        // lock; connectWithRetry() keeps going and connects to that one.
+        this.log('startBackend(): spawned backend exited', { exitCode: code });
 
       });
 
-
-
-      // Don't unref since we want to monitor the process
+      child.unref();
 
       resolve();
 
@@ -393,25 +366,9 @@ class BackendClient {
 
   cleanup() {
 
-    this.log('cleanup(): shutting down backend');
-
-    if (this.backendProcess && !this.backendProcess.killed) {
-
-      try {
-
-        // Kill backend process - works cross-platform
-
-        this.backendProcess.kill();
-
-        this.log('cleanup(): backend process killed');
-
-      } catch (e) {
-
-        this.log('cleanup(): error killing backend', { error: (e as any)?.message });
-
-      }
-
-    }
+    // Only drop our own connection. Other wrappers may be using the backend;
+    // it shuts itself down after it has had no wrappers for a while.
+    this.log('cleanup(): disconnecting from backend');
 
     if (this.socket && !this.socket.destroyed) {
 
