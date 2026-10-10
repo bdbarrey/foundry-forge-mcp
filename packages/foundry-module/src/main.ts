@@ -17,6 +17,7 @@ class FoundryMCPBridge {
   private socketBridge: SocketBridge | null = null;
   private isInitialized = false;
   private heartbeatInterval: number | null = null;
+  private keepAliveTimer: number | null = null;
   private lastActivity: Date = new Date();
   private isConnecting = false;
 
@@ -107,6 +108,7 @@ class FoundryMCPBridge {
 
       if (enabled) {
         await this.start();
+        this.startKeepAlive();
       }
 
       // Auto-build enhanced creature index if enabled and not exists
@@ -122,6 +124,18 @@ class FoundryMCPBridge {
     } catch (error) {
       console.error(`[${MODULE_ID}] Failed during ready:`, error);
     }
+  }
+
+  /**
+   * The Forge sends a client with no mouse/keyboard input for an hour back to
+   * its launch page and idles the world. The bridge client never gets real
+   * input, so nudge it every 10 minutes to keep the MCP connection alive.
+   */
+  private startKeepAlive(): void {
+    if (this.keepAliveTimer) return;
+    this.keepAliveTimer = window.setInterval(() => {
+      document.body.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 1, clientY: 1 }));
+    }, 10 * 60 * 1000);
   }
 
   /**
