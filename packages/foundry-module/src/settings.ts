@@ -194,6 +194,16 @@ export class ModuleSettings {
       onChange: this.onEnabledChange.bind(this),
     });
 
+    game.settings.register(this.moduleId, 'bridgeUser', {
+      name: 'MCP Bridge User',
+      hint: 'Name (or ID) of the one GM/Assistant GM user whose browser connects to the MCP server, e.g. a dedicated "Claude" user kept logged in on an always-on machine. Leave empty to let any GM connect.',
+      scope: 'world',
+      config: true,
+      type: String,
+      default: '',
+      requiresReload: true,
+    });
+
     game.settings.register(this.moduleId, 'connectionType', {
       name: 'Connection Type',
       hint: 'Auto: Smart selection (HTTPS→WebRTC, HTTP→WebSocket). WebRTC: Encrypted P2P (works over internet). WebSocket: Traditional (localhost only).',

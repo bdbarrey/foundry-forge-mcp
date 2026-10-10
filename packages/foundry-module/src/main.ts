@@ -35,6 +35,18 @@ class FoundryMCPBridge {
   }
 
   /**
+   * Whether this client should own the MCP connection. Only one browser can
+   * hold it, so when a bridge user is configured, every other GM client
+   * stays disconnected. An empty setting keeps the old any-GM behaviour.
+   */
+  private isBridgeUser(): boolean {
+    if (!this.isGMUser()) return false;
+    const wanted = String(this.settings.getSetting('bridgeUser') ?? '').trim().toLowerCase();
+    if (!wanted) return true;
+    return game.user?.name?.trim().toLowerCase() === wanted || game.user?.id?.toLowerCase() === wanted;
+  }
+
+  /**
    * Initialize the module during Foundry's init hook
    */
   async initialize(): Promise<void> {
@@ -85,9 +97,14 @@ class FoundryMCPBridge {
         ui.notifications.warn(`MCP Bridge settings validation failed: ${validation.errors.join(', ')}`);
       }
 
-      // Auto-connect when enabled (always automatic)
-      const enabled = this.settings.getSetting('enabled');
-      
+      // Auto-connect when enabled, but only from the designated bridge user
+      const bridgeUser = this.isBridgeUser();
+      const enabled = this.settings.getSetting('enabled') && bridgeUser;
+
+      if (!bridgeUser) {
+        console.log(`[${MODULE_ID}] MCP bridge is assigned to "${this.settings.getSetting('bridgeUser')}"; not connecting from this client`);
+      }
+
       if (enabled) {
         await this.start();
       }
@@ -156,6 +173,11 @@ class FoundryMCPBridge {
     // SECURITY: Double-check GM access (safety measure)
     if (!this.isGMUser()) {
       console.warn(`[${MODULE_ID}] Attempted to start bridge without GM access`);
+      return;
+    }
+
+    if (!this.isBridgeUser()) {
+      console.log(`[${MODULE_ID}] Not the configured MCP bridge user; bridge not started`);
       return;
     }
 
