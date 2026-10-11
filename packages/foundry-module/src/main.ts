@@ -127,15 +127,20 @@ class FoundryMCPBridge {
   }
 
   /**
-   * The Forge sends a client with no mouse/keyboard input for an hour back to
-   * its launch page and idles the world. The bridge client never gets real
-   * input, so nudge it every 10 minutes to keep the MCP connection alive.
+   * The Forge sends a client with no mouse/keyboard input back to its launch
+   * page and idles the world (after 1 hour when it is the only user). Its
+   * tracker (forgevtt-module.js) samples every 15s whether the mouse position
+   * changed, and counts a minute as active only if at least half the samples
+   * saw movement. So move the pointer to a new position every 10s; a fixed
+   * position or a sparse interval never registers.
    */
   private startKeepAlive(): void {
     if (this.keepAliveTimer) return;
+    let tick = 0;
     this.keepAliveTimer = window.setInterval(() => {
-      document.body.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 1, clientY: 1 }));
-    }, 10 * 60 * 1000);
+      const pos = 1 + (++tick % 2);
+      document.body.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: pos, clientY: pos }));
+    }, 10 * 1000);
   }
 
   /**
