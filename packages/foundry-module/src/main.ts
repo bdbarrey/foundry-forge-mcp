@@ -107,8 +107,8 @@ class FoundryMCPBridge {
       }
 
       if (enabled) {
-        await this.start();
         this.startKeepAlive();
+        await this.start();
       }
 
       // Auto-build enhanced creature index if enabled and not exists
@@ -230,6 +230,7 @@ class FoundryMCPBridge {
       
       // Start heartbeat monitoring if enabled
       this.startHeartbeat();
+      this.startKeepAlive();
       
       // Show connection notification based on user preference
       if (this.settings.getSetting('enableNotifications')) {
