@@ -39,6 +39,14 @@ export interface StatblockFeature {
   parsed: ParsedAction;
 }
 
+export interface AcVariant {
+  value: number;
+  /** Parenthetical, e.g. "natural armor". */
+  note: string | null;
+  /** Trailing condition, e.g. "in wolf or hybrid form". Null for a single AC. */
+  condition: string | null;
+}
+
 export interface ReloadedStatblock {
   /** Raw <h2> text, e.g. "Zombie, Plague Spreader". */
   name: string;
@@ -51,9 +59,16 @@ export interface ReloadedStatblock {
   /** Alignment trailing the creature type ("Neutral Evil", "LE", etc.). Empty string if absent. */
   alignment: string;
 
+  /**
+   * AC to build/audit against. For multi-form statblocks ("11 in humanoid form,
+   * 12 (natural armor) in wolf or hybrid form") this is the combat-form variant
+   * (see parseAc), not simply the first number.
+   */
   ac: number;
   /** Parenthetical on AC if any, e.g. "natural armor". */
   acNote: string | null;
+  /** Every AC listed, in source order. Length > 1 for multi-form creatures. */
+  acVariants: AcVariant[];
 
   hp: {
     avg: number;
@@ -138,7 +153,7 @@ export function parseReloadedStatblock(markdown: string): ReloadedStatblock {
 
   // Armor Class
   const acRaw = requireField(labeledFields, 'Armor Class', name);
-  const { value: ac, note: acNote } = parseAc(acRaw);
+  const { value: ac, note: acNote, variants: acVariants } = parseAc(acRaw);
 
   // Hit Points
   const hpRaw = requireField(labeledFields, 'Hit Points', name);
@@ -185,6 +200,7 @@ export function parseReloadedStatblock(markdown: string): ReloadedStatblock {
     alignment,
     ac,
     acNote,
+    acVariants,
     hp,
     speedText,
     speed,
@@ -326,10 +342,37 @@ function requireField(fields: Map<string, string>, label: string, name: string):
   return v;
 }
 
-function parseAc(raw: string): { value: number; note: string | null } {
-  const m = raw.match(/^(\d+)\s*(?:\(([^)]+)\))?\s*$/);
-  if (!m) return { value: parseInt(raw, 10) || 0, note: null };
-  return { value: parseInt(m[1], 10), note: m[2]?.trim() ?? null };
+/**
+ * Parse "15 (natural armor)" or a multi-form AC such as
+ * "11 in humanoid form, 12 (natural armor) in wolf or hybrid form".
+ *
+ * Multi-form creatures fight in their transformed shape (Reloaded werewolves
+ * shift to hybrid on round 1), so the chosen `value` is the hybrid-form
+ * variant, else the first non-humanoid form, else the last variant. The old
+ * behaviour (parseInt on the whole string) silently took the first number,
+ * i.e. the humanoid-form AC.
+ */
+function parseAc(raw: string): { value: number; note: string | null; variants: AcVariant[] } {
+  const variants: AcVariant[] = [];
+  for (const chunk of raw.split(/,\s*(?=\d)/).map(s => s.trim()).filter(Boolean)) {
+    const m = chunk.match(/^(\d+)\s*(?:\(([^)]+)\))?\s*(.*)$/);
+    if (!m) continue;
+    variants.push({
+      value: parseInt(m[1], 10),
+      note: m[2]?.trim() ?? null,
+      condition: m[3]?.trim() || null,
+    });
+  }
+  if (variants.length === 0) {
+    const value = parseInt(raw, 10) || 0;
+    return { value, note: null, variants: [{ value, note: null, condition: null }] };
+  }
+  const combat = variants.length > 1
+    ? variants.find(v => v.condition && /\bhybrid\b/i.test(v.condition))
+      ?? variants.find(v => v.condition && !/\bhumanoid\b/i.test(v.condition))
+      ?? variants[variants.length - 1]
+    : variants[0];
+  return { value: combat.value, note: combat.note, variants };
 }
 
 function parseHp(raw: string): { avg: number; formula: string | null } {

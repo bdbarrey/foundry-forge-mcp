@@ -330,12 +330,26 @@ function compareCoreNumerics(
   const acFlat = numOrNull(attrs.ac?.flat);
   const acValue = numOrNull(attrs.ac?.value);
   const acMatch = acFlat === sb.ac || acValue === sb.ac;
+  // Multi-form statblocks list one AC per form. sb.ac is the combat-form AC; an
+  // actor sitting on another form's AC (e.g. a werewolf left at humanoid AC 11
+  // instead of hybrid AC 12) is still a critical divergence, so say which form
+  // it matched instead of reporting a bare number mismatch.
+  const variants = sb.acVariants ?? [];
+  const multiForm = variants.length > 1;
+  const describe = (v: { value: number; note: string | null; condition: string | null }) =>
+    `${v.value}${v.note ? ` (${v.note})` : ''}${v.condition ? ` ${v.condition}` : ''}`;
+  const otherForm = !acMatch && multiForm
+    ? variants.find(v => v.value === acFlat || v.value === acValue)
+    : undefined;
   out.push({
     field: 'ac',
-    reloaded: sb.ac,
+    reloaded: multiForm ? { combat: sb.ac, variants: variants.map(describe) } : sb.ac,
     foundry: { flat: acFlat, value: acValue },
     status: acMatch ? 'match' : 'divergence',
     severity: 'critical',
+    ...(otherForm
+      ? { note: `actor uses the "${describe(otherForm)}" AC; the combat-form AC is ${sb.ac}` }
+      : multiForm ? { note: `multi-form AC; audited against the combat form (${sb.ac})` } : {}),
   });
 
   // Speed per mode — medium. Movement units default to ft.

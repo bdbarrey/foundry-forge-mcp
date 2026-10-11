@@ -200,6 +200,50 @@ describe('parseReloadedStatblock — Strahd, the Mage', () => {
   });
 });
 
+describe('parseReloadedStatblock — multi-form AC (Werewolf)', () => {
+  const werewolf = `<div class="statblock">
+<h2>Werewolf</h2>
+<em>Medium Humanoid (Human, Shapechanger), Chaotic Evil</em>
+<hr>
+<strong>Armor Class</strong> 11 in humanoid form, 12 (natural armor) in wolf or hybrid form
+<br>
+<strong>Hit Points</strong> 84 (13d8 + 26)
+<br>
+<strong>Speed</strong> 30 ft. (40 ft. in wolf form)
+<hr>
+<table class="ability-table"><tbody><tr>
+<td data-label="STR">16 (+3)</td><td data-label="DEX">13 (+1)</td><td data-label="CON">14 (+2)</td>
+<td data-label="INT">10 (+0)</td><td data-label="WIS">11 (+0)</td><td data-label="CHA">10 (+0)</td>
+</tr></tbody></table>
+<hr>
+<strong>Challenge</strong> 3<br>
+</div>`;
+
+  it('uses the hybrid-form AC, not the first number', () => {
+    const result = parseReloadedStatblock(werewolf);
+    expect(result.ac).toBe(12);
+    expect(result.acNote).toBe('natural armor');
+  });
+
+  it('keeps every AC variant with its condition', () => {
+    const result = parseReloadedStatblock(werewolf);
+    expect(result.acVariants).toEqual([
+      { value: 11, note: null, condition: 'in humanoid form' },
+      { value: 12, note: 'natural armor', condition: 'in wolf or hybrid form' },
+    ]);
+  });
+
+  it('single AC still yields one variant with no condition', () => {
+    const single = werewolf.replace(
+      '11 in humanoid form, 12 (natural armor) in wolf or hybrid form',
+      '15 (natural armor)',
+    );
+    const result = parseReloadedStatblock(single);
+    expect(result.ac).toBe(15);
+    expect(result.acVariants).toEqual([{ value: 15, note: 'natural armor', condition: null }]);
+  });
+});
+
 describe('parseReloadedStatblock — error paths', () => {
   it('throws when no statblock div is present', () => {
     expect(() => parseReloadedStatblock('<p>just a paragraph</p>')).toThrowError(/No <div class="statblock">/);

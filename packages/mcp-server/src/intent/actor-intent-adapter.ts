@@ -186,6 +186,7 @@ export function actorIntentToReloadedStatblock(intent: ActorIntent): ReloadedSta
 
     ac: intent.ac?.value ?? 10,
     acNote: intent.ac?.note ?? null,
+    acVariants: [{ value: intent.ac?.value ?? 10, note: intent.ac?.note ?? null, condition: null }],
 
     hp: {
       avg: intent.hp?.max ?? 1,
