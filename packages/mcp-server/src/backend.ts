@@ -234,7 +234,13 @@ function releaseLock(): void {
 
     if (lockFd !== null) { try { fs.closeSync(lockFd); } catch {} lockFd = null; }
 
-    if (fs.existsSync(LOCK_FILE)) { try { fs.unlinkSync(LOCK_FILE); } catch {} }
+    // Only remove the lock if it still names us, so a backend that lost a
+    // startup race can't delete the lock the running backend holds.
+    if (fs.existsSync(LOCK_FILE)) {
+
+      try { if (fs.readFileSync(LOCK_FILE, 'utf8').trim() === String(process.pid)) fs.unlinkSync(LOCK_FILE); } catch {}
+
+    }
 
   } catch (error) {
 
@@ -1408,14 +1414,6 @@ async function startBackend(): Promise<void> {
 
   ];
 
-  // Start Foundry connector (owns app port 31415)
-
-  foundryClient.connect().catch((e) => {
-
-    logger.error('Foundry connector failed to start', e);
-
-  });
-
   const autoStartComfyUI = async () => {
 
     try {
@@ -1967,6 +1965,34 @@ async function startBackend(): Promise<void> {
     server.on('error', reject);
 
   });
+
+  // Holding the control port is the real singleton check. The lock file can
+  // name the wrong PID after two backends race to clear a stale lock, so
+  // rewrite it now that we know we are the backend.
+  try { fs.writeFileSync(LOCK_FILE, String(process.pid)); } catch {}
+
+  // Start Foundry connector (owns app ports 31415/31416) only after the control
+  // port is ours, so a backend that lost the startup race exits above without
+  // touching the module's ports. If it still can't bind, exit: staying up
+  // without it looks healthy to wrappers but the module can never connect,
+  // whereas exiting lets the next wrapper call spawn a fresh backend.
+  try {
+
+    await foundryClient.connect();
+
+  } catch (e: any) {
+
+    logger.error('Foundry connector failed to start; exiting so a wrapper respawns the backend', { error: e?.message || String(e) });
+
+    console.error('Foundry connector failed to start, exiting:', e?.message || e);
+
+    foundryClient.disconnect();
+
+    releaseLock();
+
+    process.exit(1);
+
+  }
 
   void autoStartComfyUI();
 
